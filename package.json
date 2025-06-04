@@ -12,10 +12,10 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.36",
-		"@types/node": "^22.10.5",
+		"@types/node": "^22.15.29",
 		"typescript": "^5.5.2",
 		"vitest": "^3.1.4",
-		"wrangler": "^4.6.0"
+		"wrangler": "^4.19.1"
 	},
 	"dependencies": {
 		"geolib": "^3.3.4"
