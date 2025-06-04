@@ -23,6 +23,8 @@ binding = "DB"
 database_name = "bars-db"  # Change this for local testing
 database_id = "0ff8c3d3-bec8-4b1f-8003-691ae35ca396"  # Change this for local testing
 
+#TODO: Add back BARS_STORAGE
+
 [[durable_objects.bindings]]
 name = "BARS"
 class_name = "BARS"
