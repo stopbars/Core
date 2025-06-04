@@ -1,0 +1,32 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "bars-core"
+main = "src/index.ts"
+compatibility_date = "2024-12-18"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[placement]
+mode = "smart"
+
+[vars]
+VATSIM_CLIENT_ID = "1562" # Change this for local testing
+
+# For local testing, update the following database configuration:
+# 1. Create your own D1 database in Cloudflare Dashboard
+# 2. Replace 'database_name' with your dev database name (e.g., "bars-dev")  
+# 3. Replace 'database_id' with your D1 database ID from the dashboard
+# 4. Also update the database name in package.json scripts (update-db-local, update-db)
+[[d1_databases]]
+binding = "DB"
+database_name = "bars-db"  # Change this for local testing
+database_id = "0ff8c3d3-bec8-4b1f-8003-691ae35ca396"  # Change this for local testing
+
+[[durable_objects.bindings]]
+name = "BARS"
+class_name = "BARS"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BARS"]
