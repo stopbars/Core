@@ -99,8 +99,11 @@ export function generateEquidistantPoints(
 	let currentSegmentLength = calculateDistance(currentSegmentStart, currentSegmentEnd);
 	let distanceInCurrentSegment = 0;
 
+	// Compute the total path length once before the loop
+	const totalPathLength = calculateTotalPathLength(points);
+
 	// Keep adding points at exact intervals until we reach the end of the line
-	while (totalDistanceTraveled + interval <= calculateTotalPathLength(points)) {
+	while (totalDistanceTraveled + interval <= totalPathLength) {
 		totalDistanceTraveled += interval;
 
 		// Find the segment where the next point should be placed
