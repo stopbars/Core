@@ -3,6 +3,7 @@ name = "bars-core"
 main = "src/index.ts"
 compatibility_date = "2024-12-18"
 compatibility_flags = ["nodejs_compat"]
+account_id = "089721947f7dd0fe58fca4321531d933" # Change this for local testing
 
 [observability]
 enabled = true
