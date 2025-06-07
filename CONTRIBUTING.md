@@ -35,7 +35,7 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
    1. Create your own D1 database in the Cloudflare Dashboard
    2. Edit `wrangler.toml` and update the database configuration (see comments in the file):
       - `account_id`: Your Cloudflare account ID (found in Cloudflare dashboard URL) (eg: dash.cloudflare.com/your-cloudflare-id/home)
-      - `VATSIM_CLIENT_ID`: Your Your VATSIM Connect application client ID
+      - `VATSIM_CLIENT_ID`: Your VATSIM Connect application client ID
       - `database_name`: Your D1 database name (e.g., "bars-dev")
       - `database_id`: Your D1 database ID (found in Cloudflare Dashboard > D1)
 
