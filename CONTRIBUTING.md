@@ -38,7 +38,7 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
    The `wrangler.toml` file is already configured and safe to use as-is. For local testing, you'll need to:
 
-   1. Create your own D1 SQL database in the [Cloudflare Dashboard](dash.cloudflare.com) (Storage & Databases > D1 SQL)
+   1. Create your own D1 SQL database in the [Cloudflare Dashboard](https://dash.cloudflare.com) (Storage & Databases > D1 SQL)
 
    <br>
 
