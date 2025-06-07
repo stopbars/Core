@@ -1,6 +1,6 @@
 # Contributing to BARS Core
 
-Thank you for your interest in contributing to BARS Core! This guide will help you get started with contributing to the backend API service.
+Thank you for your interest in contributing to BARS Core! This guide will help you get started with contributing.
 
 ## Getting Started
 
@@ -17,8 +17,10 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
    ```bash
    git clone https://github.com/stopbars/Core.git
-   cd BARS-Core
+
+   cd Core
    ```
+   <br>
 
 2. **Install Dependencies**
 
@@ -26,38 +28,55 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
    npm install
    ```
 
+   <br>
+
 3. **Configure Development Environment**
+
+   <br>
 
    **Set up Cloudflare configuration:**
 
    The `wrangler.toml` file is already configured and safe to use as-is. For local testing, you'll need to:
 
-   1. Create your own D1 database in the Cloudflare Dashboard
+   1. Create your own D1 SQL database in the [Cloudflare Dashboard](dash.cloudflare.com). (Storage & Databases > D1 SQL)
+
+   <br>
+
    2. Edit `wrangler.toml` and update the database configuration (see comments in the file):
-      - `account_id`: Your Cloudflare account ID (found in Cloudflare dashboard URL) (eg: dash.cloudflare.com/your-cloudflare-id/home)
+      - `account_id`: Your Cloudflare account ID (found in dash.cloudflare.com/your-id/home)
       - `VATSIM_CLIENT_ID`: Your VATSIM Connect application client ID
       - `database_name`: Your D1 database name (e.g., "bars-dev")
-      - `database_id`: Your D1 database ID (found in Cloudflare Dashboard > D1)
+      - `database_id`: Your D1 database ID (found in your database page)
 
-      > **Note**: To get VATSIM Connect credentials for testing, follow the [VATSIM Connect Sandbox Guide](https://vatsim.dev/services/connect/sandbox) to create a development application and obtain your client ID and secret.
+   <br>
 
    3. Update `package.json` scripts to use your database name:
       - Replace `bars-db` with your database name in the `update-db-local` and `update-db` scripts
+      - Example: `"update-db": "wrangler d1 execute bars-dev-example --remote --file schema.sql",`
 
+   <br>
+
+   > [!IMPORTANT]  
    > **Important**: Do not commit changes to `wrangler.toml` or `package.json` database configuration. These are for local development only and should remain as local modifications.
 
-   **Set up environment variables:**
+   <br>
+
+   **Setup environment variables:**
+
+   <br>
 
    ```bash
    copy .dev.vars.example .dev.vars
    ```
 
+   <br>
+
    Edit `.dev.vars` and add your API credentials:
 
    - `VATSIM_CLIENT_SECRET`: Your VATSIM Connect application secret
-   - `AIRPORTDB_API_KEY`: Your AirportDB API key (optional for basic testing)
+   - `AIRPORTDB_API_KEY`: Your [AirportDB](https://airportdb.io/) API key (optional for basic testing)
 
-   > **Note**: To get VATSIM Connect credentials for testing, follow the [VATSIM Connect Sandbox Guide](https://vatsim.dev/services/connect/sandbox) to create a development application and obtain your client ID and secret.
+   <br>
 
 4. **Start Development Server**
    ```bash
