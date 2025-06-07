@@ -38,7 +38,7 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
    The `wrangler.toml` file is already configured and safe to use as-is. For local testing, you'll need to:
 
-   1. Create your own D1 SQL database in the [Cloudflare Dashboard](dash.cloudflare.com). (Storage & Databases > D1 SQL)
+   1. Create your own D1 SQL database in the [Cloudflare Dashboard](dash.cloudflare.com) (Storage & Databases > D1 SQL)
 
    <br>
 
@@ -191,9 +191,9 @@ For features requiring VATSIM authentication, you'll need:
 
 ## Getting Help
 
-- **Discord**: [Join the BARS Discord server](https://discord.gg/7EhmtwKWzs) for real-time help
+- **Discord**: Join the BARS [Discord](https://stopbars.com/discord) server for real-time help
 - **GitHub Issues**: [Create an issue](https://github.com/stopbars/Core/issues/new) for bugs or feature requests
-- **Code Review**: Ask for review on complex changes
+- **Code Review**: Ask for reviews on complex changes
 
 ## Recognition
 
