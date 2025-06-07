@@ -34,8 +34,13 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
    1. Create your own D1 database in the Cloudflare Dashboard
    2. Edit `wrangler.toml` and update the database configuration (see comments in the file):
+      - `account_id`: Your Cloudflare account ID (found in Cloudflare dashboard URL) (eg: dash.cloudflare.com/your-cloudflare-id/home)
+      - `VATSIM_CLIENT_ID`: Your VATSIM Connect application client ID
       - `database_name`: Your D1 database name (e.g., "bars-dev")
       - `database_id`: Your D1 database ID (found in Cloudflare Dashboard > D1)
+
+      > **Note**: To get VATSIM Connect credentials for testing, follow the [VATSIM Connect Sandbox Guide](https://vatsim.dev/services/connect/sandbox) to create a development application and obtain your client ID and secret.
+
    3. Update `package.json` scripts to use your database name:
       - Replace `bars-db` with your database name in the `update-db-local` and `update-db` scripts
 
@@ -51,11 +56,6 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
    - `VATSIM_CLIENT_SECRET`: Your VATSIM Connect application secret
    - `AIRPORTDB_API_KEY`: Your AirportDB API key (optional for basic testing)
-
-   **Configure VATSIM Client ID:**
-
-   Edit `wrangler.toml` and update the VATSIM client ID in the `[vars]` section:
-   - `VATSIM_CLIENT_ID`: Replace the default value with your VATSIM Connect application ID
 
    > **Note**: To get VATSIM Connect credentials for testing, follow the [VATSIM Connect Sandbox Guide](https://vatsim.dev/services/connect/sandbox) to create a development application and obtain your client ID and secret.
 
