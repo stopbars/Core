@@ -1,4 +1,4 @@
-name: Deploy BARS Cloudflare Worker
+name: Deploy Core
 
 on:
   push:
