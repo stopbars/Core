@@ -1389,9 +1389,107 @@ export default {
 						);
 					}
 				}
+			} if (url.pathname === '/health') {
+				if (request.method !== 'GET') {
+					return new Response('Method Not Allowed', { status: 405, headers: corsHeaders });
+				}
+
+				const requestedService = url.searchParams.get('service');
+				const validServices = ['database', 'storage', 'vatsim', 'auth', 'stats'];
+
+				if (requestedService && !validServices.includes(requestedService)) {
+					return new Response(
+						JSON.stringify({
+							error: 'Invalid service',
+							validServices: validServices,
+						}),
+						{
+							status: 400,
+							headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+						},
+					);
+				}
+
+				const healthChecks: Record<string, string> = {};
+				const servicesToCheck = requestedService ? [requestedService] : validServices;
+
+				for (const service of servicesToCheck) {
+					healthChecks[service] = 'ok';
+				}
+
+				try {
+					if (servicesToCheck.includes('database')) {
+						try {
+							await env.DB.prepare('SELECT 1').first();
+						} catch (error) {
+							healthChecks.database = 'outage';
+						}
+					}
+
+					if (servicesToCheck.includes('storage')) {
+						try {
+							const storage = new StorageService(env.BARS_STORAGE);
+							await storage.listFiles(undefined, 1);
+						} catch (error) {
+							healthChecks.storage = 'outage';
+						}
+					}
+
+					if (servicesToCheck.includes('vatsim')) {
+						try {
+							const vatsim = new VatsimService(env.VATSIM_CLIENT_ID, env.VATSIM_CLIENT_SECRET);
+							const response = await fetch('https://auth.vatsim.net/api/user', {
+								method: 'GET',
+								headers: {
+									'Accept': 'application/json',
+									'User-Agent': 'BARS-Health-Check/1.0'
+								},
+								signal: AbortSignal.timeout(5000)
+							});
+
+							if (!response.ok && response.status !== 401) {
+								throw new Error(`VATSIM API returned ${response.status}`);
+							}
+						} catch (error) {
+							console.error('VATSIM health check failed:', error);
+							healthChecks.vatsim = 'outage';
+						}
+					}
+
+					if (servicesToCheck.includes('auth')) {
+						try {
+							const vatsim = new VatsimService(env.VATSIM_CLIENT_ID, env.VATSIM_CLIENT_SECRET);
+							const stats = new StatsService(env.DB);
+							const auth = new AuthService(env.DB, vatsim, stats);
+							// Auth service depends on database, so if DB is down, this might fail too :P
+						} catch (error) {
+							healthChecks.auth = 'outage';
+						}
+					}
+
+
+					if (servicesToCheck.includes('stats')) {
+						try {
+							const stats = new StatsService(env.DB);
+							await stats.getPublicStats();
+						} catch (error) {
+							healthChecks.stats = 'outage';
+						}
+					}
+
+				} catch (error) {
+					console.error('Health check error:', error);
+				}
+
+				const hasOutages = Object.values(healthChecks).some(status => status === 'outage');
+				const statusCode = hasOutages ? 503 : 200;
+
+				return new Response(JSON.stringify(healthChecks), {
+					status: statusCode,
+					headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+				});
 			}
 
-			// Original catch-all 404 response
 			return new Response('Not Found', { status: 404 });
 		} catch (error) {
 			console.error(error);
