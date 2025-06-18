@@ -4,7 +4,7 @@ export class VatsimService {
 	constructor(
 		private clientId: string,
 		private clientSecret: string,
-	) {}
+	) { }
 
 	async getToken(code: string): Promise<AuthResponse> {
 		const res = await fetch('https://auth.vatsim.net/oauth/token', {
@@ -78,12 +78,15 @@ export class VatsimService {
 			return null;
 		}
 	}
-
-	isController(userStatus: { type: string } | null | undefined): boolean {
-		return userStatus?.type === 'atc';
+	isController(userStatus: { type: string; callsign: string } | null | undefined): boolean {
+		return userStatus?.type === 'atc' && !this.isObserver(userStatus);
 	}
 
 	isPilot(userStatus: { type: string } | null | undefined): boolean {
 		return userStatus?.type === 'pilot';
+	}
+
+	isObserver(userStatus: { type: string; callsign: string } | null | undefined): boolean {
+		return userStatus?.type === 'atc' && userStatus?.callsign?.includes('_OBS');
 	}
 }
