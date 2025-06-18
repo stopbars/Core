@@ -1,4 +1,4 @@
-import { Env, ClientType, Packet, AirportState, AirportObject, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, Point } from '../types';
+import { ClientType, Packet, AirportState, AirportObject, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, Point } from '../types';
 import { AuthService } from '../services/auth';
 import { VatsimService } from '../services/vatsim';
 import { StatsService } from '../services/stats';
@@ -54,6 +54,7 @@ export class Connection {
 	>();
 
 	private airportStates = new Map<string, AirportState>();
+	private airportSharedStates = new Map<string, Record<string, any>>(); // New shared state storage
 	private readonly TWO_MINUTES = 120000; // Add constant at class level
 	private objectId: string; // Store the DO's ID
 
@@ -67,7 +68,6 @@ export class Connection {
 		this.objectId = state.id.toString();
 		this.loadPersistedState();
 	}
-
 	private async loadPersistedState() {
 		const persisted = await this.state.storage.get('airport_states');
 		if (persisted) {
@@ -96,8 +96,13 @@ export class Connection {
 				}),
 			);
 		}
-	}
 
+		// Load shared states
+		const sharedStates = await this.state.storage.get('airport_shared_states');
+		if (sharedStates) {
+			this.airportSharedStates = new Map(Object.entries(sharedStates));
+		}
+	}
 	private async persistState() {
 		const serialized = Object.fromEntries(
 			Array.from(this.airportStates.entries()).map(([airport, state]) => [
@@ -122,6 +127,10 @@ export class Connection {
 		);
 
 		await this.state.storage.put('airport_states', serialized);
+
+		// Persist shared states
+		const sharedStatesSerialized = Object.fromEntries(this.airportSharedStates.entries());
+		await this.state.storage.put('airport_shared_states', sharedStatesSerialized);
 	}
 
 	private async broadcast(packet: Packet, sender?: WebSocket) {
@@ -278,12 +287,14 @@ export class Connection {
 						clearInterval(interval);
 						return;
 					}
-
 					// If user is still connected but role changed, handle that case
 					const isController = this.vatsim.isController(status);
 					const isPilot = this.vatsim.isPilot(status);
+					const isObserver = this.vatsim.isObserver(status);
 
-					if ((socketInfo.type === 'controller' && !isController) || (socketInfo.type === 'pilot' && !isPilot)) {
+					if ((socketInfo.type === 'controller' && !isController) ||
+						(socketInfo.type === 'pilot' && !isPilot) ||
+						(socketInfo.type === 'observer' && !isObserver)) {
 						console.log(`User ${socketInfo.controllerId} role changed on VATSIM, closing connection`);
 						socket.send(
 							JSON.stringify({
@@ -329,7 +340,6 @@ export class Connection {
 			console.error('WebSocket error:', error);
 		});
 	}
-
 	private clearStaleState(airport: string) {
 		const state = this.airportStates.get(airport);
 		if (!state) return;
@@ -341,6 +351,10 @@ export class Connection {
 			// Clear objects but keep the airport state structure
 			state.objects.clear();
 			state.lastUpdate = now;
+
+			// Also clear shared state when no controllers are present for 2 minutes
+			this.airportSharedStates.set(airport, {});
+
 			this.persistState();
 		}
 	}
@@ -392,9 +406,12 @@ export class Connection {
 		if (!status) {
 			return new Response('User not connected to VATSIM', { status: 403 });
 		}
-
 		// Auto-determine client type based on VATSIM status
-		const clientType = this.vatsim.isController(status) ? 'controller' : 'pilot';
+		const clientType = this.vatsim.isController(status)
+			? 'controller'
+			: this.vatsim.isObserver(status)
+				? 'observer'
+				: 'pilot';
 
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
@@ -455,7 +472,6 @@ export class Connection {
 			stateObjects = await this.getOfflineStateFromPoints(airport);
 			isOffline = true;
 		}
-
 		const initialState: Packet = {
 			type: 'INITIAL_STATE',
 			airport,
@@ -463,6 +479,7 @@ export class Connection {
 				objects: stateObjects,
 				connectionType: clientType,
 				offline: isOffline,
+				sharedState: this.getSharedStateSnapshot(airport), // Add shared state to initial state
 			},
 			timestamp: now,
 		};
@@ -493,13 +510,22 @@ export class Connection {
 								timestamp: now,
 							}),
 						);
-						break;
-					case 'STATE_UPDATE':
+						break; case 'STATE_UPDATE':
 						if (clientType === 'pilot') {
 							server.send(
 								JSON.stringify({
 									type: 'ERROR',
 									data: { message: 'Pilots cannot send state updates' },
+									timestamp: Date.now(),
+								}),
+							);
+							return;
+						}
+						if (clientType === 'observer') {
+							server.send(
+								JSON.stringify({
+									type: 'ERROR',
+									data: { message: 'Observers cannot send state updates' },
 									timestamp: Date.now(),
 								}),
 							);
@@ -524,6 +550,21 @@ export class Connection {
 						this.sockets.delete(server);
 						await this.trackDisconnection();
 						server.close(1000, 'Client requested disconnection');
+						break;
+
+					case 'SHARED_STATE_UPDATE':
+						// Handle shared state updates
+						if (clientType === 'pilot' || clientType === 'observer') {
+							server.send(
+								JSON.stringify({
+									type: 'ERROR',
+									data: { message: 'Only controllers can send shared state updates' },
+									timestamp: Date.now(),
+								}),
+							);
+							return;
+						}
+						this.handleSharedStateUpdate(packet, user.vatsim_id);
 						break;
 
 					default:
@@ -593,19 +634,19 @@ export class Connection {
 			await stmt.bind(this.objectId).run();
 		}
 	}
-
 	private getObjectName(): string {
-		// Create a descriptive name with format: airport/controllerCount/pilotCount
+		// Create a descriptive name with format: airport/controllerCount/pilotCount/observerCount
 		const airport = Array.from(this.sockets.values())[0]?.airport || 'unknown';
 		const counts = Array.from(this.sockets.values()).reduce(
 			(acc, client) => {
 				if (client.type === 'controller') acc.controllers++;
 				else if (client.type === 'pilot') acc.pilots++;
+				else if (client.type === 'observer') acc.observers++;
 				return acc;
 			},
-			{ controllers: 0, pilots: 0 },
+			{ controllers: 0, pilots: 0, observers: 0 },
 		);
-		return `${airport}/${counts.controllers}/${counts.pilots}`;
+		return `${airport}/${counts.controllers}/${counts.pilots}/${counts.observers}`;
 	}
 
 	private async updateObjectStatus() {
@@ -715,5 +756,70 @@ export class Connection {
 			return this.handleWebSocket(request);
 		}
 		return new Response('Expected WebSocket', { status: 400 });
+	}
+
+	private getOrCreateSharedState(airport: string): Record<string, any> {
+		let sharedState = this.airportSharedStates.get(airport);
+		if (!sharedState) {
+			sharedState = {}; // Initialize as empty object as per requirements
+			this.airportSharedStates.set(airport, sharedState);
+		}
+		return sharedState;
+	}
+
+	private handleSharedStateUpdate(packet: Packet, controllerId: string) {
+		if (!packet.airport || !packet.data?.sharedStatePatch) return;
+
+		const airport = packet.airport;
+		const patch = packet.data.sharedStatePatch;
+
+		// Get current shared state
+		const currentState = this.getOrCreateSharedState(airport);
+
+		// Apply recursive merge
+		const updatedState = recursivelyMergeObjects(currentState, patch);
+
+		// Update the stored state
+		this.airportSharedStates.set(airport, updatedState);
+
+		// Persist to storage
+		this.persistState();
+
+		// Broadcast to all clients (including sender)
+		this.broadcastSharedState(airport, patch, controllerId);
+
+		return updatedState;
+	}
+
+	private async broadcastSharedState(airport: string, patch: Record<string, any>, controllerId: string) {
+		const packet: Packet = {
+			type: 'SHARED_STATE_UPDATE',
+			airport: airport,
+			data: {
+				sharedStatePatch: patch,
+				controllerId: controllerId
+			},
+			timestamp: Date.now(),
+		};
+
+		// Broadcast to ALL clients connected to this airport (including the sender)
+		const promises: Promise<void>[] = [];
+
+		this.sockets.forEach((client, socket) => {
+			if (socket.readyState === WebSocket.OPEN && client.airport === airport) {
+				promises.push(
+					new Promise((resolve) => {
+						socket.send(JSON.stringify(packet));
+						resolve();
+					}),
+				);
+			}
+		});
+
+		await Promise.all(promises);
+	}
+
+	private getSharedStateSnapshot(airport: string): Record<string, any> {
+		return this.getOrCreateSharedState(airport);
 	}
 }

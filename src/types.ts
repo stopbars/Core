@@ -52,7 +52,7 @@ export interface StaffRecord {
 
 export type LightType = 'STOPBAR' | 'LEADON';
 export type MessageType = LightType;
-export type ClientType = 'controller' | 'pilot';
+export type ClientType = 'controller' | 'pilot' | 'observer';
 
 export interface LightState {
 	barsId: string;
@@ -98,15 +98,17 @@ export interface Packet {
 	| 'INITIAL_STATE'
 	| 'CONTROLLER_CONNECT'
 	| 'CONTROLLER_DISCONNECT'
+	| 'SHARED_STATE_UPDATE'
 	| 'ERROR'
 	| 'HEARTBEAT'
 	| 'HEARTBEAT_ACK'
 	| 'CLOSE';
-	airport?: string;
-	data?: {
+	airport?: string; data?: {
 		objectId?: string;
 		state?: boolean;
 		patch?: Record<string, any>; // New field for patch-based updates
+		sharedStatePatch?: Record<string, any>; // New field for shared state patches
+		sharedState?: Record<string, any>; // Full shared state (for initial state)
 		objects?: AirportObject[];
 		controllerId?: string;
 		message?: string; // For error messages
