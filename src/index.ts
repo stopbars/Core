@@ -1389,7 +1389,7 @@ export default {
 						);
 					}
 				}
-			} if (url.pathname === '/health') {
+			} else if (url.pathname === '/health') {
 				if (request.method !== 'GET') {
 					return new Response('Method Not Allowed', { status: 405, headers: corsHeaders });
 				}
