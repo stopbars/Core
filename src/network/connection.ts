@@ -809,8 +809,13 @@ export class Connection {
 			if (socket.readyState === WebSocket.OPEN && client.airport === airport) {
 				promises.push(
 					new Promise((resolve) => {
-						socket.send(JSON.stringify(packet));
-						resolve();
+						try {
+							socket.send(JSON.stringify(packet));
+						} catch (error) {
+							console.error(`Failed to send packet over WebSocket: ${error.message}`);
+						} finally {
+							resolve();
+						}
 					}),
 				);
 			}
