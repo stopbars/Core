@@ -1,4 +1,3 @@
-import { D1Database } from '@cloudflare/workers-types';
 import { RoleService, StaffRole } from './roles';
 import { AirportService } from './airport';
 import { StatsService } from './stats';

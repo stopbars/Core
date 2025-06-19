@@ -1,4 +1,3 @@
-import { D1Database } from '@cloudflare/workers-types';
 import { StatsService } from './stats';
 import { AirportService } from './airport';
 import { processBarsPolygon, deduplicateTaxiwayPoints } from './bars/handlers';
