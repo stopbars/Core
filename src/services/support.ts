@@ -1,4 +1,3 @@
-import { D1Database } from '@cloudflare/workers-types';
 import { StatsService } from './stats';
 import { AirportService } from './airport';
 
@@ -140,7 +139,7 @@ export class SupportService {
 				public lat: number,
 				public lon: number,
 				public used: boolean = false,
-			) {}
+			) { }
 		}
 
 		const bounds = getBounds();
