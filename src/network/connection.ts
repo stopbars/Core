@@ -166,12 +166,14 @@ export class Connection {
 		}
 		return state;
 	}
+	private handleStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
+		if (!packet.data?.objectId || (packet.data.patch === undefined && packet.data.state === undefined)) return;
 
-	private handleStateUpdate(packet: Packet, controllerId: string) {
-		if (!packet.airport || !packet.data?.objectId || (packet.data.patch === undefined && packet.data.state === undefined)) return;
+		// Use packet airport if provided, otherwise fall back to connection airport
+		const airport = packet.airport || connectionAirport;
 
 		const now = Date.now();
-		const state = this.getOrCreateAirportState(packet.airport);
+		const state = this.getOrCreateAirportState(airport);
 		const objectId = packet.data.objectId;
 
 		// Get existing object or create a new one
@@ -510,7 +512,8 @@ export class Connection {
 								timestamp: now,
 							}),
 						);
-						break; case 'STATE_UPDATE':
+						break;
+					case 'STATE_UPDATE':
 						if (clientType === 'pilot') {
 							server.send(
 								JSON.stringify({
@@ -531,11 +534,10 @@ export class Connection {
 							);
 							return;
 						}
-						const timestamp = await this.handleStateUpdate(packet, user.vatsim_id);
-						// Add timestamp to packet before broadcasting
-						// We forward the exact same packet (state or patch) to all clients to maintain consistency
+						const timestamp = await this.handleStateUpdate(packet, user.vatsim_id, socketInfo.airport);
 						const broadcastPacket = {
 							...packet,
+							airport: packet.airport || socketInfo.airport,
 							timestamp,
 						};
 						await this.broadcast(broadcastPacket, server);
@@ -564,7 +566,7 @@ export class Connection {
 							);
 							return;
 						}
-						this.handleSharedStateUpdate(packet, user.vatsim_id);
+						this.handleSharedStateUpdate(packet, user.vatsim_id, socketInfo.airport);
 						break;
 
 					default:
@@ -766,11 +768,11 @@ export class Connection {
 		}
 		return sharedState;
 	}
+	private handleSharedStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
+		if (!packet.data?.sharedStatePatch) return;
 
-	private handleSharedStateUpdate(packet: Packet, controllerId: string) {
-		if (!packet.airport || !packet.data?.sharedStatePatch) return;
 
-		const airport = packet.airport;
+		const airport = packet.airport || connectionAirport;
 		const patch = packet.data.sharedStatePatch;
 
 		// Get current shared state
@@ -812,7 +814,7 @@ export class Connection {
 						try {
 							socket.send(JSON.stringify(packet));
 						} catch (error) {
-							console.error(`Failed to send packet over WebSocket: ${error.message}`);
+							console.error(`Failed to send packet over WebSocket: ${error instanceof Error ? error.message : String(error)}`);
 						} finally {
 							resolve();
 						}
