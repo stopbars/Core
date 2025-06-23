@@ -19,6 +19,7 @@
 		"wrangler": "^4.19.1"
 	},
 	"dependencies": {
-		"geolib": "^3.3.4"
+		"geolib": "^3.3.4",
+		"hono": "^4.8.2"
 	}
 }
