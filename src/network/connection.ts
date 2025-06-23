@@ -6,22 +6,45 @@ import { PointsService } from '../services/points';
 import { IDService } from '../services/id';
 import { DivisionService } from '../services/divisions';
 
-// Add recursive merge utility function
-function recursivelyMergeObjects(target: any, source: any): any {
+// Add recursive merge utility function with safety checks
+function recursivelyMergeObjects(target: any, source: any, depth = 0): any {
+	// Prevent infinite recursion and overly deep nesting
+	const MAX_DEPTH = 20;
+	if (depth > MAX_DEPTH) {
+		throw new Error('Maximum recursion depth exceeded in merge operation');
+	}
+
 	if (source === null || typeof source !== 'object') {
 		return source; // Return the source value if it's a primitive
 	}
 
 	// Handle arrays - replace the entire array
 	if (Array.isArray(source)) {
+		// Limit array size to prevent memory issues
+		const MAX_ARRAY_SIZE = 1000;
+		if (source.length > MAX_ARRAY_SIZE) {
+			throw new Error(`Array size exceeds maximum allowed size of ${MAX_ARRAY_SIZE}`);
+		}
 		return [...source];
 	}
 
 	// Handle objects - merge properties
 	const result = { ...target };
 
+	// Limit number of properties to prevent memory issues
+	const MAX_PROPERTIES = 100;
+	const sourceKeys = Object.keys(source);
+	if (sourceKeys.length > MAX_PROPERTIES) {
+		throw new Error(`Object has too many properties (${sourceKeys.length} > ${MAX_PROPERTIES})`);
+	}
+
 	for (const key in source) {
 		if (Object.prototype.hasOwnProperty.call(source, key)) {
+			// Validate key is safe
+			if (typeof key !== 'string' || key.length > 100) {
+				throw new Error('Invalid property key');
+			}
+
 			if (
 				typeof source[key] === 'object' &&
 				source[key] !== null &&
@@ -31,7 +54,7 @@ function recursivelyMergeObjects(target: any, source: any): any {
 				result[key] !== null
 			) {
 				// Recursively merge nested objects
-				result[key] = recursivelyMergeObjects(result[key], source[key]);
+				result[key] = recursivelyMergeObjects(result[key], source[key], depth + 1);
 			} else {
 				// For primitives, arrays, or non-existent target properties, just replace
 				result[key] = source[key];
@@ -104,47 +127,84 @@ export class Connection {
 		}
 	}
 	private async persistState() {
-		const serialized = Object.fromEntries(
-			Array.from(this.airportStates.entries()).map(([airport, state]) => [
-				airport,
-				{
-					airport: state.airport,
-					objects: Object.fromEntries(
-						Array.from(state.objects.entries()).map(([id, obj]) => [
-							id,
-							{
-								id: obj.id,
-								state: obj.state,
-								controllerId: obj.controllerId,
-								timestamp: obj.timestamp,
-							},
-						]),
-					),
-					lastUpdate: state.lastUpdate,
-					controllers: Array.from(state.controllers),
-				},
-			]),
-		);
+		try {
+			const serialized = Object.fromEntries(
+				Array.from(this.airportStates.entries()).map(([airport, state]) => [
+					airport,
+					{
+						airport: state.airport,
+						objects: Object.fromEntries(
+							Array.from(state.objects.entries()).map(([id, obj]) => [
+								id,
+								{
+									id: obj.id,
+									state: obj.state,
+									controllerId: obj.controllerId,
+									timestamp: obj.timestamp,
+								},
+							]),
+						),
+						lastUpdate: state.lastUpdate,
+						controllers: Array.from(state.controllers),
+					},
+				]),
+			);
 
-		await this.state.storage.put('airport_states', serialized);
+			// Validate serialized data before persisting
+			const serializedString = JSON.stringify(serialized);
+			const MAX_STATE_SIZE = 1000000; // 1MB limit
+			if (serializedString.length > MAX_STATE_SIZE) {
+				console.warn(`State size (${serializedString.length}) exceeds maximum (${MAX_STATE_SIZE}), skipping persistence`);
+				return;
+			}
 
-		// Persist shared states
-		const sharedStatesSerialized = Object.fromEntries(this.airportSharedStates.entries());
-		await this.state.storage.put('airport_shared_states', sharedStatesSerialized);
+			await this.state.storage.put('airport_states', serialized);
+
+			// Persist shared states with validation
+			const sharedStatesSerialized = Object.fromEntries(this.airportSharedStates.entries());
+			const sharedStatesString = JSON.stringify(sharedStatesSerialized);
+			if (sharedStatesString.length > MAX_STATE_SIZE) {
+				console.warn(`Shared state size (${sharedStatesString.length}) exceeds maximum (${MAX_STATE_SIZE}), skipping persistence`);
+				return;
+			}
+
+			await this.state.storage.put('airport_shared_states', sharedStatesSerialized);
+		} catch (error) {
+			console.error('Failed to persist state:', error);
+			// Don't throw here to avoid breaking the calling flow
+		}
 	}
 
 	private async broadcast(packet: Packet, sender?: WebSocket) {
 		const airport = packet.airport;
-		if (!airport) return;
+		if (!airport) {
+			console.warn('Attempted to broadcast packet without airport identifier');
+			return;
+		}
+
+		// Validate packet before broadcasting
+		try {
+			JSON.stringify(packet);
+		} catch (error) {
+			console.error('Failed to serialize packet for broadcast:', error);
+			return;
+		}
 
 		const promises: Promise<void>[] = [];
+		const packetString = JSON.stringify(packet);
 
 		this.sockets.forEach((client, socket) => {
 			if (socket !== sender && socket.readyState === WebSocket.OPEN && client.airport === airport) {
 				promises.push(
 					new Promise((resolve) => {
-						socket.send(JSON.stringify(packet));
-						resolve();
+						try {
+							socket.send(packetString);
+						} catch (error) {
+							console.error(`Failed to send packet to client ${client.controllerId}:`, error);
+							// Don't disconnect the client for send failures, just log the error
+						} finally {
+							resolve();
+						}
 					}),
 				);
 			}
@@ -167,46 +227,86 @@ export class Connection {
 		return state;
 	}
 	private handleStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
-		if (!packet.data?.objectId || (packet.data.patch === undefined && packet.data.state === undefined)) return;
+		try {
+			// Validate required fields
+			if (!packet?.data || typeof packet.data !== 'object') {
+				throw new Error('Invalid packet data structure');
+			}
 
-		// Use packet airport if provided, otherwise fall back to connection airport
-		const airport = packet.airport || connectionAirport;
+			if (!packet.data.objectId || typeof packet.data.objectId !== 'string') {
+				throw new Error('Missing or invalid objectId');
+			}
 
-		const now = Date.now();
-		const state = this.getOrCreateAirportState(airport);
-		const objectId = packet.data.objectId;
+			if (packet.data.patch === undefined && packet.data.state === undefined) {
+				throw new Error('Missing both patch and state data');
+			}
 
-		// Get existing object or create a new one
-		const existingObject = state.objects.get(objectId) || {
-			id: objectId,
-			state: {}, // Initialize with empty object for patching
-			controllerId: controllerId,
-			timestamp: now,
-		};
+			// Validate airport parameter
+			const airport = packet.airport || connectionAirport;
+			if (!airport || typeof airport !== 'string' || airport.length === 0) {
+				throw new Error('Invalid airport identifier');
+			}
 
-		let newState;
+			// Validate objectId format (should be alphanumeric with possible hyphens/underscores)
+			const objectIdRegex = /^[a-zA-Z0-9_-]+$/;
+			if (!objectIdRegex.test(packet.data.objectId)) {
+				throw new Error('Invalid objectId format');
+			}
 
-		// Handle both legacy 'state' updates and new 'patch' updates
-		if (packet.data.patch !== undefined) {
-			// Apply patch using recursive merge
-			newState = recursivelyMergeObjects(typeof existingObject.state === 'object' ? existingObject.state : {}, packet.data.patch);
-		} else {
-			// Legacy direct state update
-			newState = packet.data.state;
+			const now = Date.now();
+			const state = this.getOrCreateAirportState(airport);
+			const objectId = packet.data.objectId;
+
+			// Get existing object or create a new one
+			const existingObject = state.objects.get(objectId) || {
+				id: objectId,
+				state: {}, // Initialize with empty object for patching
+				controllerId: controllerId,
+				timestamp: now,
+			};
+
+			let newState;
+
+			// Handle both legacy 'state' updates and new 'patch' updates
+			if (packet.data.patch !== undefined) {
+				// Validate patch is an object
+				if (packet.data.patch !== null && typeof packet.data.patch !== 'object') {
+					throw new Error('Patch data must be an object or null');
+				}
+
+				// Ensure existing state is an object for merging
+				const baseState = (typeof existingObject.state === 'object' && existingObject.state !== null)
+					? existingObject.state
+					: {};
+
+				// Apply patch using recursive merge with size limit
+				newState = recursivelyMergeObjects(baseState, packet.data.patch);
+			} else {
+				// Legacy direct state update - validate it's serializable
+				try {
+					JSON.stringify(packet.data.state);
+					newState = packet.data.state;
+				} catch (error) {
+					throw new Error('State data is not serializable');
+				}
+			}
+
+			// Update the object with merged state
+			state.objects.set(objectId, {
+				id: objectId,
+				state: newState,
+				controllerId: controllerId,
+				timestamp: now,
+			});
+
+			state.lastUpdate = now;
+
+			this.persistState();
+			return now; // Return timestamp for broadcasting
+		} catch (error) {
+			console.error(`State update error for controller ${controllerId}:`, error);
+			throw error; // Re-throw to be handled by caller
 		}
-
-		// Update the object with merged state
-		state.objects.set(objectId, {
-			id: objectId,
-			state: newState,
-			controllerId: controllerId,
-			timestamp: now,
-		});
-
-		state.lastUpdate = now;
-
-		this.persistState();
-		return now; // Return timestamp for broadcasting
 	}
 
 	private async handleControllerDisconnect(socket: WebSocket) {
@@ -319,12 +419,19 @@ export class Connection {
 				}
 
 				// Send heartbeat with error handling
-				socket.send(
-					JSON.stringify({
-						type: 'HEARTBEAT',
-						// Server will handle timestamp
-					}),
-				);
+				try {
+					socket.send(
+						JSON.stringify({
+							type: 'HEARTBEAT',
+							// Server will handle timestamp
+						}),
+					);
+				} catch (sendError) {
+					console.error(`Failed to send heartbeat to ${socketInfo.controllerId}:`, sendError);
+					socket.close(1011, 'Failed to send heartbeat');
+					clearInterval(interval);
+					return;
+				}
 			} catch (error) {
 				console.error('Error in heartbeat:', error);
 				socket.close(1011, 'Internal error in heartbeat');
@@ -490,10 +597,38 @@ export class Connection {
 
 		server.addEventListener('message', async (event) => {
 			const socketInfo = this.sockets.get(server);
-			if (!socketInfo) return;
+			if (!socketInfo) {
+				console.warn('Received message from unregistered socket');
+				return;
+			}
 
 			try {
-				const packet: Packet = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data));
+				// Parse and validate message data
+				let rawData: string;
+				try {
+					rawData = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
+				} catch (error) {
+					throw new Error('Failed to decode message data');
+				}
+
+				// Validate message size
+				const MAX_MESSAGE_SIZE = 50000; // 50KB limit
+				if (rawData.length > MAX_MESSAGE_SIZE) {
+					throw new Error(`Message size exceeds maximum allowed size of ${MAX_MESSAGE_SIZE} characters`);
+				}
+
+				// Parse JSON with error handling
+				let packet: any;
+				try {
+					packet = JSON.parse(rawData);
+				} catch (error) {
+					throw new Error('Invalid JSON format');
+				}
+
+				// Validate packet structure
+				if (!this.validatePacket(packet)) {
+					throw new Error('Invalid packet structure or type');
+				}
 
 				const now = Date.now();
 				// Update last heartbeat time for any message received
@@ -513,35 +648,27 @@ export class Connection {
 							}),
 						);
 						break;
+
 					case 'STATE_UPDATE':
 						if (clientType === 'pilot') {
-							server.send(
-								JSON.stringify({
-									type: 'ERROR',
-									data: { message: 'Pilots cannot send state updates' },
-									timestamp: Date.now(),
-								}),
-							);
-							return;
+							throw new Error('Pilots cannot send state updates');
 						}
 						if (clientType === 'observer') {
-							server.send(
-								JSON.stringify({
-									type: 'ERROR',
-									data: { message: 'Observers cannot send state updates' },
-									timestamp: Date.now(),
-								}),
-							);
-							return;
+							throw new Error('Observers cannot send state updates');
 						}
-						const timestamp = await this.handleStateUpdate(packet, user.vatsim_id, socketInfo.airport);
-						const broadcastPacket = {
-							...packet,
-							airport: packet.airport || socketInfo.airport,
-							timestamp,
-						};
-						await this.broadcast(broadcastPacket, server);
-						await this.trackMessage(clientType);
+
+						try {
+							const timestamp = this.handleStateUpdate(packet, user.vatsim_id, socketInfo.airport);
+							const broadcastPacket = {
+								...packet,
+								airport: packet.airport || socketInfo.airport,
+								timestamp,
+							};
+							await this.broadcast(broadcastPacket, server);
+							await this.trackMessage(clientType);
+						} catch (updateError) {
+							throw new Error(`State update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+						}
 						break;
 
 					case 'CLOSE':
@@ -557,40 +684,38 @@ export class Connection {
 					case 'SHARED_STATE_UPDATE':
 						// Handle shared state updates
 						if (clientType === 'pilot' || clientType === 'observer') {
-							server.send(
-								JSON.stringify({
-									type: 'ERROR',
-									data: { message: 'Only controllers can send shared state updates' },
-									timestamp: Date.now(),
-								}),
-							);
-							return;
+							throw new Error('Only controllers can send shared state updates');
 						}
-						this.handleSharedStateUpdate(packet, user.vatsim_id, socketInfo.airport);
+
+						try {
+							this.handleSharedStateUpdate(packet, user.vatsim_id, socketInfo.airport);
+						} catch (updateError) {
+							throw new Error(`Shared state update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+						}
 						break;
 
 					default:
-						// Pilots can only send heartbeats and CLOSE
-						if (clientType === 'pilot' && !['HEARTBEAT_ACK', 'CLOSE'].includes(packet.type)) {
-							server.send(
-								JSON.stringify({
-									type: 'ERROR',
-									data: { message: 'Pilots cannot send this type of message' },
-									timestamp: Date.now(),
-								}),
-							);
-						}
+						// Reject unknown packet types
+						throw new Error(`Unknown packet type: ${packet.type}`);
 				}
 			} catch (error) {
-				console.error('Error handling message:', error);
-				// Don't close the connection for parsing errors, just notify the client
-				server.send(
-					JSON.stringify({
-						type: 'ERROR',
-						data: { message: 'Invalid message format' },
-						timestamp: Date.now(),
-					}),
-				);
+				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+				console.error(`Message handling error for ${socketInfo.controllerId}:`, errorMessage);
+
+				// Send error response to client
+				try {
+					server.send(
+						JSON.stringify({
+							type: 'ERROR',
+							data: { message: errorMessage },
+							timestamp: Date.now(),
+						}),
+					);
+				} catch (sendError) {
+					console.error('Failed to send error message to client:', sendError);
+					// If we can't send an error message, close the connection
+					server.close(1011, 'Internal error - unable to communicate');
+				}
 			}
 		});
 
@@ -769,28 +894,55 @@ export class Connection {
 		return sharedState;
 	}
 	private handleSharedStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
-		if (!packet.data?.sharedStatePatch) return;
+		try {
+			// Validate required fields
+			if (!packet?.data || typeof packet.data !== 'object') {
+				throw new Error('Invalid packet data structure');
+			}
 
+			if (!packet.data.sharedStatePatch || typeof packet.data.sharedStatePatch !== 'object') {
+				throw new Error('Missing or invalid sharedStatePatch');
+			}
 
-		const airport = packet.airport || connectionAirport;
-		const patch = packet.data.sharedStatePatch;
+			// Validate airport parameter
+			const airport = packet.airport || connectionAirport;
+			if (!airport || typeof airport !== 'string' || airport.length === 0) {
+				throw new Error('Invalid airport identifier');
+			}
 
-		// Get current shared state
-		const currentState = this.getOrCreateSharedState(airport);
+			const patch = packet.data.sharedStatePatch;
 
-		// Apply recursive merge
-		const updatedState = recursivelyMergeObjects(currentState, patch);
+			// Validate patch structure and size
+			try {
+				const patchString = JSON.stringify(patch);
+				const MAX_PATCH_SIZE = 10240; // 10KB limit
+				if (patchString.length > MAX_PATCH_SIZE) {
+					throw new Error(`Patch size exceeds maximum allowed size of ${MAX_PATCH_SIZE} characters`);
+				}
+			} catch (error) {
+				throw new Error('Patch data is not serializable');
+			}
 
-		// Update the stored state
-		this.airportSharedStates.set(airport, updatedState);
+			// Get current shared state
+			const currentState = this.getOrCreateSharedState(airport);
 
-		// Persist to storage
-		this.persistState();
+			// Apply recursive merge with error handling
+			const updatedState = recursivelyMergeObjects(currentState, patch);
 
-		// Broadcast to all clients (including sender)
-		this.broadcastSharedState(airport, patch, controllerId);
+			// Update the stored state
+			this.airportSharedStates.set(airport, updatedState);
 
-		return updatedState;
+			// Persist to storage
+			this.persistState();
+
+			// Broadcast to all clients (including sender)
+			this.broadcastSharedState(airport, patch, controllerId);
+
+			return updatedState;
+		} catch (error) {
+			console.error(`Shared state update error for controller ${controllerId}:`, error);
+			throw error; // Re-throw to be handled by caller
+		}
 	}
 
 	private async broadcastSharedState(airport: string, patch: Record<string, any>, controllerId: string) {
@@ -828,5 +980,90 @@ export class Connection {
 
 	private getSharedStateSnapshot(airport: string): Record<string, any> {
 		return this.getOrCreateSharedState(airport);
+	}
+
+	private validatePacket(packet: any): packet is Packet {
+		// Basic structure validation
+		if (!packet || typeof packet !== 'object') {
+			return false;
+		}
+
+		// Required type field
+		if (!packet.type || typeof packet.type !== 'string') {
+			return false;
+		}
+
+		// Validate known packet types
+		const validTypes = [
+			'HEARTBEAT',
+			'HEARTBEAT_ACK',
+			'STATE_UPDATE',
+			'CLOSE',
+			'SHARED_STATE_UPDATE',
+			'INITIAL_STATE',
+			'CONTROLLER_CONNECT',
+			'CONTROLLER_DISCONNECT',
+			'ERROR'
+		];
+
+		if (!validTypes.includes(packet.type)) {
+			return false;
+		}
+
+		// Optional airport field validation
+		if (packet.airport !== undefined && (typeof packet.airport !== 'string' || packet.airport.length === 0)) {
+			return false;
+		}
+
+		// Optional timestamp validation
+		if (packet.timestamp !== undefined && (typeof packet.timestamp !== 'number' || packet.timestamp < 0)) {
+			return false;
+		}
+
+		// Type-specific validation
+		switch (packet.type) {
+			case 'STATE_UPDATE':
+				return this.validateStateUpdatePacket(packet);
+			case 'SHARED_STATE_UPDATE':
+				return this.validateSharedStateUpdatePacket(packet);
+			default:
+				return true; // Other types are valid if they pass basic checks
+		}
+	}
+
+	private validateStateUpdatePacket(packet: any): boolean {
+		if (!packet.data || typeof packet.data !== 'object') {
+			return false;
+		}
+
+		// Must have objectId
+		if (!packet.data.objectId || typeof packet.data.objectId !== 'string') {
+			return false;
+		}
+
+		// Must have either patch or state
+		if (packet.data.patch === undefined && packet.data.state === undefined) {
+			return false;
+		}
+
+		return true;
+	}
+
+	private validateSharedStateUpdatePacket(packet: any): boolean {
+		if (!packet.data || typeof packet.data !== 'object') {
+			return false;
+		}
+
+		// Must have sharedStatePatch
+		if (!packet.data.sharedStatePatch || typeof packet.data.sharedStatePatch !== 'object') {
+			return false;
+		}
+
+		return true;
+	}
+
+	private sanitizeInput(input: string): string {
+		// Remove potentially dangerous characters and limit length
+		return input.replace(/[<>'"&]/g, '').substring(0, 1000);
 	}
 }
