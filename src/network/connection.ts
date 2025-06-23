@@ -301,7 +301,7 @@ export class Connection {
 
 			state.lastUpdate = now;
 
-			this.persistState();
+			await this.persistState();
 			return now; // Return timestamp for broadcasting
 		} catch (error) {
 			console.error(`State update error for controller ${controllerId}:`, error);
