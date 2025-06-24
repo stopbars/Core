@@ -226,7 +226,7 @@ export class Connection {
 		}
 		return state;
 	}
-	private handleStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
+	private async handleStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
 		try {
 			// Validate required fields
 			if (!packet?.data || typeof packet.data !== 'object') {
@@ -658,7 +658,7 @@ export class Connection {
 						}
 
 						try {
-							const timestamp = this.handleStateUpdate(packet, user.vatsim_id, socketInfo.airport);
+							const timestamp = await this.handleStateUpdate(packet, user.vatsim_id, socketInfo.airport);
 							const broadcastPacket = {
 								...packet,
 								airport: packet.airport || socketInfo.airport,
