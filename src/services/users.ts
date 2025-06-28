@@ -140,10 +140,11 @@ export class UserService {
 
 			return newApiKey;
 		} catch (error) {
+			console.error('Error refreshing user API token:', error);
 			if (error instanceof Error && error.message === 'User not found') {
 				throw error;
 			}
-			throw new Error('Failed to refresh user API token');
+			throw new Error(`Failed to refresh user API token: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		}
 	}
 }
