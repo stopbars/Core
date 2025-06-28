@@ -876,6 +876,43 @@ staffUsersApp.get('/search', async (c) => {
 	}
 });
 
+// POST /staff/users/refresh-api-token - Refresh a user's API token by VATSIM ID
+staffUsersApp.post('/refresh-api-token', async (c) => {
+	try {
+		const { vatsimId } = await c.req.json() as { vatsimId: string };
+
+		if (!vatsimId) {
+			return c.json({
+				error: 'VATSIM ID is required',
+			}, 400);
+		}
+
+		const user = c.get('user');
+		const userService = c.get('userService');
+
+		await userService.refreshUserApiToken(vatsimId, user.id);
+
+		return c.json({
+			success: true,
+			vatsimId,
+			message: 'API token has been successfully refreshed',
+		});
+	} catch (error) {
+		const message = error instanceof Error ? error.message : 'An unknown error occurred';
+		let status = 500;
+
+		if (error instanceof Error) {
+			if (error.message.includes('Unauthorized')) {
+				status = 403;
+			} else if (error.message.includes('User not found')) {
+				status = 404;
+			}
+		}
+
+		return c.json({ error: message }, status as any);
+	}
+});
+
 // DELETE /staff/users/:id - Delete a user
 staffUsersApp.delete('/:id', async (c) => {
 	try {
