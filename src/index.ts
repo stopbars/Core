@@ -909,7 +909,7 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
 			}
 		}
 
-		return c.json({ error: message }, status as any);
+		return c.json({ error: message }, status);
 	}
 });
 
