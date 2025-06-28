@@ -7,7 +7,7 @@ export class UserService {
 		private db: D1Database,
 		private roles: RoleService,
 		private auth: AuthService,
-	) {}
+	) { }
 
 	// Get all users with pagination
 	async getAllUsers(page: number = 1, limit: number = 10, userId: number): Promise<{ users: UserRecord[]; total: number }> {
@@ -24,7 +24,7 @@ export class UserService {
 				this.db
 					.prepare(
 						`
-            SELECT u.*, 
+            SELECT u.id, u.vatsim_id, u.email, u.created_at, u.last_login,
             CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
             s.role
             FROM users u
@@ -63,7 +63,7 @@ export class UserService {
 			const result = await this.db
 				.prepare(
 					`
-          SELECT u.*, 
+          SELECT u.id, u.vatsim_id, u.email, u.created_at, u.last_login,
           CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
           s.role
           FROM users u
@@ -113,6 +113,38 @@ export class UserService {
 			return true;
 		} catch (error) {
 			throw new Error('Failed to delete user');
+		}
+	}
+
+	// Refresh user's API token by VATSIM ID (lead developers only)
+	async refreshUserApiToken(vatsimId: string, requestingUserId: number): Promise<string> {
+		// Check if user has permission
+		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.LEAD_DEVELOPER);
+		if (!hasPermission) {
+			throw new Error('Unauthorized: Only lead developers can refresh user API tokens');
+		}
+
+		try {
+			// Get the user by VATSIM ID
+			const user = await this.db
+				.prepare('SELECT id FROM users WHERE vatsim_id = ?')
+				.bind(vatsimId)
+				.first<{ id: number }>();
+
+			if (!user) {
+				throw new Error('User not found');
+			}
+
+			// Use the auth service to regenerate the API key
+			const newApiKey = await this.auth.regenerateApiKey(user.id);
+
+			return newApiKey;
+		} catch (error) {
+			console.error('Error refreshing user API token:', error);
+			if (error instanceof Error && error.message === 'User not found') {
+				throw error;
+			}
+			throw new Error(`Failed to refresh user API token: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		}
 	}
 }
