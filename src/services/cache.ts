@@ -69,17 +69,6 @@ export class CacheService {
         const cache = caches.default;
         await cache.delete(cacheKey);
     }
-
-    /**
-     * Clear all cache entries for a namespace
-     * @param namespace - Cache namespace to clear
-     */
-    async clearNamespace(namespace: string): Promise<void> {
-        // Note: Cache API doesn't have a built-in way to clear by prefix
-        // This is a limitation of the Cloudflare Cache API
-        // You would need to track keys separately if you need this functionality
-        console.warn(`clearNamespace for ${namespace} not implemented - Cache API limitation`);
-    }
 }
 
 /**
@@ -154,15 +143,6 @@ export const CacheKeys = {
         const url = new URL(req.url);
         const values = params.map(p => url.searchParams.get(p) || '').join('-');
         return `${url.pathname}-${values}`;
-    },
-
-    /**
-     * Generate cache key for airport-specific data
-     */
-    forAirport: (req: Request): string => {
-        const url = new URL(req.url);
-        const icao = url.searchParams.get('airport') || url.pathname.split('/').pop() || '';
-        return `airport-${icao}`;
     },
 
     /**
