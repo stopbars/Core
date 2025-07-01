@@ -451,26 +451,30 @@ divisionsApp.post('/', async (c) => {
 });
 
 // GET /divisions/user - Get user's divisions
-divisionsApp.get('/user', async (c) => {
-	const vatsimUser = c.get('vatsimUser');
-	const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/user',
+	withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'),
+	async (c) => {
+		const vatsimUser = c.get('vatsimUser');
+		const divisions = ServicePool.getDivisions(c.env);
 
-	const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
-	return c.json(userDivisions);
-});
+		const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
+		return c.json(userDivisions);
+	});
 
 // GET /divisions/:id - Get division details
-divisionsApp.get('/:id', async (c) => {
-	const divisionId = parseInt(c.req.param('id'));
-	const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/:id',
+	withCache(CacheKeys.fromParams('id'), 2592000, 'divisions'),
+	async (c) => {
+		const divisionId = parseInt(c.req.param('id'));
+		const divisions = ServicePool.getDivisions(c.env);
 
-	const division = await divisions.getDivision(divisionId);
-	if (!division) {
-		return c.text('Division not found', 404);
-	}
+		const division = await divisions.getDivision(divisionId);
+		if (!division) {
+			return c.text('Division not found', 404);
+		}
 
-	return c.json(division);
-});
+		return c.json(division);
+	});
 
 // GET /divisions/:id/members - List division members
 divisionsApp.get('/:id/members', async (c) => {
@@ -537,19 +541,21 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 });
 
 // GET /divisions/:id/airports - List division airports
-divisionsApp.get('/:id/airports', async (c) => {
-	const divisionId = parseInt(c.req.param('id'));
-	const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/:id/airports',
+	withCache(CacheKeys.fromParams('id'), 600, 'divisions'),
+	async (c) => {
+		const divisionId = parseInt(c.req.param('id'));
+		const divisions = ServicePool.getDivisions(c.env);
 
-	// Verify division exists
-	const division = await divisions.getDivision(divisionId);
-	if (!division) {
-		return c.text('Division not found', 404);
-	}
+		// Verify division exists
+		const division = await divisions.getDivision(divisionId);
+		if (!division) {
+			return c.text('Division not found', 404);
+		}
 
-	const airports = await divisions.getDivisionAirports(divisionId);
-	return c.json(airports);
-});
+		const airports = await divisions.getDivisionAirports(divisionId);
+		return c.json(airports);
+	});
 
 // POST /divisions/:id/airports - Request airport addition (requires division membership)
 divisionsApp.post('/:id/airports', async (c) => {
@@ -597,7 +603,7 @@ app.route('/divisions', divisionsApp);
 
 // Points endpoints
 app.get('/airports/:icao/points',
-	withCache(CacheKeys.fromUrl, 1296000, 'airports'),
+	withCache(CacheKeys.fromUrl, 600, 'airports'), // 1296000 - For after beta
 	async (c) => {
 		const airportId = c.req.param('icao');
 
