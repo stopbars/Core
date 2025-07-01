@@ -821,14 +821,27 @@ export class Connection {
 				.reduce(
 					(acc, [_, info]) => {
 						if (info.type === 'controller') {
-							acc.controllers.push(info.controllerId);
+							// Use Set to prevent duplicates, then convert to array
+							if (!acc.controllerSet.has(info.controllerId)) {
+								acc.controllerSet.add(info.controllerId);
+								acc.controllers.push(info.controllerId);
+							}
 						} else if (info.type === 'pilot') {
-							acc.pilots.push(info.controllerId);
+							// Use Set to prevent duplicates, then convert to array
+							if (!acc.pilotSet.has(info.controllerId)) {
+								acc.pilotSet.add(info.controllerId);
+								acc.pilots.push(info.controllerId);
+							}
 						}
 						return acc;
 					},
-					{ controllers: [] as string[], pilots: [] as string[] },
-				); // Check and potentially clear stale state
+					{
+						controllers: [] as string[],
+						pilots: [] as string[],
+						controllerSet: new Set<string>(),
+						pilotSet: new Set<string>()
+					},
+				);
 			const state = this.airportStates.get(airport);
 			let isOffline = false;
 			let objects: any[] = [];

@@ -1,70 +1,78 @@
 import { StatsRecord } from '../types';
+import { DatabaseSessionService } from './database-session';
 
 export class StatsService {
-	constructor(private db: D1Database) {}
+	private dbSession: DatabaseSessionService;
+
+	constructor(private db: D1Database) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 
 	async incrementStat(key: string, value = 1) {
+		// Use primary mode for stats writes to ensure consistency
+		this.dbSession.startSession({ mode: 'first-primary' });
+
 		const now = new Date();
 		const dayKey = now.toISOString().split('T')[0];
 		const timestamp = now.toISOString();
 
-		const existingStat = await this.db
-			.prepare('SELECT * FROM stats WHERE stat_key = ? AND day_key = ?')
-			.bind(key, dayKey)
-			.first<StatsRecord>();
+		const existingStatResult = await this.dbSession.execute<StatsRecord>(
+			'SELECT * FROM stats WHERE stat_key = ? AND day_key = ?',
+			[key, dayKey]
+		);
+		const existingStat = existingStatResult.results;
 
 		if (existingStat) {
-			await this.db
-				.prepare('UPDATE stats SET value = value + ?, last_updated = ? WHERE id = ?')
-				.bind(value, timestamp, existingStat.id)
-				.run();
+			await this.dbSession.executeWrite(
+				'UPDATE stats SET value = value + ?, last_updated = ? WHERE id = ?',
+				[value, timestamp, existingStat.id]
+			);
 		} else {
-			await this.db
-				.prepare('INSERT INTO stats (stat_key, value, day_key, last_updated) VALUES (?, ?, ?, ?)')
-				.bind(key, value, dayKey, timestamp)
-				.run();
+			await this.dbSession.executeWrite(
+				'INSERT INTO stats (stat_key, value, day_key, last_updated) VALUES (?, ?, ?, ?)',
+				[key, value, dayKey, timestamp]
+			);
 		}
 	}
 
 	async getTotalStat(key: string): Promise<number> {
-		const result = await this.db
-			.prepare('SELECT SUM(value) as total FROM stats WHERE stat_key = ?')
-			.bind(key)
-			.first<{ total: number }>();
+		// Use read-optimized query for stats aggregation
+		const result = await this.dbSession.executeRead<{ total: number }>(
+			'SELECT SUM(value) as total FROM stats WHERE stat_key = ?',
+			[key]
+		);
 
-		return result?.total || 0;
+		return result.results[0]?.total || 0;
 	}
 
 	async getDailyStats(key: string, days: number = 30): Promise<{ day: string; value: number }[]> {
-		const result = await this.db
-			.prepare(
-				`
+		const result = await this.dbSession.executeRead<{ day: string; value: number }>(
+			`
                 SELECT day_key as day, value 
                 FROM stats 
                 WHERE stat_key = ? 
                 AND day_key >= date('now', ?)
                 ORDER BY day_key ASC
             `,
-			)
-			.bind(key, `-${days} days`)
-			.all<{ day: string; value: number }>();
+			[key, `-${days} days`]
+		);
 
 		return result.results || [];
 	}
 
 	async getPublicStats(): Promise<{ [key: string]: number }> {
 		const sensitiveKeys = ['user_logins', 'user_signups', 'user_deletions', 'bars_xml_generations', 'remove_generations'];
-		const result = await this.db
-			.prepare(
-				`
+		const placeholders = sensitiveKeys.map(() => '?').join(',');
+
+		const result = await this.dbSession.executeRead<{ stat_key: string; total: number }>(
+			`
                 SELECT stat_key, SUM(value) as total 
                 FROM stats 
-                WHERE stat_key NOT IN (${sensitiveKeys.map(() => '?').join(',')})
+                WHERE stat_key NOT IN (${placeholders})
                 GROUP BY stat_key
             `,
-			)
-			.bind(...sensitiveKeys)
-			.all<{ stat_key: string; total: number }>();
+			sensitiveKeys
+		);
 
 		return result.results.reduce(
 			(acc, { stat_key, total }) => {
@@ -76,17 +84,17 @@ export class StatsService {
 	}
 	async getSensitiveStats(): Promise<{ [key: string]: number }> {
 		const sensitiveKeys = ['user_logins', 'user_signups', 'user_deletions', 'bars_xml_generations', 'remove_generations'];
-		const result = await this.db
-			.prepare(
-				`
+		const placeholders = sensitiveKeys.map(() => '?').join(',');
+
+		const result = await this.dbSession.executeRead<{ stat_key: string; total: number }>(
+			`
                 SELECT stat_key, SUM(value) as total 
                 FROM stats 
-                WHERE stat_key IN (${sensitiveKeys.map(() => '?').join(',')})
+                WHERE stat_key IN (${placeholders})
                 GROUP BY stat_key
             `,
-			)
-			.bind(...sensitiveKeys)
-			.all<{ stat_key: string; total: number }>();
+			sensitiveKeys
+		);
 
 		return result.results.reduce(
 			(acc, { stat_key, total }) => {

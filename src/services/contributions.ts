@@ -4,6 +4,7 @@ import { StatsService } from './stats';
 import { StorageService } from './storage';
 import { SupportService } from './support';
 import { PolygonService } from './polygons';
+import { ServicePool } from './service-pool';
 
 export interface Contribution {
 	id: string;
@@ -50,12 +51,15 @@ export interface ContributionListResult {
 	totalPages: number;
 }
 
+import { DatabaseSessionService } from './database-session';
+
 export class ContributionService {
 	private statsService: StatsService;
 	private airportService: AirportService;
 	private supportService: SupportService;
 	private polygonService: PolygonService;
 	private storageService: StorageService;
+	private dbSession: DatabaseSessionService;
 
 	constructor(
 		private db: D1Database,
@@ -68,6 +72,7 @@ export class ContributionService {
 		this.supportService = new SupportService(db);
 		this.polygonService = new PolygonService(db);
 		this.storageService = new StorageService(storage);
+		this.dbSession = new DatabaseSessionService(db);
 	}
 	async createContribution(submission: ContributionSubmission): Promise<Contribution> {
 		const airport = await this.airportService.getAirport(submission.airportIcao);
@@ -84,17 +89,15 @@ export class ContributionService {
 		const now = new Date().toISOString();
 
 		await this.updateUserDisplayNameForAllContributions(submission.userId, submission.userDisplayName || null);
-		await this.db
-			.prepare(
-				`
-      INSERT INTO contributions (
-        id, user_id, user_display_name, airport_icao, 
-        package_name, submitted_xml, notes,
-        submission_date, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-			)
-			.bind(
+		await this.dbSession.executeWrite(
+			`
+	  INSERT INTO contributions (
+		id, user_id, user_display_name, airport_icao, 
+		package_name, submitted_xml, notes,
+		submission_date, status
+	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+			[
 				id,
 				submission.userId,
 				submission.userDisplayName || null,
@@ -104,8 +107,8 @@ export class ContributionService {
 				submission.notes || null,
 				now,
 				'pending',
-			)
-			.run();
+			]
+		);
 
 		await this.statsService.incrementStat('contributions_submitted');
 
@@ -124,23 +127,20 @@ export class ContributionService {
 		};
 	}
 	async getContribution(id: string): Promise<Contribution | null> {
-		const contribution = await this.db
-			.prepare(
-				`
-      SELECT 
-        id, user_id as userId, user_display_name as userDisplayName,
-        airport_icao as airportIcao, package_name as packageName,
-        submitted_xml as submittedXml, notes,
-        submission_date as submissionDate, status,
-        rejection_reason as rejectionReason, decision_date as decisionDate
-      FROM contributions
-      WHERE id = ?
-    `,
-			)
-			.bind(id)
-			.first<Contribution>();
-
-		return contribution || null;
+		const result = await this.dbSession.executeRead<Contribution>(
+			`
+	  SELECT 
+		id, user_id as userId, user_display_name as userDisplayName,
+		airport_icao as airportIcao, package_name as packageName,
+		submitted_xml as submittedXml, notes,
+		submission_date as submissionDate, status,
+		rejection_reason as rejectionReason, decision_date as decisionDate
+	  FROM contributions
+	  WHERE id = ?
+	`,
+			[id]
+		);
+		return result.results[0] || null;
 	}
 
 	/**
@@ -170,35 +170,34 @@ export class ContributionService {
 
 		const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 		const countQuery = `SELECT COUNT(*) as total FROM contributions ${whereClause}`;
-		const countResult = await this.db
-			.prepare(countQuery)
-			.bind(...params)
-			.first<{ total: number }>();
-		const total = countResult?.total || 0;
+		const countResult = await this.dbSession.executeRead<{ total: number }>(
+			countQuery,
+			params
+		);
+		const total = countResult.results[0]?.total || 0;
 
 		const offset = (page - 1) * limit;
 		const totalPages = Math.ceil(total / limit);
 
 		const query = `
-      SELECT 
-        id, user_id as userId, user_display_name as userDisplayName,
-        airport_icao as airportIcao, package_name as packageName,
-        submitted_xml as submittedXml, notes,
-        submission_date as submissionDate, status,
-        rejection_reason as rejectionReason, decision_date as decisionDate
-      FROM contributions
-      ${whereClause}
-      ORDER BY submission_date DESC
-      LIMIT ? OFFSET ?
-    `;
+	  SELECT 
+		id, user_id as userId, user_display_name as userDisplayName,
+		airport_icao as airportIcao, package_name as packageName,
+		submitted_xml as submittedXml, notes,
+		submission_date as submissionDate, status,
+		rejection_reason as rejectionReason, decision_date as decisionDate
+	  FROM contributions
+	  ${whereClause}
+	  ORDER BY submission_date DESC
+	  LIMIT ? OFFSET ?
+	`;
 
-		const contributions = await this.db
-			.prepare(query)
-			.bind(...params, limit, offset)
-			.all<Contribution>();
-
+		const contributionsResult = await this.dbSession.executeRead<Contribution>(
+			query,
+			[...params, limit, offset]
+		);
 		return {
-			contributions: contributions.results,
+			contributions: contributionsResult.results,
 			total,
 			page,
 			limit,
@@ -207,7 +206,11 @@ export class ContributionService {
 	}
 
 	async processDecision(id: string, userId: string, decision: ContributionDecision): Promise<Contribution> {
-		const userInfo = await this.db.prepare('SELECT id FROM users WHERE vatsim_id = ?').bind(userId).first<{ id: number }>();
+		const userInfoResult = await this.dbSession.executeRead<{ id: number }>(
+			'SELECT id FROM users WHERE vatsim_id = ?',
+			[userId]
+		);
+		const userInfo = userInfoResult.results[0];
 
 		if (!userInfo) {
 			throw new Error('User not found');
@@ -237,24 +240,22 @@ export class ContributionService {
 		const now = new Date().toISOString();
 		const status = decision.approved ? 'approved' : 'rejected'; // If approving, mark any existing approved contributions for the same airport and package as outdated
 		if (decision.approved) {
-			await this.db
-				.prepare(
-					`
-        UPDATE contributions
-        SET status = 'outdated', decision_date = ?
-        WHERE airport_icao = ? 
-        AND package_name = ? 
-        AND status = 'approved' 
-        AND id != ?
-      `,
-				)
-				.bind(
+			await this.dbSession.executeWrite(
+				`
+		UPDATE contributions
+		SET status = 'outdated', decision_date = ?
+		WHERE airport_icao = ? 
+		AND package_name = ? 
+		AND status = 'approved' 
+		AND id != ?
+	  `,
+				[
 					now,
 					contribution.airportIcao,
-					packageName, // Use potentially updated package name
+					packageName,
 					id,
-				)
-				.run();
+				]
+			);
 
 			// Generate and upload the XML files to CDN
 			try {
@@ -297,16 +298,14 @@ export class ContributionService {
 				// Don't throw the error, as we still want to update the contribution status
 			}
 		}
-		await this.db
-			.prepare(
-				`
-      UPDATE contributions
-      SET status = ?, rejection_reason = ?, decision_date = ?, package_name = ?
-      WHERE id = ?
-    `,
-			)
-			.bind(status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id)
-			.run();
+		await this.dbSession.executeWrite(
+			`
+	  UPDATE contributions
+	  SET status = ?, rejection_reason = ?, decision_date = ?, package_name = ?
+	  WHERE id = ?
+	`,
+			[status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id]
+		);
 
 		await this.statsService.incrementStat(decision.approved ? 'contributions_approved' : 'contributions_rejected');
 
@@ -330,50 +329,51 @@ export class ContributionService {
 		const oneWeekAgoStr = oneWeekAgo.toISOString();
 
 		// Get counts for different statuses
-		const totalResult = await this.db.prepare('SELECT COUNT(*) as count FROM contributions').first<{ count: number }>();
-
-		const pendingResult = await this.db
-			.prepare('SELECT COUNT(*) as count FROM contributions WHERE status = ?')
-			.bind('pending')
-			.first<{ count: number }>();
-
-		const approvedResult = await this.db
-			.prepare('SELECT COUNT(*) as count FROM contributions WHERE status = ?')
-			.bind('approved')
-			.first<{ count: number }>();
-
-		const rejectedResult = await this.db
-			.prepare('SELECT COUNT(*) as count FROM contributions WHERE status = ?')
-			.bind('rejected')
-			.first<{ count: number }>();
-
-		const lastWeekResult = await this.db
-			.prepare('SELECT COUNT(*) as count FROM contributions WHERE submission_date > ?')
-			.bind(oneWeekAgoStr)
-			.first<{ count: number }>();
-
+		const totalResult = await this.dbSession.executeRead<{ count: number }>(
+			'SELECT COUNT(*) as count FROM contributions',
+			[]
+		);
+		const pendingResult = await this.dbSession.executeRead<{ count: number }>(
+			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
+			['pending']
+		);
+		const approvedResult = await this.dbSession.executeRead<{ count: number }>(
+			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
+			['approved']
+		);
+		const rejectedResult = await this.dbSession.executeRead<{ count: number }>(
+			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
+			['rejected']
+		);
+		const lastWeekResult = await this.dbSession.executeRead<{ count: number }>(
+			'SELECT COUNT(*) as count FROM contributions WHERE submission_date > ?',
+			[oneWeekAgoStr]
+		);
 		return {
-			total: totalResult?.count || 0,
-			pending: pendingResult?.count || 0,
-			approved: approvedResult?.count || 0,
-			rejected: rejectedResult?.count || 0,
-			lastWeek: lastWeekResult?.count || 0,
+			total: totalResult.results[0]?.count || 0,
+			pending: pendingResult.results[0]?.count || 0,
+			approved: approvedResult.results[0]?.count || 0,
+			rejected: rejectedResult.results[0]?.count || 0,
+			lastWeek: lastWeekResult.results[0]?.count || 0,
 		};
 	}
 	async deleteContribution(id: string, userId: string): Promise<boolean> {
-		const userInfo = await this.db.prepare('SELECT id FROM users WHERE vatsim_id = ?').bind(userId).first<{ id: number }>();
-
+		const userInfoResult = await this.dbSession.executeRead<{ id: number }>(
+			'SELECT id FROM users WHERE vatsim_id = ?',
+			[userId]
+		);
+		const userInfo = userInfoResult.results[0];
 		if (!userInfo) {
 			throw new Error('User not found');
 		}
-
 		const hasPermission = await this.roleService.hasPermission(userInfo.id, StaffRole.LEAD_DEVELOPER);
-
 		if (!hasPermission) {
 			throw new Error('Not authorized to delete contributions');
 		}
-		const result = await this.db.prepare('DELETE FROM contributions WHERE id = ?').bind(id).run();
-
+		const result = await this.dbSession.executeWrite(
+			'DELETE FROM contributions WHERE id = ?',
+			[id]
+		);
 		return result.success;
 	}
 	/**
@@ -406,31 +406,29 @@ export class ContributionService {
 		const { status = 'all', page = 1, limit = 10 } = options;
 
 		// Get summary counts
-		const summaryResult = await this.db
-			.prepare(
-				`
-      SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
-      FROM contributions
-      WHERE user_id = ?
-    `,
-			)
-			.bind(userId)
-			.first<{
-				total: number;
-				approved: number;
-				pending: number;
-				rejected: number;
-			}>();
-
+		const summaryResult = await this.dbSession.executeRead<{
+			total: number;
+			approved: number;
+			pending: number;
+			rejected: number;
+		}>(
+			`
+	  SELECT 
+		COUNT(*) as total,
+		SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
+		SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+		SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
+	  FROM contributions
+	  WHERE user_id = ?
+	`,
+			[userId]
+		);
+		const summaryRow = summaryResult.results[0] || { total: 0, approved: 0, pending: 0, rejected: 0 };
 		const summary = {
-			total: summaryResult?.total || 0,
-			approved: summaryResult?.approved || 0,
-			pending: summaryResult?.pending || 0,
-			rejected: summaryResult?.rejected || 0,
+			total: summaryRow.total || 0,
+			approved: summaryRow.approved || 0,
+			pending: summaryRow.pending || 0,
+			rejected: summaryRow.rejected || 0,
 		};
 
 		// Calculate pagination
@@ -450,25 +448,24 @@ export class ContributionService {
 
 		// Get the detailed contributions list
 		const query = `
-      SELECT 
-        id, user_id as userId, user_display_name as userDisplayName,
-        airport_icao as airportIcao, package_name as packageName,
-        submitted_xml as submittedXml, notes,
-        submission_date as submissionDate, status,
-        rejection_reason as rejectionReason, decision_date as decisionDate
-      FROM contributions
-      ${whereClause}
-      ORDER BY submission_date DESC
-      LIMIT ? OFFSET ?
-    `;
+	  SELECT 
+		id, user_id as userId, user_display_name as userDisplayName,
+		airport_icao as airportIcao, package_name as packageName,
+		submitted_xml as submittedXml, notes,
+		submission_date as submissionDate, status,
+		rejection_reason as rejectionReason, decision_date as decisionDate
+	  FROM contributions
+	  ${whereClause}
+	  ORDER BY submission_date DESC
+	  LIMIT ? OFFSET ?
+	`;
 
-		const contributions = await this.db
-			.prepare(query)
-			.bind(...params, limit, offset)
-			.all<Contribution>();
-
+		const contributionsResult = await this.dbSession.executeRead<Contribution>(
+			query,
+			[...params, limit, offset]
+		);
 		return {
-			contributions: contributions.results,
+			contributions: contributionsResult.results,
 			summary,
 			pagination: {
 				page,
@@ -484,20 +481,21 @@ export class ContributionService {
 		}>
 	> {
 		const query = `
-      SELECT 
-        package_name as packageName,
-        COUNT(*) as count
-      FROM contributions
-      WHERE status = 'approved'
-      GROUP BY package_name
-      ORDER BY count DESC
-    `;
+	  SELECT 
+		package_name as packageName,
+		COUNT(*) as count
+	  FROM contributions
+	  WHERE status = 'approved'
+	  GROUP BY package_name
+	  ORDER BY count DESC
+	`;
 
-		const results = await this.db.prepare(query).all<{
+		const results = await this.dbSession.executeRead<{
 			packageName: string;
 			count: number;
-		}>();
-
+		}>(
+			query
+		);
 		return results.results;
 	}
 	async getContributionLeaderboard(): Promise<
@@ -507,22 +505,24 @@ export class ContributionService {
 		}>
 	> {
 		const query = `
-      SELECT 
-        user_id, 
-        user_display_name,
-        COUNT(*) as contribution_count
-      FROM contributions
-      WHERE status = 'approved'
-      GROUP BY user_id
-      ORDER BY contribution_count DESC
-      LIMIT 5
-    `;
+	  SELECT 
+		user_id, 
+		user_display_name,
+		COUNT(*) as contribution_count
+	  FROM contributions
+	  WHERE status = 'approved'
+	  GROUP BY user_id
+	  ORDER BY contribution_count DESC
+	  LIMIT 5
+	`;
 
-		const results = await this.db.prepare(query).all<{
+		const results = await this.dbSession.executeRead<{
 			user_id: string;
 			user_display_name: string | null;
 			contribution_count: number;
-		}>();
+		}>(
+			query
+		);
 		return results.results.map((item) => ({
 			name: item.user_display_name || item.user_id,
 			count: item.contribution_count,
@@ -530,31 +530,26 @@ export class ContributionService {
 	}
 
 	private async updateUserDisplayNameForAllContributions(userId: string, displayName: string | null): Promise<void> {
-		await this.db
-			.prepare(
-				`
-      UPDATE contributions
-      SET user_display_name = ?
-      WHERE user_id = ?
-    `,
-			)
-			.bind(displayName, userId)
-			.run();
+		await this.dbSession.executeWrite(
+			`
+	  UPDATE contributions
+	  SET user_display_name = ?
+	  WHERE user_id = ?
+	`,
+			[displayName, userId]
+		);
 	}
 	async getUserDisplayName(userId: string): Promise<string | null> {
-		const result = await this.db
-			.prepare(
-				`
-      SELECT user_display_name as userDisplayName
-      FROM contributions
-      WHERE user_id = ?
-      ORDER BY submission_date DESC
-      LIMIT 1
-    `,
-			)
-			.bind(userId)
-			.first<{ userDisplayName: string | null }>();
-
-		return result?.userDisplayName || null;
+		const result = await this.dbSession.executeRead<{ userDisplayName: string | null }>(
+			`
+	  SELECT user_display_name as userDisplayName
+	  FROM contributions
+	  WHERE user_id = ?
+	  ORDER BY submission_date DESC
+	  LIMIT 1
+	`,
+			[userId]
+		);
+		return result.results[0]?.userDisplayName || null;
 	}
 }

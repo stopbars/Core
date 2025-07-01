@@ -1,4 +1,4 @@
-import { Role } from './roles';
+import { DatabaseSessionService } from './database-session';
 
 interface DivisionMember {
 	id: number;
@@ -26,11 +26,18 @@ interface DivisionAirport {
 }
 
 export class DivisionService {
-	constructor(private db: D1Database) {}
+	private dbSession: DatabaseSessionService;
+
+	constructor(private db: D1Database) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 
 	async createDivision(name: string, headVatsimId: string): Promise<Division> {
-		const stmt = await this.db.prepare('INSERT INTO divisions (name) VALUES (?) RETURNING *').bind(name);
-		const division = await stmt.first<Division>();
+		const result = await this.dbSession.executeWrite(
+			'INSERT INTO divisions (name) VALUES (?) RETURNING *',
+			[name]
+		);
+		const division = result.results[0] as Division;
 		if (!division) throw new Error('Failed to create division');
 
 		await this.addMember(division.id, headVatsimId, 'nav_head');
@@ -39,117 +46,120 @@ export class DivisionService {
 	}
 
 	async getDivision(id: number): Promise<Division | null> {
-		return await this.db.prepare('SELECT * FROM divisions WHERE id = ?').bind(id).first<Division>();
+		const result = await this.dbSession.executeRead<Division>(
+			'SELECT * FROM divisions WHERE id = ?',
+			[id]
+		);
+		return result.results[0] || null;
 	}
 
 	async addMember(divisionId: number, vatsimId: string, role: 'nav_head' | 'nav_member'): Promise<DivisionMember> {
-		const stmt = await this.db
-			.prepare('INSERT INTO division_members (division_id, vatsim_id, role) VALUES (?, ?, ?) RETURNING *')
-			.bind(divisionId, vatsimId, role);
+		const result = await this.dbSession.executeWrite(
+			'INSERT INTO division_members (division_id, vatsim_id, role) VALUES (?, ?, ?) RETURNING *',
+			[divisionId, vatsimId, role]
+		);
 
-		const member = await stmt.first<DivisionMember>();
+		const member = result.results[0] as DivisionMember;
 		if (!member) throw new Error('Failed to add member to division');
 		return member;
 	}
 
 	async removeMember(divisionId: number, vatsimId: string): Promise<void> {
-		await this.db.prepare('DELETE FROM division_members WHERE division_id = ? AND vatsim_id = ?').bind(divisionId, vatsimId).run();
+		await this.dbSession.executeWrite(
+			'DELETE FROM division_members WHERE division_id = ? AND vatsim_id = ?',
+			[divisionId, vatsimId]
+		);
 	}
 
 	async getMemberRole(divisionId: number, vatsimId: string): Promise<'nav_head' | 'nav_member' | null> {
-		const member = await this.db
-			.prepare('SELECT role FROM division_members WHERE division_id = ? AND vatsim_id = ?')
-			.bind(divisionId, vatsimId)
-			.first<{ role: 'nav_head' | 'nav_member' }>();
+		const result = await this.dbSession.executeRead<{ role: 'nav_head' | 'nav_member' }>(
+			'SELECT role FROM division_members WHERE division_id = ? AND vatsim_id = ?',
+			[divisionId, vatsimId]
+		);
 
-		return member?.role || null;
+		return result.results[0]?.role || null;
 	}
 	async requestAirport(divisionId: number, icao: string, requestedBy: string): Promise<DivisionAirport> {
 		const role = await this.getMemberRole(divisionId, requestedBy);
 		if (!role) throw new Error('User is not a member of this division');
 
-		const stmt = await this.db
-			.prepare('INSERT INTO division_airports (division_id, icao, requested_by) VALUES (?, ?, ?) RETURNING *')
-			.bind(divisionId, icao, requestedBy);
+		const result = await this.dbSession.executeWrite(
+			'INSERT INTO division_airports (division_id, icao, requested_by) VALUES (?, ?, ?) RETURNING *',
+			[divisionId, icao, requestedBy]
+		);
 
-		const request = await stmt.first<DivisionAirport>();
+		const request = result.results[0] as DivisionAirport;
 		if (!request) throw new Error('Failed to create airport request');
 		return request;
 	}
 	async approveAirport(airportId: number, approvedBy: string, approved: boolean): Promise<DivisionAirport> {
-		const stmt = await this.db
-			.prepare(
-				`
+		const result = await this.dbSession.executeWrite(
+			`
             UPDATE division_airports 
             SET status = ?, approved_by = ?, updated_at = CURRENT_TIMESTAMP 
             WHERE id = ? 
             RETURNING *
         `,
-			)
-			.bind(approved ? 'approved' : 'rejected', approvedBy, airportId);
+			[approved ? 'approved' : 'rejected', approvedBy, airportId]
+		);
 
-		const airport = await stmt.first<DivisionAirport>();
+		const airport = result.results[0] as DivisionAirport;
 		if (!airport) throw new Error('Airport request not found');
 		return airport;
 	}
 
 	async getDivisionAirports(divisionId: number): Promise<DivisionAirport[]> {
-		return await this.db
-			.prepare('SELECT * FROM division_airports WHERE division_id = ?')
-			.bind(divisionId)
-			.all<DivisionAirport>()
-			.then((result) => result.results);
+		const result = await this.dbSession.executeRead<DivisionAirport>(
+			'SELECT * FROM division_airports WHERE division_id = ?',
+			[divisionId]
+		);
+		return result.results;
 	}
 
 	async getDivisionMembers(divisionId: number): Promise<DivisionMember[]> {
-		return await this.db
-			.prepare('SELECT * FROM division_members WHERE division_id = ?')
-			.bind(divisionId)
-			.all<DivisionMember>()
-			.then((result) => result.results);
+		const result = await this.dbSession.executeRead<DivisionMember>(
+			'SELECT * FROM division_members WHERE division_id = ?',
+			[divisionId]
+		);
+		return result.results;
 	}
 
 	async getAllDivisions(): Promise<Division[]> {
-		return await this.db
-			.prepare('SELECT * FROM divisions')
-			.all<Division>()
-			.then((result) => result.results);
+		const result = await this.dbSession.executeRead<Division>(
+			'SELECT * FROM divisions'
+		);
+		return result.results;
 	}
 
 	async getUserDivisions(vatsimId: string): Promise<{ division: Division; role: string }[]> {
-		return await this.db
-			.prepare(
-				`
+		const result = await this.dbSession.executeRead<{ division: Division; role: string }>(
+			`
             SELECT d.*, dm.role 
             FROM divisions d 
             JOIN division_members dm ON d.id = dm.division_id 
             WHERE dm.vatsim_id = ?
         `,
-			)
-			.bind(vatsimId)
-			.all<{ division: Division; role: string }>()
-			.then((result) => result.results);
+			[vatsimId]
+		);
+		return result.results;
 	}
 	async userHasAirportAccess(userId: string, airportIcao: string): Promise<boolean> {
-		const stmt = await this.db
-			.prepare(
-				`
+		const result = await this.dbSession.executeRead<any>(
+			`
           SELECT da.id 
           FROM division_airports da
           JOIN division_members dm ON da.division_id = dm.division_id
           WHERE dm.vatsim_id = ? AND da.icao = ? AND da.status = 'approved'
         `,
-			)
-			.bind(userId, airportIcao);
+			[userId, airportIcao]
+		);
 
-		const result = await stmt.first();
-		return result !== null;
+		return result.results.length > 0;
 	}
 
 	async getUserRoleForAirport(userId: string, airportIcao: string): Promise<'nav_head' | 'nav_member' | null> {
-		const stmt = await this.db
-			.prepare(
-				`
+		const result = await this.dbSession.executeRead<{ role: 'nav_head' | 'nav_member' }>(
+			`
             SELECT dm.role 
             FROM division_members dm
             JOIN division_airports da ON da.division_id = dm.division_id
@@ -158,10 +168,9 @@ export class DivisionService {
             AND da.status = 'approved'
             LIMIT 1
         `,
-			)
-			.bind(userId, airportIcao);
+			[userId, airportIcao]
+		);
 
-		const result = await stmt.first<{ role: 'nav_head' | 'nav_member' }>();
-		return result?.role || null;
+		return result.results[0]?.role || null;
 	}
 }

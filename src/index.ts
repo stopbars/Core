@@ -4,18 +4,12 @@ import { Point } from './types';
 import { VatsimService } from './services/vatsim';
 import { AuthService } from './services/auth';
 import { StatsService } from './services/stats';
-import { RoleService, StaffRole } from './services/roles';
+import { StaffRole } from './services/roles';
 import { Connection } from './network/connection';
-import { AirportService } from './services/airport';
-import { DivisionService } from './services/divisions';
-import { PointsService } from './services/points';
-import { IDService } from './services/id';
-import { SupportService } from './services/support';
-import { PolygonService } from './services/polygons';
-import { NotamService } from './services/notam';
 import { UserService } from './services/users';
-import { ContributionService } from './services/contributions';
-import { StorageService } from './services/storage';
+import { DatabaseContextFactory } from './services/database-context';
+import { withCache, CacheKeys } from './services/cache';
+import { ServicePool } from './services/service-pool';
 
 interface CreateDivisionPayload {
 	name: string;
@@ -48,12 +42,6 @@ interface ContributionDecisionPayload {
 	rejectionReason?: string;
 	newPackageName?: string;
 }
-
-const corsHeaders = {
-	'Access-Control-Allow-Origin': '*',
-	'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE',
-	'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Vatsim-Token, Upgrade, X-Client-Type',
-};
 
 export class BARS {
 	private connection: Connection;
@@ -127,67 +115,79 @@ app.get('/state', async (c) => {
 		}, 400);
 	}
 
-	if (airport === 'all') {
-		await c.env.DB.prepare("DELETE FROM active_objects WHERE last_updated <= datetime('now', '-2 day')").run();
-		const stmt = c.env.DB.prepare("SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')");
-		const activeObjects = await stmt.all();
+	// Create database context for this request with bookmark handling
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 
-		const allStates = await Promise.all(
-			activeObjects.results.map(async (obj: any) => {
-				const id = c.env.BARS.idFromString(obj.id);
-				const durableObj = c.env.BARS.get(id);
+	try {
+		if (airport === 'all') {
+			// Use session-aware database operations
+			await dbContext.db.executeWrite("DELETE FROM active_objects WHERE last_updated <= datetime('now', '-2 day')");
 
-				const [airportIcao, controllerCount, pilotCount] = obj.name.split('/');
+			const activeObjectsResult = await dbContext.db.executeRead<any>(
+				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')"
+			);
 
-				const stateRequest = new Request(`https://internal/state?airport=${airportIcao}`, {
-					method: 'GET',
-					headers: new Headers({
-						'X-Request-Type': 'get_state',
-					}),
-				});
+			const allStates = await Promise.all(
+				activeObjectsResult.results.map(async (obj: any) => {
+					const id = c.env.BARS.idFromString(obj.id);
+					const durableObj = c.env.BARS.get(id);
 
-				const response = await durableObj.fetch(stateRequest);
-				const state = (await response.json()) as {
-					airport: string;
-					controllers: string[];
-					pilots: string[];
-					objects: any[];
-				};
+					const [airportIcao, controllerCount, pilotCount] = obj.name.split('/');
 
-				return {
-					airport: state.airport,
-					controllers: state.controllers,
-					pilots: state.pilots,
-					objects: state.objects,
-					connections: {
-						controllers: parseInt(controllerCount) || 0,
-						pilots: parseInt(pilotCount) || 0,
-					},
-				};
-			}),
-		);
+					const stateRequest = new Request(`https://internal/state?airport=${airportIcao}`, {
+						method: 'GET',
+						headers: new Headers({
+							'X-Request-Type': 'get_state',
+						}),
+					});
 
-		return c.json({
-			states: allStates,
-		});
-	} else {
-		const id = c.env.BARS.idFromName(airport);
-		const obj = c.env.BARS.get(id);
+					const response = await durableObj.fetch(stateRequest);
+					const state = (await response.json()) as {
+						airport: string;
+						controllers: string[];
+						pilots: string[];
+						objects: any[];
+					};
 
-		if (airport.length !== 4) {
-			return c.json({
-				error: 'Invalid airport ICAO',
-			}, 400);
+					return {
+						airport: state.airport,
+						controllers: state.controllers,
+						pilots: state.pilots,
+						objects: state.objects,
+						connections: {
+							controllers: parseInt(controllerCount) || 0,
+							pilots: parseInt(pilotCount) || 0,
+						},
+					};
+				}),
+			);
+
+			// Return response with bookmark for consistency
+			return dbContext.jsonResponse({
+				states: allStates,
+			});
+		} else {
+			const id = c.env.BARS.idFromName(airport);
+			const obj = c.env.BARS.get(id);
+
+			if (airport.length !== 4) {
+				return dbContext.jsonResponse({
+					error: 'Invalid airport ICAO',
+				}, { status: 400 });
+			}
+
+			const stateRequest = new Request(`https://internal/state?airport=${airport}`, {
+				method: 'GET',
+				headers: new Headers({
+					'X-Request-Type': 'get_state',
+				}),
+			});
+
+			return obj.fetch(stateRequest);
 		}
-
-		const stateRequest = new Request(`https://internal/state?airport=${airport}`, {
-			method: 'GET',
-			headers: new Headers({
-				'X-Request-Type': 'get_state',
-			}),
-		});
-
-		return obj.fetch(stateRequest);
+	} finally {
+		// Clean up database context
+		dbContext.close();
 	}
 });
 
@@ -198,9 +198,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 		return Response.redirect('https://v2.stopbars.com/auth?error=missing_code', 302);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const auth = ServicePool.getAuth(c.env);
 
 	const { vatsimToken } = await auth.handleCallback(code);
 	return Response.redirect(`https://stopbars.com/auth/callback?token=${vatsimToken}`, 302);
@@ -213,20 +211,26 @@ app.get('/auth/account', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	// Create database context for this request
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-	if (!user) {
-		return c.text('User not found', 404);
+	try {
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) {
+			return dbContext.textResponse('User not found', { status: 404 });
+		}
+
+		return dbContext.jsonResponse({
+			...user,
+			email: vatsimUser.email,
+		});
+	} finally {
+		dbContext.close();
 	}
-
-	return c.json({
-		...user,
-		email: vatsimUser.email,
-	});
 });
 
 // Regenerate API key
@@ -236,22 +240,26 @@ app.post('/auth/regenerate-api-key', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
+	// Create database context for this request
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+
 	try {
-		const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-		const stats = new StatsService(c.env.DB);
-		const auth = new AuthService(c.env.DB, vatsim, stats);
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
 
 		const vatsimUser = await vatsim.getUser(vatsimToken);
 		const user = await auth.getUserByVatsimId(vatsimUser.id);
 
 		if (!user) {
-			return c.text('User not found', 404);
+			return dbContext.textResponse('User not found', { status: 404 });
 		}
 
-		// Check when the user last regenerated their API key
-		const lastRegeneration = await c.env.DB.prepare('SELECT last_api_key_regen FROM users WHERE id = ?')
-			.bind(user.id)
-			.first<{ last_api_key_regen: string }>();
+		// Check when the user last regenerated their API key using session-aware query
+		const lastRegenerationResult = await dbContext.db.executeRead<{ last_api_key_regen: string }>(
+			'SELECT last_api_key_regen FROM users WHERE id = ?',
+			[user.id]
+		);
+		const lastRegeneration = lastRegenerationResult.results[0];
 
 		// If the user has regenerated their API key within the last 24 hours, block the request
 		if (lastRegeneration?.last_api_key_regen) {
@@ -266,29 +274,34 @@ app.post('/auth/regenerate-api-key', async (c) => {
 				const remainingHours = Math.floor(remainingMs / (60 * 60 * 1000));
 				const remainingMinutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
 
-				return c.json({
+				return dbContext.jsonResponse({
 					error: 'Rate limited',
 					message: `You can only regenerate your API key once every 24 hours. Please try again in ${remainingHours} hour${remainingHours !== 1 ? 's' : ''}${remainingMinutes > 0 ? ` and ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}` : ''}.`,
 					retryAfter: Math.ceil(remainingMs / 1000),
-				}, 429);
+				}, { status: 429 });
 			}
 		}
 
 		// Generate new API key
 		const newApiKey = await auth.regenerateApiKey(user.id);
 
-		// Update the last regeneration timestamp
-		await c.env.DB.prepare("UPDATE users SET last_api_key_regen = datetime('now') WHERE id = ?").bind(user.id).run();
+		// Update the last regeneration timestamp using session-aware write
+		await dbContext.db.executeWrite(
+			"UPDATE users SET last_api_key_regen = datetime('now') WHERE id = ?",
+			[user.id]
+		);
 
-		return c.json({
+		return dbContext.jsonResponse({
 			success: true,
 			apiKey: newApiKey,
 		});
 	} catch (error) {
-		return c.json({
+		return dbContext.jsonResponse({
 			error: 'Failed to regenerate API key',
 			message: error instanceof Error ? error.message : 'Unknown error',
-		}, 500);
+		}, { status: 500 });
+	} finally {
+		dbContext.close();
 	}
 });
 
@@ -300,9 +313,8 @@ app.delete('/auth/delete', async (c) => {
 	}
 
 	try {
-		const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-		const stats = new StatsService(c.env.DB);
-		const auth = new AuthService(c.env.DB, vatsim, stats);
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
 
 		const vatsimUser = await vatsim.getUser(vatsimToken);
 		const success = await auth.deleteUserAccount(vatsimUser.id);
@@ -316,64 +328,69 @@ app.delete('/auth/delete', async (c) => {
 });
 
 // Check if staff
-app.get('/auth/is-staff', async (c) => {
-	const authHeader = c.req.header('Authorization');
-	if (!authHeader) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const token = authHeader.replace('Bearer ', '');
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const roles = new RoleService(c.env.DB);
-
-	const vatsimUser = await vatsim.getUser(token);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-
-	if (!user) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const isStaff = await roles.isStaff(user.id);
-	const role = await roles.getUserRole(user.id);
-	return c.json({ isStaff, role });
-});
-
-// Airports endpoint
-app.get('/airports', async (c) => {
-	const airports = new AirportService(c.env.DB, c.env.AIRPORTDB_API_KEY);
-	const icao = c.req.query('icao');
-	const continent = c.req.query('continent');
-
-	try {
-		let data;
-		if (icao) {
-			// Handle batch requests
-			if (icao.includes(',')) {
-				const icaos = icao.split(',').map((code) => code.trim());
-				if (icaos.some((code) => !code.match(/^[A-Z0-9]{4}$/i))) {
-					return c.text('Invalid ICAO format', 400);
-				}
-				data = await airports.getAirports(icaos);
-			} else {
-				// Single airport request
-				data = await airports.getAirport(icao);
-				if (!data) {
-					return c.text('Airport not found', 404);
-				}
-			}
-		} else if (continent) {
-			data = await airports.getAirportsByContinent(continent);
-		} else {
-			return c.text('Missing query parameter', 400);
+app.get('/auth/is-staff',
+	withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'),
+	async (c) => {
+		const authHeader = c.req.header('Authorization');
+		if (!authHeader) {
+			return c.text('Unauthorized', 401);
 		}
 
-		return c.json(data);
-	} catch (error) {
-		return c.json({ error: 'Failed to fetch airport data' }, 500);
+		const token = authHeader.replace('Bearer ', '');
+
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const roles = ServicePool.getRoles(c.env);
+
+		const vatsimUser = await vatsim.getUser(token);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+
+		if (!user) {
+			return c.text('Unauthorized', 401);
+		}
+
+		const isStaff = await roles.isStaff(user.id);
+		const role = await roles.getUserRole(user.id);
+		return c.json({ isStaff, role });
+	});
+
+// Airports endpoint
+app.get('/airports',
+	withCache(CacheKeys.fromUrl, 31536000, 'airports'), // Cache for 1 year because airports data doesn't change ever :P
+	async (c) => {
+		const airports = ServicePool.getAirport(c.env);
+		const icao = c.req.query('icao');
+		const continent = c.req.query('continent');
+
+		try {
+			let data;
+			if (icao) {
+				// Handle batch requests
+				if (icao.includes(',')) {
+					const icaos = icao.split(',').map((code) => code.trim());
+					if (icaos.some((code) => !code.match(/^[A-Z0-9]{4}$/i))) {
+						return c.text('Invalid ICAO format', 400);
+					}
+					data = await airports.getAirports(icaos);
+				} else {
+					// Single airport request
+					data = await airports.getAirport(icao);
+					if (!data) {
+						return c.text('Airport not found', 404);
+					}
+				}
+			} else if (continent) {
+				data = await airports.getAirportsByContinent(continent);
+			} else {
+				return c.text('Missing query parameter', 400);
+			}
+
+			return c.json(data);
+		} catch (error) {
+			return c.json({ error: 'Failed to fetch airport data' }, 500);
+		}
 	}
-});
+);
 
 // Divisions routes
 const divisionsApp = new Hono<{
@@ -393,9 +410,8 @@ divisionsApp.use('*', async (c, next) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -413,7 +429,7 @@ divisionsApp.use('*', async (c, next) => {
 
 // GET /divisions - List all divisions
 divisionsApp.get('/', async (c) => {
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 	const allDivisions = await divisions.getAllDivisions();
 	return c.json(allDivisions);
 });
@@ -421,8 +437,8 @@ divisionsApp.get('/', async (c) => {
 // POST /divisions - Create new division (requires lead_developer role)
 divisionsApp.post('/', async (c) => {
 	const user = c.get('user');
-	const roles = new RoleService(c.env.DB);
-	const divisions = new DivisionService(c.env.DB);
+	const roles = ServicePool.getRoles(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
 	if (!isLeadDev) {
@@ -437,7 +453,7 @@ divisionsApp.post('/', async (c) => {
 // GET /divisions/user - Get user's divisions
 divisionsApp.get('/user', async (c) => {
 	const vatsimUser = c.get('vatsimUser');
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
 	return c.json(userDivisions);
@@ -446,7 +462,7 @@ divisionsApp.get('/user', async (c) => {
 // GET /divisions/:id - Get division details
 divisionsApp.get('/:id', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	const division = await divisions.getDivision(divisionId);
 	if (!division) {
@@ -459,7 +475,7 @@ divisionsApp.get('/:id', async (c) => {
 // GET /divisions/:id/members - List division members
 divisionsApp.get('/:id/members', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -475,7 +491,7 @@ divisionsApp.get('/:id/members', async (c) => {
 divisionsApp.post('/:id/members', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const vatsimUser = c.get('vatsimUser');
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -498,7 +514,7 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const targetVatsimId = c.req.param('vatsimId');
 	const vatsimUser = c.get('vatsimUser');
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -523,7 +539,7 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 // GET /divisions/:id/airports - List division airports
 divisionsApp.get('/:id/airports', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -539,7 +555,7 @@ divisionsApp.get('/:id/airports', async (c) => {
 divisionsApp.post('/:id/airports', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const vatsimUser = c.get('vatsimUser');
-	const divisions = new DivisionService(c.env.DB);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -558,8 +574,8 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 	const airportId = parseInt(c.req.param('airportId'));
 	const user = c.get('user');
 	const vatsimUser = c.get('vatsimUser');
-	const roles = new RoleService(c.env.DB);
-	const divisions = new DivisionService(c.env.DB);
+	const roles = ServicePool.getRoles(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -580,24 +596,21 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 app.route('/divisions', divisionsApp);
 
 // Points endpoints
-app.get('/airports/:icao/points', async (c) => {
-	const airportId = c.req.param('icao');
+app.get('/airports/:icao/points',
+	withCache(CacheKeys.fromUrl, 1296000, 'airports'),
+	async (c) => {
+		const airportId = c.req.param('icao');
 
-	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
-		return c.text('Invalid airport ICAO format', 400);
-	}
+		// Validate ICAO format (exactly 4 uppercase letters/numbers)
+		if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+			return c.text('Invalid airport ICAO format', 400);
+		}
 
-	const idService = new IDService(c.env.DB);
-	const divisions = new DivisionService(c.env.DB);
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const points = new PointsService(c.env.DB, idService, divisions, auth);
+		const points = ServicePool.getPoints(c.env);
 
-	const airportPoints = await points.getAirportPoints(airportId);
-	return c.json(airportPoints);
-});
+		const airportPoints = await points.getAirportPoints(airportId);
+		return c.json(airportPoints);
+	});
 
 app.post('/airports/:icao/points', async (c) => {
 	const airportId = c.req.param('icao');
@@ -612,18 +625,15 @@ app.post('/airports/:icao/points', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) {
 		return c.text('Unauthorized', 401);
 	}
 
-	const idService = new IDService(c.env.DB);
-	const divisions = new DivisionService(c.env.DB);
-	const points = new PointsService(c.env.DB, idService, divisions, auth);
+	const points = ServicePool.getPoints(c.env);
 
 	const pointData = await c.req.json() as Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>;
 	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
@@ -649,18 +659,15 @@ app.put('/airports/:icao/points/:id', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) {
 		return c.text('Unauthorized', 401);
 	}
 
-	const idService = new IDService(c.env.DB);
-	const divisions = new DivisionService(c.env.DB);
-	const points = new PointsService(c.env.DB, idService, divisions, auth);
+	const points = ServicePool.getPoints(c.env);
 
 	const updates = await c.req.json() as Partial<Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>>;
 	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
@@ -686,18 +693,15 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) {
 		return c.text('Unauthorized', 401);
 	}
 
-	const idService = new IDService(c.env.DB);
-	const divisions = new DivisionService(c.env.DB);
-	const points = new PointsService(c.env.DB, idService, divisions, auth);
+	const points = ServicePool.getPoints(c.env);
 
 	try {
 		await points.deletePoint(pointId, vatsimUser.id);
@@ -728,8 +732,8 @@ app.post('/supports/generate', async (c) => {
 		}
 
 		const xmlContent = await xmlFile.text();
-		const supportService = new SupportService(c.env.DB);
-		const polygonService = new PolygonService(c.env.DB);
+		const supportService = ServicePool.getSupport(c.env);
+		const polygonService = ServicePool.getPolygons(c.env);
 
 		// Generate both XML files in parallel
 		const [supportsXml, barsXml] = await Promise.all([
@@ -751,14 +755,17 @@ app.post('/supports/generate', async (c) => {
 });
 
 // NOTAM endpoints
-app.get('/notam', async (c) => {
-	const notamService = new NotamService(c.env.DB);
-	const notamData = await notamService.getGlobalNotam();
-	return c.json({
-		notam: notamData?.content || null,
-		type: notamData?.type || 'warning',
-	});
-});
+app.get('/notam',
+	withCache(() => 'global-notam', 900, 'notam'),
+	async (c) => {
+		const notamService = ServicePool.getNotam(c.env);
+		const notamData = await notamService.getGlobalNotam();
+		return c.json({
+			notam: notamData?.content || null,
+			type: notamData?.type || 'warning',
+		});
+	}
+);
 
 app.put('/notam', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -766,10 +773,9 @@ app.put('/notam', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const roles = new RoleService(c.env.DB);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -786,7 +792,7 @@ app.put('/notam', async (c) => {
 
 	// Update the NOTAM
 	const { content, type } = await c.req.json() as { content: string; type?: string };
-	const notamService = new NotamService(c.env.DB);
+	const notamService = ServicePool.getNotam(c.env);
 	const updated = await notamService.updateGlobalNotam(content, type, user.vatsim_id);
 
 	if (!updated) {
@@ -797,11 +803,14 @@ app.put('/notam', async (c) => {
 });
 
 // Public stats
-app.get('/public-stats', async (c) => {
-	const stats = new StatsService(c.env.DB);
-	const publicStats = await stats.getPublicStats();
-	return c.json(publicStats);
-});
+app.get('/public-stats',
+	withCache(() => 'public-stats', 60, 'stats'),
+	async (c) => {
+		const stats = ServicePool.getStats(c.env);
+		const publicStats = await stats.getPublicStats();
+		return c.json(publicStats);
+	}
+);
 
 // User management endpoints
 const staffUsersApp = new Hono<{
@@ -819,10 +828,9 @@ staffUsersApp.use('*', async (c, next) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const roles = new RoleService(c.env.DB);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -934,49 +942,57 @@ app.route('/staff/users', staffUsersApp);
 // Contributions endpoints
 const contributionsApp = new Hono<{ Bindings: Env }>();
 
-// GET /contributions - List all contributions with filters
-contributionsApp.get('/', async (c) => {
-	const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
 
-	// Parse query parameters for filtering
-	const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
-	const airportIcao = c.req.query('airport') || undefined;
-	const userId = c.req.query('user') || undefined;
-	const page = 1; // Default to page 1 for user contributions
-	const limit = Number.MAX_SAFE_INTEGER;
+contributionsApp.get('/',
+	withCache(CacheKeys.fromUrl, 7200, 'contributions'),
+	async (c) => {
+		const contributions = ServicePool.getContributions(c.env);
 
-	// Get contributions with filters
-	const result = await contributions.listContributions({
-		status,
-		airportIcao,
-		userId,
-		page,
-		limit,
+		// Parse query parameters for filtering
+		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
+		const airportIcao = c.req.query('airport') || undefined;
+		const userId = c.req.query('user') || undefined;
+		const page = 1; // Default to page 1 for user contributions
+		const limit = Number.MAX_SAFE_INTEGER;
+
+		// Get contributions with filters
+		const result = await contributions.listContributions({
+			status,
+			airportIcao,
+			userId,
+			page,
+			limit,
+		});
+
+		return c.json(result);
 	});
 
-	return c.json(result);
-});
-
 // GET /contributions/stats - Get contribution statistics
-contributionsApp.get('/stats', async (c) => {
-	const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
-	const stats = await contributions.getContributionStats();
-	return c.json(stats);
-});
+contributionsApp.get('/stats',
+	withCache(() => 'contribution-stats', 1800, 'contributions'),
+	async (c) => {
+		const contributions = ServicePool.getContributions(c.env);
+		const stats = await contributions.getContributionStats();
+		return c.json(stats);
+	});
 
 // GET /contributions/leaderboard - Get top contributors
-contributionsApp.get('/leaderboard', async (c) => {
-	const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
-	const leaderboard = await contributions.getContributionLeaderboard();
-	return c.json(leaderboard);
-});
+contributionsApp.get('/leaderboard',
+	withCache(() => 'contribution-leaderboard', 1800, 'contributions'),
+	async (c) => {
+		const contributions = ServicePool.getContributions(c.env);
+		const leaderboard = await contributions.getContributionLeaderboard();
+		return c.json(leaderboard);
+	});
 
 // GET /contributions/top-packages - Get a list of most used packages
-contributionsApp.get('/top-packages', async (c) => {
-	const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
-	const topPackages = await contributions.getTopPackages();
-	return c.json(topPackages);
-});
+contributionsApp.get('/top-packages',
+	withCache(() => 'contribution-top-packages', 1800, 'contributions'),
+	async (c) => {
+		const contributions = ServicePool.getContributions(c.env);
+		const topPackages = await contributions.getTopPackages();
+		return c.json(topPackages);
+	});
 
 // POST /contributions - Create a new contribution
 contributionsApp.post('/', async (c) => {
@@ -985,9 +1001,9 @@ contributionsApp.post('/', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const stats = ServicePool.getStats(c.env);
+	const auth = ServicePool.getAuth(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -997,7 +1013,7 @@ contributionsApp.post('/', async (c) => {
 	}
 
 	try {
-		const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
+		const contributions = ServicePool.getContributions(c.env);
 		const payload = await c.req.json() as ContributionSubmissionPayload;
 		const result = await contributions.createContribution({
 			userId: user.vatsim_id,
@@ -1022,9 +1038,8 @@ contributionsApp.get('/user', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -1038,7 +1053,7 @@ contributionsApp.get('/user', async (c) => {
 	const page = 1; // Default to page 1 for user contributions
 	const limit = Number.MAX_SAFE_INTEGER;
 
-	const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
+	const contributions = ServicePool.getContributions(c.env);
 	const result = await contributions.getUserContributions(user.vatsim_id, {
 		status,
 		page,
@@ -1051,7 +1066,7 @@ contributionsApp.get('/user', async (c) => {
 // GET /contributions/:id - Get specific contribution
 contributionsApp.get('/:id', async (c) => {
 	const contributionId = c.req.param('id');
-	const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
+	const contributions = ServicePool.getContributions(c.env);
 	const contribution = await contributions.getContribution(contributionId);
 
 	if (!contribution) {
@@ -1068,9 +1083,9 @@ contributionsApp.post('/:id/decision', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const stats = ServicePool.getStats(c.env);
+	const auth = ServicePool.getAuth(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -1081,7 +1096,7 @@ contributionsApp.post('/:id/decision', async (c) => {
 
 	try {
 		const contributionId = c.req.param('id');
-		const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
+		const contributions = ServicePool.getContributions(c.env);
 		const payload = await c.req.json() as ContributionDecisionPayload;
 		const result = await contributions.processDecision(contributionId, user.vatsim_id, {
 			approved: payload.approved,
@@ -1104,9 +1119,9 @@ contributionsApp.get('/user/display-name', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
+	const vatsim = ServicePool.getVatsim(c.env);
 	const vatsimUser = await vatsim.getUser(token);
-	const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
+	const contributions = ServicePool.getContributions(c.env);
 	const displayName = await contributions.getUserDisplayName(vatsimUser.id);
 
 	if (!displayName) {
@@ -1123,9 +1138,8 @@ contributionsApp.delete('/:id', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -1136,7 +1150,7 @@ contributionsApp.delete('/:id', async (c) => {
 
 	try {
 		const contributionId = c.req.param('id');
-		const contributions = new ContributionService(c.env.DB, new RoleService(c.env.DB), c.env.AIRPORTDB_API_KEY, c.env.BARS_STORAGE);
+		const contributions = ServicePool.getContributions(c.env);
 		const success = await contributions.deleteContribution(contributionId, user.vatsim_id);
 
 		return c.json({ success });
@@ -1156,10 +1170,10 @@ app.get('/staff-stats', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const roles = new RoleService(c.env.DB);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const stats = ServicePool.getStats(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -1220,8 +1234,8 @@ cdnApp.get('/files/*', async (c) => {
 		return c.text('File not found', 404);
 	}
 
-	const storage = new StorageService(c.env.BARS_STORAGE);
-	const stats = new StatsService(c.env.DB);
+	const storage = ServicePool.getStorage(c.env);
+	const stats = ServicePool.getStats(c.env);
 
 	// Bypass rate limiting for file downloads to ensure fast CDN performance
 	const fileResponse = await storage.getFile(fileKey);
@@ -1244,10 +1258,10 @@ cdnApp.post('/upload', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const roles = new RoleService(c.env.DB);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const stats = ServicePool.getStats(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -1283,7 +1297,7 @@ cdnApp.post('/upload', async (c) => {
 		const fileData = await file.arrayBuffer();
 
 		// Upload file to storage
-		const storage = new StorageService(c.env.BARS_STORAGE);
+		const storage = ServicePool.getStorage(c.env);
 		const result = await storage.uploadFile(fileKey, fileData, file.type, {
 			uploadedBy: user.vatsim_id,
 			fileName: file.name,
@@ -1318,10 +1332,9 @@ cdnApp.get('/files', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const roles = new RoleService(c.env.DB);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -1341,7 +1354,7 @@ cdnApp.get('/files', async (c) => {
 		const limit = Number.MAX_SAFE_INTEGER;
 
 		// Get list of files
-		const storage = new StorageService(c.env.BARS_STORAGE);
+		const storage = ServicePool.getStorage(c.env);
 		const result = await storage.listFiles(prefix, limit);
 
 		// Format for easier use by clients
@@ -1371,10 +1384,10 @@ cdnApp.delete('/files/*', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-	const stats = new StatsService(c.env.DB);
-	const auth = new AuthService(c.env.DB, vatsim, stats);
-	const roles = new RoleService(c.env.DB);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const stats = ServicePool.getStats(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -1399,7 +1412,7 @@ cdnApp.delete('/files/*', async (c) => {
 		}
 
 		// Delete the file
-		const storage = new StorageService(c.env.BARS_STORAGE);
+		const storage = ServicePool.getStorage(c.env);
 		const deleted = await storage.deleteFile(fileKey);
 
 		if (!deleted) {
@@ -1422,92 +1435,140 @@ cdnApp.delete('/files/*', async (c) => {
 
 app.route('/cdn', cdnApp);
 
-// Health endpoint
-app.get('/health', async (c) => {
-	const requestedService = c.req.query('service');
-	const validServices = ['database', 'storage', 'vatsim', 'auth', 'stats'];
-
-	if (requestedService && !validServices.includes(requestedService)) {
-		return c.json({
-			error: 'Invalid service',
-			validServices: validServices,
-		}, 400);
+app.post('/purge-cache', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) {
+		return c.text('Unauthorized', 401);
 	}
 
-	const healthChecks: Record<string, string> = {};
-	const servicesToCheck = requestedService ? [requestedService] : validServices;
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
-	for (const service of servicesToCheck) {
-		healthChecks[service] = 'ok';
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+
+	if (!user) {
+		return c.text('User not found', 404);
+	}
+
+	// Only lead developers can purge cache
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) {
+		return c.text('Forbidden', 403);
 	}
 
 	try {
-		if (servicesToCheck.includes('database')) {
-			try {
-				await c.env.DB.prepare('SELECT 1').first();
-			} catch (error) {
-				healthChecks.database = 'outage';
-			}
+		const { key, namespace } = await c.req.json() as { key: string; namespace?: string };
+
+		if (!key) {
+			return c.json({ error: 'Cache key is required' }, 400);
 		}
 
-		if (servicesToCheck.includes('storage')) {
-			try {
-				const storage = new StorageService(c.env.BARS_STORAGE);
-				await storage.listFiles(undefined, 1);
-			} catch (error) {
-				healthChecks.storage = 'outage';
-			}
-		}
+		const cacheService = ServicePool.getCache(c.env);
+		await cacheService.delete(key, namespace || 'default');
 
-		if (servicesToCheck.includes('vatsim')) {
-			try {
-				const response = await fetch('https://auth.vatsim.net/api/user', {
-					method: 'GET',
-					headers: {
-						'Accept': 'application/json',
-						'User-Agent': 'BARS-Health-Check/1.0'
-					},
-					signal: AbortSignal.timeout(5000)
-				});
+		console.log(`Cache purged by user ${user.vatsim_id}: ${key} (namespace: ${namespace || 'default'})`);
 
-				if (!response.ok && response.status !== 401) {
-					throw new Error(`VATSIM API returned ${response.status}`);
-				}
-			} catch (error) {
-				console.error('VATSIM health check failed:', error);
-				healthChecks.vatsim = 'outage';
-			}
-		}
-
-		if (servicesToCheck.includes('auth')) {
-			try {
-				const vatsim = new VatsimService(c.env.VATSIM_CLIENT_ID, c.env.VATSIM_CLIENT_SECRET);
-				const stats = new StatsService(c.env.DB);
-				const auth = new AuthService(c.env.DB, vatsim, stats);
-				// Auth service depends on database, so if DB is down, this might fail too :P
-			} catch (error) {
-				healthChecks.auth = 'outage';
-			}
-		}
-
-		if (servicesToCheck.includes('stats')) {
-			try {
-				const stats = new StatsService(c.env.DB);
-				await stats.getPublicStats();
-			} catch (error) {
-				healthChecks.stats = 'outage';
-			}
-		}
+		return c.json({
+			success: true,
+			message: `Cache key "${key}" purged successfully`,
+		});
 
 	} catch (error) {
-		console.error('Health check error:', error);
+		console.error('Cache purge error:', error);
+		return c.json({
+			error: error instanceof Error ? error.message : 'Failed to purge cache',
+		}, 500);
 	}
-
-	const hasOutages = Object.values(healthChecks).some(status => status === 'outage');
-	const statusCode = hasOutages ? 503 : 200;
-
-	return c.json(healthChecks, statusCode);
 });
+
+// Health endpoint
+app.get('/health',
+	withCache(CacheKeys.fromUrl, 60, 'health'),
+	async (c) => {
+		const requestedService = c.req.query('service');
+		const validServices = ['database', 'storage', 'vatsim', 'auth', 'stats'];
+
+		if (requestedService && !validServices.includes(requestedService)) {
+			return c.json({
+				error: 'Invalid service',
+				validServices: validServices,
+			}, 400);
+		}
+
+		const healthChecks: Record<string, string> = {};
+		const servicesToCheck = requestedService ? [requestedService] : validServices;
+
+		for (const service of servicesToCheck) {
+			healthChecks[service] = 'ok';
+		}
+
+		try {
+			if (servicesToCheck.includes('database')) {
+				try {
+					await c.env.DB.prepare('SELECT 1').first();
+				} catch (error) {
+					healthChecks.database = 'outage';
+				}
+			}
+
+			if (servicesToCheck.includes('storage')) {
+				try {
+					const storage = ServicePool.getStorage(c.env);
+					await storage.listFiles(undefined, 1);
+				} catch (error) {
+					healthChecks.storage = 'outage';
+				}
+			}
+
+			if (servicesToCheck.includes('vatsim')) {
+				try {
+					const response = await fetch('https://auth.vatsim.net/api/user', {
+						method: 'GET',
+						headers: {
+							'Accept': 'application/json',
+							'User-Agent': 'BARS-Health-Check/1.0'
+						},
+						signal: AbortSignal.timeout(5000)
+					});
+
+					if (!response.ok && response.status !== 401) {
+						throw new Error(`VATSIM API returned ${response.status}`);
+					}
+				} catch (error) {
+					console.error('VATSIM health check failed:', error);
+					healthChecks.vatsim = 'outage';
+				}
+			}
+
+			if (servicesToCheck.includes('auth')) {
+				try {
+					const auth = ServicePool.getAuth(c.env);
+					await auth.getUserByVatsimId('1658308');
+				} catch (error) {
+					healthChecks.auth = 'outage';
+				}
+			}
+
+			if (servicesToCheck.includes('stats')) {
+				try {
+					const stats = ServicePool.getStats(c.env);
+					await stats.getPublicStats();
+				} catch (error) {
+					healthChecks.stats = 'outage';
+				}
+			}
+
+		} catch (error) {
+			console.error('Health check error:', error);
+		}
+
+		const hasOutages = Object.values(healthChecks).some(status => status === 'outage');
+		const statusCode = hasOutages ? 503 : 200;
+
+		return c.json(healthChecks, statusCode);
+	});
 
 // Catch all other routes
 app.notFound((c) => {

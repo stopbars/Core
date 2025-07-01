@@ -1,3 +1,5 @@
+import { DatabaseSessionService } from './database-session';
+
 interface AirportData {
 	latitude_deg?: number;
 	longitude_deg?: number;
@@ -16,22 +18,33 @@ interface AirportData {
 }
 
 export class AirportService {
+	private dbSession: DatabaseSessionService;
+
 	constructor(
 		private db: D1Database,
 		private apiToken: string,
-	) {}
+	) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 
 	async getAirport(icao: string) {
 		const uppercaseIcao = icao.toUpperCase();
 
-		// First try to get from database
-		const airportFromDb = await this.db.prepare('SELECT * FROM airports WHERE icao = ?').bind(uppercaseIcao).first();
+		// First try to get from database using read-optimized query
+		const airportResult = await this.dbSession.executeRead<any>(
+			'SELECT * FROM airports WHERE icao = ?',
+			[uppercaseIcao]
+		);
+		const airportFromDb = airportResult.results[0];
 
 		if (airportFromDb) {
 			// Get runways for this airport
-			const runways = await this.db.prepare('SELECT * FROM runways WHERE airport_icao = ?').bind(uppercaseIcao).all();
+			const runwaysResult = await this.dbSession.executeRead<any>(
+				'SELECT * FROM runways WHERE airport_icao = ?',
+				[uppercaseIcao]
+			);
 
-			return { ...airportFromDb, runways: runways.results };
+			return { ...airportFromDb, runways: runwaysResult.results };
 		}
 
 		try {
@@ -49,45 +62,44 @@ export class AirportService {
 				continent: airportData.continent || 'UNKNOWN',
 			};
 
-			// Save airport to database
-			await this.db
-				.prepare('INSERT INTO airports (icao, latitude, longitude, name, continent) VALUES (?, ?, ?, ?, ?)')
-				.bind(airport.icao, airport.latitude, airport.longitude, airport.name, airport.continent)
-				.run();
+			// Save airport to database using write-optimized operation
+			await this.dbSession.executeWrite(
+				'INSERT INTO airports (icao, latitude, longitude, name, continent) VALUES (?, ?, ?, ?, ?)',
+				[airport.icao, airport.latitude, airport.longitude, airport.name, airport.continent]
+			);
 
 			// Save runway data if available
 			if (airportData.runways && airportData.runways.length > 0) {
-				const runwayPromises = airportData.runways.map((runway) => {
-					return this.db
-						.prepare(
-							`
+				const runwayStatements = airportData.runways.map((runway) => ({
+					query: `
               INSERT INTO runways (
                 airport_icao, length_ft, width_ft, 
                 le_ident, le_latitude_deg, le_longitude_deg,
                 he_ident, he_latitude_deg, he_longitude_deg
               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `,
-						)
-						.bind(
-							uppercaseIcao,
-							runway.length_ft,
-							runway.width_ft,
-							runway.le_ident,
-							runway.le_latitude_deg,
-							runway.le_longitude_deg,
-							runway.he_ident,
-							runway.he_latitude_deg,
-							runway.he_longitude_deg,
-						)
-						.run();
-				});
+					params: [
+						uppercaseIcao,
+						runway.length_ft,
+						runway.width_ft,
+						runway.le_ident,
+						runway.le_latitude_deg,
+						runway.le_longitude_deg,
+						runway.he_ident,
+						runway.he_latitude_deg,
+						runway.he_longitude_deg,
+					]
+				}));
 
-				await Promise.all(runwayPromises);
+				await this.dbSession.executeBatch(runwayStatements);
 
 				// Fetch the saved runways to return with the airport
-				const runways = await this.db.prepare('SELECT * FROM runways WHERE airport_icao = ?').bind(uppercaseIcao).all();
+				const runwaysResult = await this.dbSession.executeRead<any>(
+					'SELECT * FROM runways WHERE airport_icao = ?',
+					[uppercaseIcao]
+				);
 
-				return { ...airport, runways: runways.results };
+				return { ...airport, runways: runwaysResult.results };
 			}
 
 			return airport;
@@ -117,6 +129,10 @@ export class AirportService {
 	}
 
 	async getAirportsByContinent(continent: string) {
-		return await this.db.prepare('SELECT * FROM airports WHERE continent = ? ORDER BY icao').bind(continent.toUpperCase()).all();
+		const result = await this.dbSession.executeRead<any>(
+			'SELECT * FROM airports WHERE continent = ? ORDER BY icao',
+			[continent.toUpperCase()]
+		);
+		return { results: result.results };
 	}
 }

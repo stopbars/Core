@@ -1,13 +1,18 @@
 import { VatsimUser, UserRecord } from '../types';
 import { VatsimService } from './vatsim';
 import { StatsService } from './stats';
+import { DatabaseSessionService } from './database-session';
 
 export class AuthService {
+	private dbSession: DatabaseSessionService;
+
 	constructor(
 		private db: D1Database,
 		private vatsim: VatsimService,
 		private stats: StatsService,
-	) {}
+	) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 
 	async handleCallback(code: string) {
 		const auth = await this.vatsim.getToken(code);
@@ -20,7 +25,14 @@ export class AuthService {
 	}
 
 	private async getOrCreateUser(vatsimUser: VatsimUser) {
-		const existingUser = await this.db.prepare('SELECT * FROM users WHERE vatsim_id = ?').bind(vatsimUser.id).first<UserRecord>();
+		// Use primary mode for authentication checks to ensure latest data
+		this.dbSession.startSession({ mode: 'first-primary' });
+
+		const existingUserResult = await this.dbSession.executeRead<UserRecord>(
+			'SELECT * FROM users WHERE vatsim_id = ?',
+			[vatsimUser.id]
+		);
+		const existingUser = existingUserResult.results[0];
 
 		if (existingUser) {
 			await this.updateUserLastLogin(existingUser.id);
@@ -43,37 +55,45 @@ export class AuthService {
 	}
 
 	private async createNewUser(vatsimUser: VatsimUser) {
-		const existingVatsimUser = await this.db
-			.prepare('SELECT id FROM users WHERE vatsim_id = ?')
-			.bind(vatsimUser.id)
-			.first<UserRecord>();
+		// Check for existing VATSIM user using session
+		const existingVatsimUserResult = await this.dbSession.executeRead<UserRecord>(
+			'SELECT id FROM users WHERE vatsim_id = ?',
+			[vatsimUser.id]
+		);
 
-		if (existingVatsimUser) {
+		if (existingVatsimUserResult.results[0]) {
 			throw new Error('User with this VATSIM ID already exists');
 		}
 
 		let apiKey = this.generateApiKey();
 
 		while (true) {
-			const existingKey = await this.db.prepare('SELECT id FROM users WHERE api_key = ?').bind(apiKey).first<UserRecord>();
+			const existingKeyResult = await this.dbSession.executeRead<UserRecord>(
+				'SELECT id FROM users WHERE api_key = ?',
+				[apiKey]
+			);
 
-			if (!existingKey) break;
+			if (!existingKeyResult.results[0]) break;
 			apiKey = this.generateApiKey();
 		}
 
-		const result = await this.db
-			.prepare('INSERT INTO users (vatsim_id, api_key, email, created_at, last_login) VALUES (?, ?, ?, ?, ?) RETURNING *')
-			.bind(vatsimUser.id, apiKey, vatsimUser.email, new Date().toISOString(), new Date().toISOString())
-			.first<UserRecord>();
+		const result = await this.dbSession.executeWrite(
+			'INSERT INTO users (vatsim_id, api_key, email, created_at, last_login) VALUES (?, ?, ?, ?, ?) RETURNING *',
+			[vatsimUser.id, apiKey, vatsimUser.email, new Date().toISOString(), new Date().toISOString()]
+		);
 
-		if (!result) throw new Error('Failed to create user');
-		return result;
+		if (!result.results[0]) throw new Error('Failed to create user');
+		return result.results[0] as UserRecord;
 	}
+
 	async deleteUserAccount(vatsimId: string): Promise<boolean> {
-		await this.db.batch([
-			this.db.prepare('DELETE FROM division_members WHERE vatsim_id = ?').bind(vatsimId),
-			this.db.prepare('DELETE FROM staff WHERE user_id IN (SELECT id FROM users WHERE vatsim_id = ?)').bind(vatsimId),
-			this.db.prepare('DELETE FROM users WHERE vatsim_id = ?').bind(vatsimId),
+		// Use primary mode for write operations
+		this.dbSession.startSession({ mode: 'first-primary' });
+
+		await this.dbSession.executeBatch([
+			{ query: 'DELETE FROM division_members WHERE vatsim_id = ?', params: [vatsimId] },
+			{ query: 'DELETE FROM staff WHERE user_id IN (SELECT id FROM users WHERE vatsim_id = ?)', params: [vatsimId] },
+			{ query: 'DELETE FROM users WHERE vatsim_id = ?', params: [vatsimId] }
 		]);
 
 		await this.stats.incrementStat('user_deletions');
@@ -83,39 +103,58 @@ export class AuthService {
 	}
 
 	async getUserByApiKey(apiKey: string): Promise<UserRecord | null> {
-		return await this.db.prepare('SELECT * FROM users WHERE api_key = ?').bind(apiKey).first<UserRecord>();
+		// Use unconstrained read for API key lookups (performance optimization)
+		const result = await this.dbSession.executeRead<UserRecord>(
+			'SELECT * FROM users WHERE api_key = ?',
+			[apiKey]
+		);
+		return result.results[0] || null;
 	}
 
 	async getUserByVatsimId(vatsimId: string): Promise<UserRecord | null> {
-		return await this.db.prepare('SELECT * FROM users WHERE vatsim_id = ?').bind(vatsimId).first<UserRecord>();
+		// Use unconstrained read for VATSIM ID lookups
+		const result = await this.dbSession.executeRead<UserRecord>(
+			'SELECT * FROM users WHERE vatsim_id = ?',
+			[vatsimId]
+		);
+		return result.results[0] || null;
 	}
 
 	private async updateUserLastLogin(userId: number) {
-		await this.db.prepare('UPDATE users SET last_login = ? WHERE id = ?').bind(new Date().toISOString(), userId).run();
+		await this.dbSession.executeWrite(
+			'UPDATE users SET last_login = ? WHERE id = ?',
+			[new Date().toISOString(), userId]
+		);
 	}
 
 	async regenerateApiKey(userId: number): Promise<string> {
+		// Use primary mode for API key regeneration
+		this.dbSession.startSession({ mode: 'first-primary' });
+
 		let newApiKey = this.generateApiKey();
 
 		// Make sure the new API key is unique
 		while (true) {
-			const existingKey = await this.db.prepare('SELECT id FROM users WHERE api_key = ?').bind(newApiKey).first<UserRecord>();
+			const existingKeyResult = await this.dbSession.executeRead<UserRecord>(
+				'SELECT id FROM users WHERE api_key = ?',
+				[newApiKey]
+			);
 
-			if (!existingKey) break;
+			if (!existingKeyResult.results[0]) break;
 			newApiKey = this.generateApiKey();
 		}
 
 		// Update the user's API key in the database
-		const result = await this.db
-			.prepare('UPDATE users SET api_key = ? WHERE id = ? RETURNING api_key')
-			.bind(newApiKey, userId)
-			.first<{ api_key: string }>();
+		const result = await this.dbSession.executeWrite(
+			'UPDATE users SET api_key = ? WHERE id = ? RETURNING api_key',
+			[newApiKey, userId]
+		);
 
-		if (!result) {
+		if (!result.results[0]) {
 			throw new Error('Failed to update API key');
 		}
 
 		await this.stats.incrementStat('api_key_regenerations');
-		return result.api_key;
+		return (result.results[0] as { api_key: string }).api_key;
 	}
 }

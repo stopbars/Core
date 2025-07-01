@@ -1,21 +1,27 @@
 /**
  * Service for managing NOTAMs ( Website Notices )
  */
+import { DatabaseSessionService } from './database-session';
+
 export class NotamService {
-	constructor(private db: D1Database) { }
+	private dbSession: DatabaseSessionService;
+	constructor(private db: D1Database) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 	/**
 	 * Get the current global NOTAM
 	 */ async getGlobalNotam(): Promise<{ content: string; type: string } | null> {
 		try {
-			const result = await this.db.prepare('SELECT id, content, type FROM notams WHERE id = ?').bind('global').first();
-
-			if (!result) {
+			const result = await this.dbSession.executeRead<{ content: string; type: string }>(
+				'SELECT id, content, type FROM notams WHERE id = ?',
+				['global']
+			);
+			if (!result.results[0]) {
 				return null;
 			}
-
 			return {
-				content: result.content as string,
-				type: (result.type as string) || 'warning',
+				content: result.results[0].content as string,
+				type: (result.results[0].type as string) || 'warning',
 			};
 		} catch (error) {
 			return null;
@@ -32,10 +38,10 @@ export class NotamService {
 			if (!validTypes.includes(type)) {
 				type = 'warning'; // Default to warning if invalid type
 			}
-			await this.db
-				.prepare('INSERT OR REPLACE INTO notams (id, content, type, updated_by, updated_at) VALUES (?, ?, ?, ?, datetime("now"))')
-				.bind('global', content, type, userId)
-				.run();
+			await this.dbSession.executeWrite(
+				'INSERT OR REPLACE INTO notams (id, content, type, updated_by, updated_at) VALUES (?, ?, ?, ?, datetime("now"))',
+				['global', content, type, userId]
+			);
 			return true;
 		} catch (error) {
 			return false;

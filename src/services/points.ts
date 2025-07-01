@@ -3,13 +3,18 @@ import { DivisionService } from './divisions';
 import { AuthService } from './auth';
 import { Point } from '../types';
 
+import { DatabaseSessionService } from './database-session';
+
 export class PointsService {
+	private dbSession: DatabaseSessionService;
 	constructor(
 		private db: D1Database,
 		private idService: IDService,
 		private divisions: DivisionService,
 		private auth: AuthService,
-	) {}
+	) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 
 	async createPoint(
 		airportId: string,
@@ -38,16 +43,14 @@ export class PointsService {
 		};
 
 		// Insert into database
-		await this.db
-			.prepare(
-				`
-      INSERT INTO points (
-        id, airport_id, type, name, coordinates, directionality, 
-        orientation, color, elevated, ihp, created_at, updated_at, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-			)
-			.bind(
+		await this.dbSession.executeWrite(
+			`
+	  INSERT INTO points (
+		id, airport_id, type, name, coordinates, directionality, 
+		orientation, color, elevated, ihp, created_at, updated_at, created_by
+	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+			[
 				newPoint.id,
 				airportId,
 				newPoint.type,
@@ -61,12 +64,11 @@ export class PointsService {
 				newPoint.createdAt,
 				newPoint.updatedAt,
 				newPoint.createdBy,
-			)
-			.run();
+			]
+		);
 
 		return newPoint;
 	}
-
 	async updatePoint(
 		pointId: string,
 		userId: string,
@@ -99,16 +101,14 @@ export class PointsService {
 			.map((field) => `${this.toSnakeCase(field)} = ?`)
 			.join(', ');
 
-		await this.db
-			.prepare(
-				`
+		await this.dbSession.executeWrite(
+			`
       UPDATE points 
       SET ${updateFields}, updated_at = ? 
       WHERE id = ?
     `,
-			)
-			.bind(...Object.values(processedUpdates), new Date().toISOString(), pointId)
-			.run();
+			[...Object.values(processedUpdates), new Date().toISOString(), pointId]
+		);
 
 		return this.getPoint(pointId) as Promise<Point>;
 	}
@@ -133,20 +133,26 @@ export class PointsService {
 		}
 
 		// Delete from database
-		await this.db.prepare('DELETE FROM points WHERE id = ?').bind(pointId).run();
+		await this.dbSession.executeWrite(
+			'DELETE FROM points WHERE id = ?',
+			[pointId]
+		);
 	}
 
 	async getPoint(pointId: string): Promise<Point | null> {
-		const result = await this.db.prepare('SELECT * FROM points WHERE id = ?').bind(pointId).first();
-
-		if (!result) return null;
-
-		return this.mapPointFromDb(result);
+		const result = await this.dbSession.executeRead<any>(
+			'SELECT * FROM points WHERE id = ?',
+			[pointId]
+		);
+		if (!result.results[0]) return null;
+		return this.mapPointFromDb(result.results[0]);
 	}
 
 	async getAirportPoints(airportId: string): Promise<Point[]> {
-		const results = await this.db.prepare('SELECT * FROM points WHERE airport_id = ?').bind(airportId).all();
-
+		const results = await this.dbSession.executeRead<any>(
+			'SELECT * FROM points WHERE airport_id = ?',
+			[airportId]
+		);
 		return results.results.map(this.mapPointFromDb);
 	}
 
