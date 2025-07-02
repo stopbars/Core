@@ -4,9 +4,12 @@ import { processBarsPolygon, deduplicateTaxiwayPoints } from './bars/handlers';
 import { BarsPolygon, BarsDBRecord, ProcessedBarsObject, BarsLightPoint, LightProperties } from './bars/types';
 import { calculateDistance } from './bars/geoUtils';
 
+import { DatabaseSessionService } from './database-session';
+
 export class PolygonService {
 	private statsService?: StatsService;
 	private airportService: AirportService;
+	private dbSession: DatabaseSessionService;
 
 	constructor(
 		private db: D1Database,
@@ -14,6 +17,7 @@ export class PolygonService {
 	) {
 		this.statsService = new StatsService(db);
 		this.airportService = new AirportService(db, airportApiKey || '');
+		this.dbSession = new DatabaseSessionService(db);
 	}
 
 	/**
@@ -62,24 +66,18 @@ export class PolygonService {
 	 */ async getBarsRecordFromDB(id: string): Promise<BarsDBRecord | null> {
 		try {
 			const barsId = id.startsWith('BARS_') ? id : `BARS_${id}`;
-
-			const statement = this.db
-				.prepare(
-					`
-        SELECT id, type, airport_id, directionality, orientation, color, elevated, ihp, name, coordinates
-        FROM points 
-        WHERE id = ?
-      `,
-				)
-				.bind(barsId);
-
-			const result = await statement.first();
-
-			if (!result) {
+			const result = await this.dbSession.executeRead<any>(
+				`
+		SELECT id, type, airport_id, directionality, orientation, color, elevated, ihp, name, coordinates
+		FROM points 
+		WHERE id = ?
+	  `,
+				[barsId]
+			);
+			if (!result.results[0]) {
 				return null;
 			}
-
-			return this.mapBarsRecordFromDb(result);
+			return this.mapBarsRecordFromDb(result.results[0]);
 		} catch (error) {
 			return null;
 		}
@@ -274,9 +272,9 @@ export class PolygonService {
 
 		const needsOrientation = Boolean(
 			props.orientation &&
-				!isElevatedStopbarWithBoth &&
-				((objectType !== 'stand' && props.orientation !== objectProps.orientation) ||
-					(objectType === 'stand' && props.orientation !== 'right')),
+			!isElevatedStopbarWithBoth &&
+			((objectType !== 'stand' && props.orientation !== objectProps.orientation) ||
+				(objectType === 'stand' && props.orientation !== 'right')),
 		);
 
 		// Check if IHP property needs inclusion (differs from object default)

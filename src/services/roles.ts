@@ -24,16 +24,29 @@ export interface DivisionRoles {
 
 import { StaffRecord } from '../types';
 
+import { DatabaseSessionService } from './database-session';
+
 export class RoleService {
-	constructor(private db: D1Database) {}
+	private dbSession: DatabaseSessionService;
+	constructor(private db: D1Database) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 
 	async isStaff(userId: number): Promise<boolean> {
-		const staff = await this.db.prepare('SELECT * FROM staff WHERE user_id = ?').bind(userId).first<StaffRecord>();
+		const staffResult = await this.dbSession.executeRead<StaffRecord>(
+			'SELECT * FROM staff WHERE user_id = ?',
+			[userId]
+		);
+		const staff = staffResult.results[0];
 		return !!staff && !!staff.role && staff.role in roleHierarchy;
 	}
 
 	async getUserRole(userId: number): Promise<StaffRole | null> {
-		const staff = await this.db.prepare('SELECT * FROM staff WHERE user_id = ?').bind(userId).first<StaffRecord>();
+		const staffResult = await this.dbSession.executeRead<StaffRecord>(
+			'SELECT * FROM staff WHERE user_id = ?',
+			[userId]
+		);
+		const staff = staffResult.results[0];
 		if (!staff?.role) return null;
 		return staff.role as StaffRole;
 	}
@@ -53,20 +66,16 @@ export class RoleService {
 	}
 
 	async getDivisionRoles(userId: number): Promise<DivisionRoles> {
-		const stmt = await this.db
-			.prepare(
-				`
-            SELECT dm.role
-            FROM division_members dm
-            JOIN users u ON u.vatsim_id = dm.vatsim_id
-            WHERE u.id = ?
-        `,
-			)
-			.bind(userId);
-
-		const roles = await stmt.all<{ role: string }>();
-
-		return roles.results.reduce(
+		const rolesResult = await this.dbSession.executeRead<{ role: string }>(
+			`
+			SELECT dm.role
+			FROM division_members dm
+			JOIN users u ON u.vatsim_id = dm.vatsim_id
+			WHERE u.id = ?
+		`,
+			[userId]
+		);
+		return rolesResult.results.reduce(
 			(acc, { role }) => ({
 				...acc,
 				[role]: 1,

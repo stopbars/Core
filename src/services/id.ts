@@ -1,21 +1,27 @@
 import { customAlphabet } from 'nanoid';
 
+import { DatabaseSessionService } from './database-session';
+
 export class IDService {
 	private BARS_ID_PREFIX = 'BARS';
 	private ID_LENGTH = 5;
 	private ALLOWED_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+	private dbSession: DatabaseSessionService;
 
-	constructor(private db: D1Database) {}
+	constructor(private db: D1Database) {
+		this.dbSession = new DatabaseSessionService(db);
+	}
 
 	async generateBarsId(): Promise<string> {
 		const nanoid = customAlphabet(this.ALLOWED_CHARS, this.ID_LENGTH);
-
 		while (true) {
 			const uniqueId = nanoid();
 			const barsId = `${this.BARS_ID_PREFIX}_${uniqueId}`;
-			const existingPoint = await this.db.prepare('SELECT id FROM points WHERE id = ?').bind(barsId).first();
-
-			if (!existingPoint) {
+			const result = await this.dbSession.executeRead<{ id: string }>(
+				'SELECT id FROM points WHERE id = ?',
+				[barsId]
+			);
+			if (!result.results[0]) {
 				return barsId;
 			}
 		}
