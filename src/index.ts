@@ -618,6 +618,106 @@ app.get('/airports/:icao/points',
 		return c.json(airportPoints);
 	});
 
+app.post('/airports/:icao/points', async (c) => {
+	const airportId = c.req.param('icao');
+
+	// Validate ICAO format (exactly 4 uppercase letters/numbers)
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	const pointData = await c.req.json() as Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>;
+	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
+	return c.json(newPoint, 201);
+});
+
+app.put('/airports/:icao/points/:id', async (c) => {
+	const airportId = c.req.param('icao');
+	const pointId = c.req.param('id');
+
+	// Validate ICAO format (exactly 4 uppercase letters/numbers)
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	// Validate point ID format (alphanumeric, dash, underscore)
+	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+		return c.text('Invalid point ID format', 400);
+	}
+
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	const updates = await c.req.json() as Partial<Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>>;
+	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
+	return c.json(updatedPoint);
+});
+
+app.delete('/airports/:icao/points/:id', async (c) => {
+	const airportId = c.req.param('icao');
+	const pointId = c.req.param('id');
+
+	// Validate ICAO format (exactly 4 uppercase letters/numbers)
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	// Validate point ID format (alphanumeric, dash, underscore)
+	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+		return c.text('Invalid point ID format', 400);
+	}
+
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	try {
+		await points.deletePoint(pointId, vatsimUser.id);
+		return c.body(null, 204);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : 'An unknown error occurred';
+		return c.json({ error: message }, 403);
+	}
+});
+
 // Get single point by ID
 app.get('/points/:id',
 	withCache(CacheKeys.fromUrl, 3600, 'points'),
