@@ -14,7 +14,7 @@
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.36",
 		"@types/node": "^24.0.13",
-		"prettier": "^3.0.0",
+		"prettier": "^3.6.2",
 		"typescript": "^5.5.2",
 		"vitest": "^3.1.4",
 		"wrangler": "^4.19.1"
