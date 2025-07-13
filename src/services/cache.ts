@@ -104,7 +104,8 @@ export function withCache(
         await next();
 
         // After handler executes, cache the response if it was successful
-        if (c.res && c.res.status < 400) {
+        // Don't cache error responses (4xx, 5xx) including 404 Not Found
+        if (c.res && c.res.status >= 200 && c.res.status < 300) {
             try {
                 // Clone the response to read it without consuming the original
                 const clonedRes = c.res.clone();

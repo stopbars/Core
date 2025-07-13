@@ -11,6 +11,9 @@ import { DatabaseContextFactory } from './services/database-context';
 import { withCache, CacheKeys } from './services/cache';
 import { ServicePool } from './services/service-pool';
 
+// Shared point regex
+const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
+
 interface CreateDivisionPayload {
 	name: string;
 	headVatsimId: string;
@@ -656,7 +659,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 	}
 
 	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+	if (!pointId.match(POINT_ID_REGEX)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -690,7 +693,7 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	}
 
 	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+	if (!pointId.match(POINT_ID_REGEX)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -717,6 +720,86 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 		return c.json({ error: message }, 403);
 	}
 });
+
+// Get single point by ID
+app.get('/points/:id',
+	withCache(CacheKeys.fromUrl, 3600, 'points'),
+	async (c) => {
+		const pointId = c.req.param('id');
+
+		// Validate point ID format (alphanumeric, dash, underscore)
+		if (!pointId.match(POINT_ID_REGEX)) {
+			return c.text('Invalid point ID format', 400);
+		}
+
+		const points = ServicePool.getPoints(c.env);
+		const point = await points.getPoint(pointId);
+
+		if (!point) {
+			return c.text('Point not found', 404);
+		}
+
+		return c.json(point);
+	});
+
+// Get multiple points by IDs (batch endpoint)
+app.get('/points',
+	withCache(CacheKeys.fromUrl, 3600, 'points'),
+	async (c) => {
+		const ids = c.req.query('ids');
+
+		if (!ids) {
+			return c.json({
+				error: 'Missing ids query parameter',
+				message: 'Provide comma-separated point IDs: /points?ids=id1,id2,id3'
+			}, 400);
+		}
+
+		// Parse and validate point IDs
+		const pointIds = ids.split(',')
+			.map(id => id.trim())
+			.filter(id => id.length > 0);
+
+		if (pointIds.length === 0) {
+			return c.json({
+				error: 'No valid point IDs provided'
+			}, 400);
+		}
+
+		if (pointIds.length > 100) {
+			return c.json({
+				error: 'Too many point IDs requested',
+				message: 'Maximum 100 points can be requested at once'
+			}, 400);
+		}
+
+
+		const invalidIds = pointIds.filter(id => !id.match(POINT_ID_REGEX));
+		if (invalidIds.length > 0) {
+			return c.json({
+				error: 'Invalid point ID format',
+				invalidIds
+			}, 400);
+		}
+
+		const points = ServicePool.getPoints(c.env);
+
+		// Fetch all points in parallel
+		const pointPromises = pointIds.map(id => points.getPoint(id));
+		const pointResults = await Promise.all(pointPromises);
+
+		// Filter out null results and create response
+		const foundPoints = pointResults.filter(point => point !== null);
+		const foundIds = foundPoints.map(point => point!.id);
+		const notFoundIds = pointIds.filter(id => !foundIds.includes(id));
+
+		return c.json({
+			points: foundPoints,
+			requested: pointIds.length,
+			found: foundPoints.length,
+			notFound: notFoundIds.length > 0 ? notFoundIds : undefined
+		});
+	});
 
 // Light Support endpoints
 app.post('/supports/generate', async (c) => {

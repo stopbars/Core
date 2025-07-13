@@ -65,6 +65,10 @@ web_modules/
 
 .npm
 
+# Copilot instructions
+
+copilot-instructions.md
+
 # Optional eslint cache
 
 .eslintcache
