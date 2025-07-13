@@ -618,105 +618,85 @@ app.get('/airports/:icao/points',
 		return c.json(airportPoints);
 	});
 
-app.post('/airports/:icao/points', async (c) => {
-	const airportId = c.req.param('icao');
+// Get single point by ID
+app.get('/points/:id',
+	withCache(CacheKeys.fromUrl, 3600, 'points'),
+	async (c) => {
+		const pointId = c.req.param('id');
 
-	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
-		return c.text('Invalid airport ICAO format', 400);
-	}
+		// Validate point ID format (alphanumeric, dash, underscore)
+		if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+			return c.text('Invalid point ID format', 400);
+		}
 
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
+		const points = ServicePool.getPoints(c.env);
+		const point = await points.getPoint(pointId);
 
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-	if (!user) {
-		return c.text('Unauthorized', 401);
-	}
+		if (!point) {
+			return c.text('Point not found', 404);
+		}
 
-	const points = ServicePool.getPoints(c.env);
+		return c.json(point);
+	});
 
-	const pointData = await c.req.json() as Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>;
-	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
-	return c.json(newPoint, 201);
-});
+// Get multiple points by IDs (batch endpoint)
+app.get('/points',
+	withCache(CacheKeys.fromUrl, 3600, 'points'),
+	async (c) => {
+		const ids = c.req.query('ids');
 
-app.put('/airports/:icao/points/:id', async (c) => {
-	const airportId = c.req.param('icao');
-	const pointId = c.req.param('id');
+		if (!ids) {
+			return c.json({
+				error: 'Missing ids query parameter',
+				message: 'Provide comma-separated point IDs: /points?ids=id1,id2,id3'
+			}, 400);
+		}
 
-	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
-		return c.text('Invalid airport ICAO format', 400);
-	}
+		// Parse and validate point IDs
+		const pointIds = ids.split(',')
+			.map(id => id.trim())
+			.filter(id => id.length > 0);
 
-	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
-		return c.text('Invalid point ID format', 400);
-	}
+		if (pointIds.length === 0) {
+			return c.json({
+				error: 'No valid point IDs provided'
+			}, 400);
+		}
 
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
+		if (pointIds.length > 100) {
+			return c.json({
+				error: 'Too many point IDs requested',
+				message: 'Maximum 100 points can be requested at once'
+			}, 400);
+		}
 
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-	if (!user) {
-		return c.text('Unauthorized', 401);
-	}
 
-	const points = ServicePool.getPoints(c.env);
+		const invalidIds = pointIds.filter(id => !id.match(/^[A-Z0-9-_]+$/));
+		if (invalidIds.length > 0) {
+			return c.json({
+				error: 'Invalid point ID format',
+				invalidIds
+			}, 400);
+		}
 
-	const updates = await c.req.json() as Partial<Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>>;
-	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
-	return c.json(updatedPoint);
-});
+		const points = ServicePool.getPoints(c.env);
 
-app.delete('/airports/:icao/points/:id', async (c) => {
-	const airportId = c.req.param('icao');
-	const pointId = c.req.param('id');
+		// Fetch all points in parallel
+		const pointPromises = pointIds.map(id => points.getPoint(id));
+		const pointResults = await Promise.all(pointPromises);
 
-	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
-		return c.text('Invalid airport ICAO format', 400);
-	}
+		// Filter out null results and create response
+		const foundPoints = pointResults.filter(point => point !== null);
+		const foundIds = foundPoints.map(point => point!.id);
+		const notFoundIds = pointIds.filter(id => !foundIds.includes(id));
 
-	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
-		return c.text('Invalid point ID format', 400);
-	}
-
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-	if (!user) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const points = ServicePool.getPoints(c.env);
-
-	try {
-		await points.deletePoint(pointId, vatsimUser.id);
-		return c.body(null, 204);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : 'An unknown error occurred';
-		return c.json({ error: message }, 403);
-	}
-});
+		return c.json({
+			points: foundPoints,
+			requested: pointIds.length,
+			found: foundPoints.length,
+			notFound: notFoundIds.length > 0 ? notFoundIds : undefined
+		});
+	});
 
 // Light Support endpoints
 app.post('/supports/generate', async (c) => {
