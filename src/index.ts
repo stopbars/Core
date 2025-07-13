@@ -11,6 +11,9 @@ import { DatabaseContextFactory } from './services/database-context';
 import { withCache, CacheKeys } from './services/cache';
 import { ServicePool } from './services/service-pool';
 
+// Shared point regex
+const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
+
 interface CreateDivisionPayload {
 	name: string;
 	headVatsimId: string;
@@ -656,7 +659,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 	}
 
 	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+	if (!pointId.match(POINT_ID_REGEX)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -690,7 +693,7 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	}
 
 	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+	if (!pointId.match(POINT_ID_REGEX)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -725,7 +728,7 @@ app.get('/points/:id',
 		const pointId = c.req.param('id');
 
 		// Validate point ID format (alphanumeric, dash, underscore)
-		if (!pointId.match(/^[A-Z0-9-_]+$/)) {
+		if (!pointId.match(POINT_ID_REGEX)) {
 			return c.text('Invalid point ID format', 400);
 		}
 
@@ -771,7 +774,7 @@ app.get('/points',
 		}
 
 
-		const invalidIds = pointIds.filter(id => !id.match(/^[A-Z0-9-_]+$/));
+		const invalidIds = pointIds.filter(id => !id.match(POINT_ID_REGEX));
 		if (invalidIds.length > 0) {
 			return c.json({
 				error: 'Invalid point ID format',
