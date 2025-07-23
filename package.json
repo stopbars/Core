@@ -12,7 +12,7 @@
 		"build": "wrangler build"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.8.53",
+		"@cloudflare/vitest-pool-workers": "^0.8.56",
 		"@types/node": "^24.1.0",
 		"prettier": "^3.6.2",
 		"typescript": "^5.5.2",
