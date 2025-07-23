@@ -1524,6 +1524,219 @@ cdnApp.delete('/files/*', async (c) => {
 
 app.route('/cdn', cdnApp);
 
+// EuroScope public file listing endpoint
+app.get('/euroscope/files/:icao', async (c) => {
+	const icao = c.req.param('icao').toUpperCase();
+
+	// Validate ICAO format
+	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+		return c.json({
+			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+		}, 400);
+	}
+
+	try {
+		// Get list of files for this ICAO
+		const storage = ServicePool.getStorage(c.env);
+		const result = await storage.listFiles(`EuroScope/${icao}/`, 10);
+
+		// Format for easier use by clients
+		const files = result.objects.map((obj) => ({
+			fileName: obj.key.split('/').pop() || '',
+			size: obj.size,
+			uploaded: obj.uploaded.toISOString(),
+			url: new URL(`https://dev-cdn.stopbars.com/${obj.key}`, c.req.url).toString(),
+		}));
+
+		return c.json({
+			icao: icao,
+			files: files,
+			count: files.length,
+		});
+	} catch (error) {
+		console.error('EuroScope public file listing error:', error);
+		return c.json({
+			error: error instanceof Error ? error.message : 'Failed to list files',
+		}, 500);
+	}
+});
+
+// EuroScope file management endpoints
+const euroscopeApp = new Hono<{
+	Bindings: Env;
+	Variables: {
+		vatsimUser?: any;
+		user?: any;
+	};
+}>();
+
+// Middleware for EuroScope endpoints to authenticate users
+euroscopeApp.use('*', async (c, next) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+
+	if (!user) {
+		return c.text('User not found', 404);
+	}
+
+	c.set('vatsimUser', vatsimUser);
+	c.set('user', user);
+	await next();
+});
+
+// POST /euroscope/upload - Upload files to ICAO-specific folders
+euroscopeApp.post('/upload', async (c) => {
+	const user = c.get('user');
+	const vatsimUser = c.get('vatsimUser');
+
+	try {
+		const formData = await c.req.formData();
+		const file = formData.get('file');
+		const icao = formData.get('icao')?.toString()?.toUpperCase();
+
+		if (!file || !(file instanceof File)) {
+			return c.json({
+				error: 'File is required',
+			}, 400);
+		}
+
+		if (!icao) {
+			return c.json({
+				error: 'ICAO code is required',
+			}, 400);
+		}
+
+		// Validate ICAO format (exactly 4 uppercase letters/numbers)
+		if (!icao.match(/^[A-Z0-9]{4}$/)) {
+			return c.json({
+				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+			}, 400);
+		}
+
+		// Check file size limit (10MB)
+		const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB in bytes
+		if (file.size > MAX_FILE_SIZE) {
+			return c.json({
+				error: 'File size exceeds 10MB limit',
+			}, 400);
+		}
+
+		// Check if user has access to upload files for this ICAO
+		const divisions = ServicePool.getDivisions(c.env);
+		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+
+		if (!hasAccess) {
+			return c.json({
+				error: 'You do not have permission to upload files for this airport. Please ensure your division has approved access to this ICAO.',
+			}, 403);
+		}
+
+		// Create file path: EuroScope/ICAO/filename
+		const fileName = file.name;
+		const fileKey = `EuroScope/${icao}/${fileName}`;
+
+		// Check if this would exceed the 2 files per ICAO limit
+		const storage = ServicePool.getStorage(c.env);
+		const existingFiles = await storage.listFiles(`EuroScope/${icao}/`, 10);
+
+		// Count files that are not the one being replaced
+		const otherFiles = existingFiles.objects.filter(obj => obj.key !== fileKey);
+		if (otherFiles.length >= 2) {
+			return c.json({
+				error: 'Maximum of 2 files per ICAO code allowed. Please delete an existing file before uploading a new one.',
+			}, 400);
+		}
+
+		// Extract file data
+		const fileData = await file.arrayBuffer();
+
+		// Upload file to storage with metadata
+		const result = await storage.uploadFile(fileKey, fileData, file.type, {
+			uploadedBy: vatsimUser.id.toString(),
+			icao: icao,
+			fileName: file.name,
+			size: file.size.toString(),
+		});
+
+
+		// Return success with download URL
+		return c.json({
+			success: true,
+			file: {
+				key: result.key,
+				icao: icao,
+				fileName: fileName,
+				size: file.size,
+				url: new URL(`https://dev-cdn.stopbars.com/${result.key}`, c.req.url).toString(),
+			},
+		}, 201);
+	} catch (error) {
+		console.error('EuroScope file upload error:', error);
+		return c.json({
+			error: error instanceof Error ? error.message : 'Failed to upload file',
+		}, 500);
+	}
+});
+
+// DELETE /euroscope/files/:icao/:filename - Delete a specific file
+euroscopeApp.delete('/files/:icao/:filename', async (c) => {
+	const icao = c.req.param('icao').toUpperCase();
+	const filename = c.req.param('filename');
+	const user = c.get('user');
+	const vatsimUser = c.get('vatsimUser');
+
+	// Validate ICAO format
+	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+		return c.json({
+			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+		}, 400);
+	}
+
+	try {
+		// Check if user has access to delete files for this ICAO
+		const divisions = ServicePool.getDivisions(c.env);
+		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+
+		if (!hasAccess) {
+			return c.json({
+				error: 'You do not have permission to delete files for this airport. Please ensure your division has approved access to this ICAO.',
+			}, 403);
+		}
+
+		// Construct the file key
+		const fileKey = `EuroScope/${icao}/${filename}`;
+
+		// Delete the file
+		const storage = ServicePool.getStorage(c.env);
+		const deleted = await storage.deleteFile(fileKey);
+
+		if (!deleted) {
+			return c.json({
+				error: 'File not found',
+			}, 404);
+		}
+
+		return c.json({
+			success: true,
+			message: `File ${filename} deleted successfully from ${icao}`,
+		});
+	} catch (error) {
+		console.error('EuroScope file deletion error:', error);
+		return c.json({
+			error: error instanceof Error ? error.message : 'Failed to delete file',
+		}, 500);
+	}
+});
+app.route('/euroscope', euroscopeApp);
+
 app.post('/purge-cache', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
