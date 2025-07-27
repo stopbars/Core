@@ -90,23 +90,41 @@ export class PointsService {
 		const updatedPoint = { ...point, ...updates };
 		this.validatePoint(updatedPoint);
 
-		// Prepare updates with serialized coordinates
+		// Define allowed fields for updates
+		const allowedFields = [
+			'type', 'name', 'coordinates', 'directionality',
+			'orientation', 'color', 'elevated', 'ihp'
+		];
 		const processedUpdates: Record<string, any> = {};
 		Object.entries(updates).forEach(([key, value]) => {
-			processedUpdates[key] = key === 'coordinates' ? JSON.stringify(value) : value;
+			if (allowedFields.includes(key)) {
+				processedUpdates[key] = key === 'coordinates' ? JSON.stringify(value) : value;
+			}
 		});
+		if (Object.keys(processedUpdates).length === 0) {
+			return this.getPoint(pointId) as Promise<Point>;
+		}
+		const fieldMappings: Record<string, string> = {
+			'type': 'type',
+			'name': 'name',
+			'coordinates': 'coordinates',
+			'directionality': 'directionality',
+			'orientation': 'orientation',
+			'color': 'color',
+			'elevated': 'elevated',
+			'ihp': 'ihp'
+		};
 
-		// Update in database
 		const updateFields = Object.keys(processedUpdates)
-			.map((field) => `${this.toSnakeCase(field)} = ?`)
+			.map((field) => `${fieldMappings[field]} = ?`)
 			.join(', ');
 
 		await this.dbSession.executeWrite(
 			`
-      UPDATE points 
-      SET ${updateFields}, updated_at = ? 
-      WHERE id = ?
-    `,
+			UPDATE points 
+			SET ${updateFields}, updated_at = ? 
+			WHERE id = ?
+			`,
 			[...Object.values(processedUpdates), new Date().toISOString(), pointId]
 		);
 

@@ -204,7 +204,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 	const auth = ServicePool.getAuth(c.env);
 
 	const { vatsimToken } = await auth.handleCallback(code);
-	return Response.redirect(`https://stopbars.com/auth/callback?token=${vatsimToken}`, 302);
+	return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
 });
 
 // Get account info
@@ -1732,6 +1732,37 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		console.error('EuroScope file deletion error:', error);
 		return c.json({
 			error: error instanceof Error ? error.message : 'Failed to delete file',
+		}, 500);
+	}
+});
+
+// GET /euroscope/:icao/editable - Check if user has permission to edit files for an airport
+euroscopeApp.get('/:icao/editable', async (c) => {
+	const icao = c.req.param('icao').toUpperCase();
+	const vatsimUser = c.get('vatsimUser');
+
+	// Validate ICAO format
+	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+		return c.json({
+			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+		}, 400);
+	}
+
+	try {
+		// Check if user has access to edit files for this ICAO
+		const divisions = ServicePool.getDivisions(c.env);
+		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+		const userRole = await divisions.getUserRoleForAirport(vatsimUser.id.toString(), icao);
+
+		return c.json({
+			icao: icao,
+			editable: hasAccess,
+			role: userRole,
+		});
+	} catch (error) {
+		console.error('EuroScope access check error:', error);
+		return c.json({
+			error: error instanceof Error ? error.message : 'Failed to check airport access',
 		}, 500);
 	}
 });
