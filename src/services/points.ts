@@ -235,7 +235,12 @@ export class PointsService {
 		const selects = Object.keys(changeset.modify ?? {})
 			.map((id) => this.stmtSelect.bindAll({ id, airportId }));
 		const modifiedPoints = (await this.dbSession.executeBatch(selects))
-			.map((result) => this.mapPointFromDb(result.results[0]) as PointData)
+			.map((result) => {
+				if (!result.results || result.results.length === 0) {
+					throw new Error(`No results found for query with ID: ${result.parameters?.id}`);
+				}
+				return this.mapPointFromDb(result.results[0]) as PointData;
+			})
 			.map((basis, i) => ({
 				...basis,
 				...Object.values(changeset.modify!)[i],
