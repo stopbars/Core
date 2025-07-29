@@ -144,3 +144,12 @@ export interface Point {
 	updatedAt: string;
 	createdBy: string;
 }
+
+export type PointData = Omit<Point, 'id' | 'airportId' | 'createdAt' | 'updatedAt' | 'createdBy'>;
+
+// Transaction containing multiple updates to points data
+export type PointChangeset = {
+	create?: PointData[],
+	modify?: Record<string, Partial<PointData>>; // Keyed by ID
+	delete?: string[]; // IDs
+};

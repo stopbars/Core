@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { Point } from './types';
+import { PointChangeset, PointData } from './types';
 import { VatsimService } from './services/vatsim';
 import { AuthService } from './services/auth';
 import { StatsService } from './services/stats';
@@ -644,9 +644,38 @@ app.post('/airports/:icao/points', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const pointData = await c.req.json() as Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>;
+	const pointData = await c.req.json() as PointData;
 	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
 	return c.json(newPoint, 201);
+});
+
+// OSM-style batched transaction
+app.post('/airports/:icao/points/batch', async (c) => {
+	const airportId = c.req.param('icao');
+
+	// Validate ICAO format (exactly 4 uppercase letters/numbers)
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	const changeset = await c.req.json() as PointChangeset;
+	const newPoints = await points.applyChangeset(airportId, user.vatsim_id, changeset);
+	return c.json(newPoints, 201);
 });
 
 app.put('/airports/:icao/points/:id', async (c) => {
@@ -678,7 +707,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const updates = await c.req.json() as Partial<Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>>;
+	const updates = await c.req.json() as Partial<PointData>;
 	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
 	return c.json(updatedPoint);
 });

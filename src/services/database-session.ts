@@ -37,9 +37,12 @@ export interface DatabaseResponse<T = any> {
     meta?: DatabaseMeta;
 }
 
+export type DatabaseSerializable = null | number | string | boolean | ArrayBuffer;
+export type DatabaseBinding = Record<string, DatabaseSerializable>;
+
 /**
  * Database Session Service for D1 Read Replication
- * 
+ *
  * This service wraps D1 database operations with Sessions API to provide:
  * - Sequential consistency across read replicas
  * - Automatic session management with bookmarks
@@ -89,6 +92,16 @@ export class DatabaseSessionService {
         }
         return bookmark;
     }
+
+	/**
+	 * Create a type-safe prepared statement
+	 */
+	public prepare<T extends DatabaseBinding>(
+		query: string,
+		bindings: (keyof T)[],
+	): PreparedStatement<T> {
+		return new PreparedStatement(this.db.prepare(query), bindings);
+	}
 
     /**
      * Execute a prepared statement with session awareness
@@ -209,19 +222,28 @@ export class DatabaseSessionService {
      * Execute multiple statements in a batch
      * Uses primary database for consistency
      */
-    public async executeBatch(statements: Array<{
-        query: string;
-        params?: any[];
-    }>): Promise<DatabaseResponse<any>[]> {
+    public async executeBatch(
+		statements: Array<{
+			query: string;
+			params?: any[];
+		} | D1PreparedStatement>
+	): Promise<DatabaseResponse<any>[]> {
+		if (statements.length === 0) return [];
+
         // Force primary mode for batch operations
         if (!this.session) {
             this.startSession({ mode: 'first-primary' });
         }
 
         try {
-            const preparedStatements = statements.map(({ query, params = [] }) => {
-                const stmt = this.session!.prepare(query);
-                return params.length > 0 ? stmt.bind(...params) : stmt;
+            const preparedStatements = statements.map((statement) => {
+				if ('query' in statement && typeof statement.query === 'string') {
+					const { query, params = [] } = statement;
+					const stmt = this.session!.prepare(query);
+					return params.length > 0 ? stmt.bind(...params) : stmt;
+				} else {
+					return statement as D1PreparedStatement;
+				}
             });
 
             const results = await this.session!.batch(preparedStatements);
@@ -229,10 +251,7 @@ export class DatabaseSessionService {
             // Update bookmark after batch operation
             this.getBookmark();
 
-            return results.map((result: any) => ({
-                success: result.success,
-                meta: result.meta || {}
-            }));
+            return results;
         } catch (error) {
             console.error('Database batch error:', error);
             throw error;
@@ -328,4 +347,24 @@ export class DatabaseSessionService {
             session.closeSession();
         }
     }
+}
+
+/**
+ * Wrapper around D1PreparedStatement with typed named parameters
+ */
+export class PreparedStatement<T extends DatabaseBinding> {
+	private statement: D1PreparedStatement;
+	private bindings: (keyof T)[];
+
+	constructor(
+		statement: D1PreparedStatement,
+		bindings: (keyof T)[],
+	) {
+		this.statement = statement;
+		this.bindings = bindings;
+	}
+
+	public bindAll(binds: T): D1PreparedStatement {
+		return this.statement.bind(...this.bindings.map((key) => binds[key] ?? null));
+	}
 }
