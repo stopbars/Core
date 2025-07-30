@@ -237,7 +237,7 @@ export class PointsService {
 		const modifiedPoints = (await this.dbSession.executeBatch(selects))
 			.map((result) => {
 				if (!result.results || result.results.length === 0) {
-					throw new Error(`No results found for query with ID: ${result.parameters?.id}`);
+					throw new Error('Point targeted by modify operation does not exist');
 				}
 				return this.mapPointFromDb(result.results[0]) as PointData;
 			})
