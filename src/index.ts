@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { Point } from './types';
+import { PointChangeset, PointData } from './types';
 import { VatsimService } from './services/vatsim';
 import { AuthService } from './services/auth';
 import { StatsService } from './services/stats';
@@ -204,7 +204,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 	const auth = ServicePool.getAuth(c.env);
 
 	const { vatsimToken } = await auth.handleCallback(code);
-	return Response.redirect(`https://stopbars.com/auth/callback?token=${vatsimToken}`, 302);
+	return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
 });
 
 // Get account info
@@ -644,9 +644,38 @@ app.post('/airports/:icao/points', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const pointData = await c.req.json() as Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>;
+	const pointData = await c.req.json() as PointData;
 	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
 	return c.json(newPoint, 201);
+});
+
+// OSM-style batched transaction
+app.post('/airports/:icao/points/batch', async (c) => {
+	const airportId = c.req.param('icao');
+
+	// Validate ICAO format (exactly 4 uppercase letters/numbers)
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	const changeset = await c.req.json() as PointChangeset;
+	const newPoints = await points.applyChangeset(airportId, user.vatsim_id, changeset);
+	return c.json(newPoints, 201);
 });
 
 app.put('/airports/:icao/points/:id', async (c) => {
@@ -678,7 +707,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const updates = await c.req.json() as Partial<Omit<Point, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'>>;
+	const updates = await c.req.json() as Partial<PointData>;
 	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
 	return c.json(updatedPoint);
 });
@@ -1732,6 +1761,37 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		console.error('EuroScope file deletion error:', error);
 		return c.json({
 			error: error instanceof Error ? error.message : 'Failed to delete file',
+		}, 500);
+	}
+});
+
+// GET /euroscope/:icao/editable - Check if user has permission to edit files for an airport
+euroscopeApp.get('/:icao/editable', async (c) => {
+	const icao = c.req.param('icao').toUpperCase();
+	const vatsimUser = c.get('vatsimUser');
+
+	// Validate ICAO format
+	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+		return c.json({
+			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+		}, 400);
+	}
+
+	try {
+		// Check if user has access to edit files for this ICAO
+		const divisions = ServicePool.getDivisions(c.env);
+		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+		const userRole = await divisions.getUserRoleForAirport(vatsimUser.id.toString(), icao);
+
+		return c.json({
+			icao: icao,
+			editable: hasAccess,
+			role: userRole,
+		});
+	} catch (error) {
+		console.error('EuroScope access check error:', error);
+		return c.json({
+			error: error instanceof Error ? error.message : 'Failed to check airport access',
 		}, 500);
 	}
 });
