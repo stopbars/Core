@@ -153,3 +153,112 @@ export type PointChangeset = {
 	modify?: Record<string, Partial<PointData>>; // Keyed by ID
 	delete?: string[]; // IDs
 };
+
+/**
+ * @openapi
+ * components:
+ *   securitySchemes:
+ *     VatsimToken:
+ *       type: apiKey
+ *       in: header
+ *       name: X-Vatsim-Token
+ *       description: VATSIM authentication token obtained via OAuth callback.
+ *     ApiKeyAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: API Key
+ *       description: User API key passed as Bearer token in Authorization header.
+ *   schemas:
+ *     Coordinates:
+ *       type: object
+ *       required: [lat, lng]
+ *       properties:
+ *         lat:
+ *           type: number
+ *           description: Latitude in decimal degrees.
+ *         lng:
+ *           type: number
+ *           description: Longitude in decimal degrees.
+ *     PointData:
+ *       type: object
+ *       required: [type, name, coordinates]
+ *       properties:
+ *         type:
+ *           type: string
+ *           enum: [stopbar, lead_on, taxiway, stand]
+ *           description: Point category.
+ *         name:
+ *           type: string
+ *           description: Human readable point name / identifier.
+ *         coordinates:
+ *           $ref: '#/components/schemas/Coordinates'
+ *         directionality:
+ *           type: string
+ *           enum: [bi-directional, uni-directional]
+ *         orientation:
+ *           type: string
+ *           enum: [left, right]
+ *         color:
+ *           type: string
+ *           enum: [yellow, green, green-yellow, green-orange, green-blue]
+ *         elevated:
+ *           type: boolean
+ *         ihp:
+ *           type: boolean
+ *           description: In pavement (false) vs elevated (true) for some systems.
+ *       description: Point creation object. Server assigns id, airportId, created/updated timestamps & createdBy.
+ *     Point:
+ *       allOf:
+ *         - $ref: '#/components/schemas/PointData'
+ *         - type: object
+ *           required: [id, airportId, createdAt, updatedAt, createdBy]
+ *           properties:
+ *             id: { type: string }
+ *             airportId: { type: string }
+ *             createdAt: { type: string, format: date-time }
+ *             updatedAt: { type: string, format: date-time }
+ *             createdBy: { type: string, description: 'VATSIM ID of creator' }
+ *           description: Persisted point including server-managed fields.
+ *     PointDataPartial:
+ *       type: object
+ *       description: Partial PointData used for updates. All properties optional.
+ *       properties:
+ *         type: { type: string, enum: [stopbar, lead_on, taxiway, stand] }
+ *         name: { type: string }
+ *         coordinates:
+ *           type: object
+ *           properties:
+ *             lat: { type: number }
+ *             lng: { type: number }
+ *         directionality: { type: string, enum: [bi-directional, uni-directional] }
+ *         orientation: { type: string, enum: [left, right] }
+ *         color: { type: string, enum: [yellow, green, green-yellow, green-orange, green-blue] }
+ *         elevated: { type: boolean }
+ *         ihp: { type: boolean }
+ *     PointChangeset:
+ *       type: object
+ *       description: Transactional batch of point operations. Operations are applied atomically where possible.
+ *       properties:
+ *         create:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/PointData'
+ *           description: List of new points to create.
+ *         modify:
+ *           type: object
+ *           additionalProperties:
+ *             $ref: '#/components/schemas/PointDataPartial'
+ *           description: Map of point ID -> partial point data to update.
+ *         delete:
+ *           type: array
+ *           items: { type: string }
+ *           description: List of point IDs to delete.
+ *     ErrorResponse:
+ *       type: object
+ *       properties:
+ *         error: { type: string }
+ *         message: { type: string }
+ *         code: { type: string, description: 'Optional machine-readable error code' }
+ *       required: [error]
+ *       description: Standard error envelope.
+ */
