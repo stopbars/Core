@@ -10,7 +10,7 @@
 		"update-db": "wrangler d1 execute bars-db --remote --file schema.sql",
 		"prettify": "prettier --write .",
 		"build": "wrangler build",
-		"openapi": "ts-node --esm scripts/generate-openapi.ts"
+		"openapi": "node scripts/generate-openapi.mjs"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.56",
