@@ -13,6 +13,7 @@ import { SupportService } from './support';
 import { NotamService } from './notam';
 import { ContributionService } from './contributions';
 import { StorageService } from './storage';
+import { GitHubService } from './github';
 
 export const ServicePool = (() => {
     let vatsim: VatsimService;
@@ -29,6 +30,7 @@ export const ServicePool = (() => {
     let notam: NotamService;
     let contributions: ContributionService;
     let storage: StorageService;
+    let github: GitHubService;
 
     return {
         getVatsim(env: Env) {
@@ -114,6 +116,12 @@ export const ServicePool = (() => {
                 storage = new StorageService(env.BARS_STORAGE);
             }
             return storage;
+        },
+        getGitHub(env: Env) {
+            if (!github) {
+                github = new GitHubService();
+            }
+            return github;
         }
     };
 })();

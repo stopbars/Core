@@ -1845,6 +1845,24 @@ app.post('/purge-cache', async (c) => {
 	}
 });
 
+// Contributors endpoint
+app.get('/contributors',
+	withCache(() => 'github-contributors', 3600, 'github'), // Cache for 1 hour
+	async (c) => {
+		try {
+			const github = ServicePool.getGitHub(c.env);
+			const contributorsData = await github.getAllContributors();
+			return c.json(contributorsData);
+		} catch (error) {
+			console.error('Contributors endpoint error:', error);
+			return c.json({
+				error: 'Failed to fetch contributors data',
+				message: error instanceof Error ? error.message : 'Unknown error'
+			}, 500);
+		}
+	}
+);
+
 // Health endpoint
 app.get('/health',
 	withCache(CacheKeys.fromUrl, 60, 'health'),
