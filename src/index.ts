@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import openapiSpec from '../openapi.json';
 import { cors } from 'hono/cors';
 import { PointChangeset, PointData } from './types';
 import { VatsimService } from './services/vatsim';
@@ -83,6 +84,31 @@ app.use('*', cors({
 }));
 
 // Connect endpoint
+/**
+ * @openapi
+ * /connect:
+ *   get:
+ *     summary: Open a real-time connection for an airport
+ *     description: Upgrades the request to a WebSocket managed by the airport's Durable Object. Requires an API key.
+ *     parameters:
+ *       - in: query
+ *         name: airport
+ *         required: true
+ *         schema:
+ *           type: string
+ *           minLength: 4
+ *           maxLength: 4
+ *       - in: query
+ *         name: key
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       101:
+ *         description: Switching Protocols (WebSocket established)
+ *       400:
+ *         description: Missing airport ID or API key
+ */
 app.get('/connect', async (c) => {
 	const airportId = c.req.query('airport');
 	const apiKey = c.req.query('key');
@@ -110,6 +136,25 @@ app.get('/connect', async (c) => {
 });
 
 // State endpoint
+/**
+ * @openapi
+ * /state:
+ *   get:
+ *     summary: Get current lighting/network state
+ *     description: Retrieves real-time state for a specific airport or all active airports.
+ *     parameters:
+ *       - in: query
+ *         name: airport
+ *         required: true
+ *         description: ICAO code of airport or 'all' for every active airport
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: State information returned
+ *       400:
+ *         description: Missing or invalid airport parameter
+ */
 app.get('/state', async (c) => {
 	const airport = c.req.query('airport');
 	if (!airport) {
@@ -195,6 +240,24 @@ app.get('/state', async (c) => {
 });
 
 // VATSIM auth callback
+/**
+ * @openapi
+ * /auth/vatsim/callback:
+ *   get:
+ *     summary: VATSIM OAuth callback
+ *     description: Exchanges authorization code for a VATSIM token and redirects to frontend with token.
+ *     parameters:
+ *       - in: query
+ *         name: code
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       302:
+ *         description: Redirect to application with token or error
+ *       400:
+ *         description: Missing code parameter
+ */
 app.get('/auth/vatsim/callback', async (c) => {
 	const code = c.req.query('code');
 	if (!code) {
@@ -208,6 +271,21 @@ app.get('/auth/vatsim/callback', async (c) => {
 });
 
 // Get account info
+/**
+ * @openapi
+ * /auth/account:
+ *   get:
+ *     summary: Get authenticated account information
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Account found
+ *       401:
+ *         description: Missing or invalid token
+ *       404:
+ *         description: User not found
+ */
 app.get('/auth/account', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -237,6 +315,24 @@ app.get('/auth/account', async (c) => {
 });
 
 // Regenerate API key
+/**
+ * @openapi
+ * /auth/regenerate-api-key:
+ *   post:
+ *     summary: Regenerate API key
+ *     description: Generates a new API key for the authenticated user (24h cooldown).
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Key regenerated
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: User not found
+ *       429:
+ *         description: Rate limited (cooldown not elapsed)
+ */
 app.post('/auth/regenerate-api-key', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -309,6 +405,21 @@ app.post('/auth/regenerate-api-key', async (c) => {
 });
 
 // Delete account
+/**
+ * @openapi
+ * /auth/delete:
+ *   delete:
+ *     summary: Delete current user account
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       204:
+ *         description: Account deleted
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: User not found
+ */
 app.delete('/auth/delete', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -331,6 +442,19 @@ app.delete('/auth/delete', async (c) => {
 });
 
 // Check if staff
+/**
+ * @openapi
+ * /auth/is-staff:
+ *   get:
+ *     summary: Check staff status
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Staff status returned
+ *       401:
+ *         description: Unauthorized
+ */
 app.get('/auth/is-staff',
 	withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'),
 	async (c) => {
@@ -358,6 +482,32 @@ app.get('/auth/is-staff',
 	});
 
 // Airports endpoint
+/**
+ * @openapi
+ * /airports:
+ *   get:
+ *     summary: Get airport data
+ *     description: Fetch airport(s) by ICAO(s) or by continent.
+ *     parameters:
+ *       - in: query
+ *         name: icao
+ *         required: false
+ *         description: Single ICAO or comma-separated list
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: continent
+ *         required: false
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Airport data returned
+ *       400:
+ *         description: Invalid parameters
+ *       404:
+ *         description: Airport not found
+ */
 app.get('/airports',
 	withCache(CacheKeys.fromUrl, 31536000, 'airports'), // Cache for 1 year because airports data doesn't change ever :P
 	async (c) => {
@@ -431,6 +581,19 @@ divisionsApp.use('*', async (c, next) => {
 });
 
 // GET /divisions - List all divisions
+/**
+ * @openapi
+ * /divisions:
+ *   get:
+ *     summary: List all divisions
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Divisions returned
+ *       401:
+ *         description: Unauthorized
+ */
 divisionsApp.get('/', async (c) => {
 	const divisions = ServicePool.getDivisions(c.env);
 	const allDivisions = await divisions.getAllDivisions();
@@ -438,6 +601,31 @@ divisionsApp.get('/', async (c) => {
 });
 
 // POST /divisions - Create new division (requires lead_developer role)
+/**
+ * @openapi
+ * /divisions:
+ *   post:
+ *     summary: Create a new division
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, headVatsimId]
+ *             properties:
+ *               name:
+ *                 type: string
+ *               headVatsimId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Division created
+ *       403:
+ *         description: Forbidden
+ */
 divisionsApp.post('/', async (c) => {
 	const user = c.get('user');
 	const roles = ServicePool.getRoles(c.env);
@@ -454,6 +642,17 @@ divisionsApp.post('/', async (c) => {
 });
 
 // GET /divisions/user - Get user's divisions
+/**
+ * @openapi
+ * /divisions/user:
+ *   get:
+ *     summary: Get divisions for current user
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: User divisions returned
+ */
 divisionsApp.get('/user',
 	withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'),
 	async (c) => {
@@ -465,6 +664,24 @@ divisionsApp.get('/user',
 	});
 
 // GET /divisions/:id - Get division details
+/**
+ * @openapi
+ * /divisions/{id}:
+ *   get:
+ *     summary: Get division details
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Division returned
+ *       404:
+ *         description: Division not found
+ */
 divisionsApp.get('/:id',
 	withCache(CacheKeys.fromParams('id'), 2592000, 'divisions'),
 	async (c) => {
@@ -480,6 +697,24 @@ divisionsApp.get('/:id',
 	});
 
 // GET /divisions/:id/members - List division members
+/**
+ * @openapi
+ * /divisions/{id}/members:
+ *   get:
+ *     summary: List division members
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Members listed
+ *       404:
+ *         description: Division not found
+ */
 divisionsApp.get('/:id/members', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const divisions = ServicePool.getDivisions(c.env);
@@ -495,6 +730,36 @@ divisionsApp.get('/:id/members', async (c) => {
 });
 
 // POST /divisions/:id/members - Add member (requires nav_head role)
+/**
+ * @openapi
+ * /divisions/{id}/members:
+ *   post:
+ *     summary: Add member to division
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [vatsimId, role]
+ *             properties:
+ *               vatsimId:
+ *                 type: string
+ *               role:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Member added
+ *       403:
+ *         description: Forbidden
+ */
 divisionsApp.post('/:id/members', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const vatsimUser = c.get('vatsimUser');
@@ -517,6 +782,28 @@ divisionsApp.post('/:id/members', async (c) => {
 });
 
 // DELETE /divisions/:id/members/:vatsimId - Remove member (requires nav_head role)
+/**
+ * @openapi
+ * /divisions/{id}/members/{vatsimId}:
+ *   delete:
+ *     summary: Remove member from division
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: vatsimId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Member removed
+ *       403:
+ *         description: Forbidden
+ */
 divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const targetVatsimId = c.req.param('vatsimId');
@@ -544,6 +831,24 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 });
 
 // GET /divisions/:id/airports - List division airports
+/**
+ * @openapi
+ * /divisions/{id}/airports:
+ *   get:
+ *     summary: List division airports
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Airports listed
+ *       404:
+ *         description: Division not found
+ */
 divisionsApp.get('/:id/airports',
 	withCache(CacheKeys.fromParams('id'), 600, 'divisions'),
 	async (c) => {
@@ -561,6 +866,34 @@ divisionsApp.get('/:id/airports',
 	});
 
 // POST /divisions/:id/airports - Request airport addition (requires division membership)
+/**
+ * @openapi
+ * /divisions/{id}/airports:
+ *   post:
+ *     summary: Request airport addition to division
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [icao]
+ *             properties:
+ *               icao:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Airport request created
+ *       404:
+ *         description: Division not found
+ */
 divisionsApp.post('/:id/airports', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const vatsimUser = c.get('vatsimUser');
@@ -578,6 +911,38 @@ divisionsApp.post('/:id/airports', async (c) => {
 });
 
 // POST /divisions/:id/airports/:airportId/approve - Approve/reject airport (requires lead_developer role)
+/**
+ * @openapi
+ * /divisions/{id}/airports/{airportId}/approve:
+ *   post:
+ *     summary: Approve or reject airport request
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: airportId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [approved]
+ *             properties:
+ *               approved:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Airport approval processed
+ *       403:
+ *         description: Forbidden
+ */
 divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const airportId = parseInt(c.req.param('airportId'));
@@ -605,6 +970,22 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 app.route('/divisions', divisionsApp);
 
 // Points endpoints
+/**
+ * @openapi
+ * /airports/{icao}/points:
+ *   get:
+ *     summary: List lighting/navigation points for airport
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string, minLength: 4, maxLength: 4 }
+ *     responses:
+ *       200:
+ *         description: Points returned
+ *       400:
+ *         description: Invalid ICAO
+ */
 app.get('/airports/:icao/points',
 	withCache(CacheKeys.fromUrl, 600, 'airports'), // 1296000 - For after beta
 	async (c) => {
@@ -621,6 +1002,30 @@ app.get('/airports/:icao/points',
 		return c.json(airportPoints);
 	});
 
+/**
+ * @openapi
+ * /airports/{icao}/points:
+ *   post:
+ *     summary: Create a single point
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/PointData'
+ *     responses:
+ *       201:
+ *         description: Point created
+ *       401:
+ *         description: Unauthorized
+ */
 app.post('/airports/:icao/points', async (c) => {
 	const airportId = c.req.param('icao');
 
@@ -650,6 +1055,28 @@ app.post('/airports/:icao/points', async (c) => {
 });
 
 // OSM-style batched transaction
+/**
+ * @openapi
+ * /airports/{icao}/points/batch:
+ *   post:
+ *     summary: Apply a batch point changeset
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/PointChangeset'
+ *     responses:
+ *       201:
+ *         description: Changeset applied
+ */
 app.post('/airports/:icao/points/batch', async (c) => {
 	const airportId = c.req.param('icao');
 
@@ -678,6 +1105,32 @@ app.post('/airports/:icao/points/batch', async (c) => {
 	return c.json(newPoints, 201);
 });
 
+/**
+ * @openapi
+ * /airports/{icao}/points/{id}:
+ *   put:
+ *     summary: Update a point
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200:
+ *         description: Point updated
+ */
 app.put('/airports/:icao/points/:id', async (c) => {
 	const airportId = c.req.param('icao');
 	const pointId = c.req.param('id');
@@ -712,6 +1165,26 @@ app.put('/airports/:icao/points/:id', async (c) => {
 	return c.json(updatedPoint);
 });
 
+/**
+ * @openapi
+ * /airports/{icao}/points/{id}:
+ *   delete:
+ *     summary: Delete a point
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Deleted
+ */
 app.delete('/airports/:icao/points/:id', async (c) => {
 	const airportId = c.req.param('icao');
 	const pointId = c.req.param('id');
@@ -751,6 +1224,22 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 });
 
 // Get single point by ID
+/**
+ * @openapi
+ * /points/{id}:
+ *   get:
+ *     summary: Get a single point by ID
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Point found
+ *       404:
+ *         description: Not found
+ */
 app.get('/points/:id',
 	withCache(CacheKeys.fromUrl, 3600, 'points'),
 	async (c) => {
@@ -772,6 +1261,23 @@ app.get('/points/:id',
 	});
 
 // Get multiple points by IDs (batch endpoint)
+/**
+ * @openapi
+ * /points:
+ *   get:
+ *     summary: Get multiple points by IDs
+ *     parameters:
+ *       - in: query
+ *         name: ids
+ *         required: true
+ *         description: Comma-separated list of point IDs (max 100)
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Points returned
+ *       400:
+ *         description: Validation error
+ */
 app.get('/points',
 	withCache(CacheKeys.fromUrl, 3600, 'points'),
 	async (c) => {
@@ -831,6 +1337,31 @@ app.get('/points',
 	});
 
 // Light Support endpoints
+/**
+ * @openapi
+ * /supports/generate:
+ *   post:
+ *     summary: Generate Light Supports and BARS XML
+ *     description: Upload raw XML and generate both light supports XML and processed BARS XML.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [xmlFile, icao]
+ *             properties:
+ *               xmlFile:
+ *                 type: string
+ *                 format: binary
+ *               icao:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Generated XML returned
+ *       400:
+ *         description: Validation error
+ */
 app.post('/supports/generate', async (c) => {
 	try {
 		const formData = await c.req.formData();
@@ -873,6 +1404,15 @@ app.post('/supports/generate', async (c) => {
 });
 
 // NOTAM endpoints
+/**
+ * @openapi
+ * /notam:
+ *   get:
+ *     summary: Get global NOTAM
+ *     responses:
+ *       200:
+ *         description: Current NOTAM returned
+ */
 app.get('/notam',
 	withCache(() => 'global-notam', 900, 'notam'),
 	async (c) => {
@@ -885,6 +1425,31 @@ app.get('/notam',
 	}
 );
 
+/**
+ * @openapi
+ * /notam:
+ *   put:
+ *     summary: Update global NOTAM
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [content]
+ *             properties:
+ *               content:
+ *                 type: string
+ *               type:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: NOTAM updated
+ *       403:
+ *         description: Forbidden
+ */
 app.put('/notam', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -921,6 +1486,15 @@ app.put('/notam', async (c) => {
 });
 
 // Public stats
+/**
+ * @openapi
+ * /public-stats:
+ *   get:
+ *     summary: Get public usage statistics
+ *     responses:
+ *       200:
+ *         description: Public stats returned
+ */
 app.get('/public-stats',
 	withCache(() => 'public-stats', 60, 'stats'),
 	async (c) => {
@@ -963,6 +1537,19 @@ staffUsersApp.use('*', async (c, next) => {
 });
 
 // GET /staff/users - Get all users with pagination
+/**
+ * @openapi
+ * /staff/users:
+ *   get:
+ *     summary: List users (staff only)
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Users returned
+ *       401:
+ *         description: Unauthorized
+ */
 staffUsersApp.get('/', async (c) => {
 	try {
 		const user = c.get('user');
@@ -981,6 +1568,24 @@ staffUsersApp.get('/', async (c) => {
 });
 
 // GET /staff/users/search - Search for users
+/**
+ * @openapi
+ * /staff/users/search:
+ *   get:
+ *     summary: Search users (staff only)
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         required: true
+ *         schema: { type: string, minLength: 3 }
+ *     responses:
+ *       200:
+ *         description: Search results returned
+ *       400:
+ *         description: Invalid query
+ */
 staffUsersApp.get('/search', async (c) => {
 	try {
 		const query = c.req.query('q') || '';
@@ -1003,6 +1608,27 @@ staffUsersApp.get('/search', async (c) => {
 });
 
 // POST /staff/users/refresh-api-token - Refresh a user's API token by VATSIM ID
+/**
+ * @openapi
+ * /staff/users/refresh-api-token:
+ *   post:
+ *     summary: Refresh a user's API token (staff only)
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [vatsimId]
+ *             properties:
+ *               vatsimId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Token refreshed
+ */
 staffUsersApp.post('/refresh-api-token', async (c) => {
 	try {
 		const { vatsimId } = await c.req.json() as { vatsimId: string };
@@ -1040,6 +1666,22 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
 });
 
 // DELETE /staff/users/:id - Delete a user
+/**
+ * @openapi
+ * /staff/users/{id}:
+ *   delete:
+ *     summary: Delete a user (staff only)
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: User deletion result
+ */
 staffUsersApp.delete('/:id', async (c) => {
 	try {
 		const userId = parseInt(c.req.param('id'));
@@ -1060,7 +1702,25 @@ app.route('/staff/users', staffUsersApp);
 // Contributions endpoints
 const contributionsApp = new Hono<{ Bindings: Env }>();
 
-
+/**
+ * @openapi
+ * /contributions:
+ *   get:
+ *     summary: List contributions
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string }
+ *       - in: query
+ *         name: airport
+ *         schema: { type: string }
+ *       - in: query
+ *         name: user
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Contributions listed
+ */
 contributionsApp.get('/',
 	withCache(CacheKeys.fromUrl, 7200, 'contributions'),
 	async (c) => {
@@ -1086,6 +1746,15 @@ contributionsApp.get('/',
 	});
 
 // GET /contributions/stats - Get contribution statistics
+/**
+ * @openapi
+ * /contributions/stats:
+ *   get:
+ *     summary: Get contribution statistics
+ *     responses:
+ *       200:
+ *         description: Stats returned
+ */
 contributionsApp.get('/stats',
 	withCache(() => 'contribution-stats', 1800, 'contributions'),
 	async (c) => {
@@ -1095,6 +1764,15 @@ contributionsApp.get('/stats',
 	});
 
 // GET /contributions/leaderboard - Get top contributors
+/**
+ * @openapi
+ * /contributions/leaderboard:
+ *   get:
+ *     summary: Get top contributors
+ *     responses:
+ *       200:
+ *         description: Leaderboard returned
+ */
 contributionsApp.get('/leaderboard',
 	withCache(() => 'contribution-leaderboard', 1800, 'contributions'),
 	async (c) => {
@@ -1104,6 +1782,15 @@ contributionsApp.get('/leaderboard',
 	});
 
 // GET /contributions/top-packages - Get a list of most used packages
+/**
+ * @openapi
+ * /contributions/top-packages:
+ *   get:
+ *     summary: Get most used packages
+ *     responses:
+ *       200:
+ *         description: Package stats returned
+ */
 contributionsApp.get('/top-packages',
 	withCache(() => 'contribution-top-packages', 1800, 'contributions'),
 	async (c) => {
@@ -1113,6 +1800,30 @@ contributionsApp.get('/top-packages',
 	});
 
 // POST /contributions - Create a new contribution
+/**
+ * @openapi
+ * /contributions:
+ *   post:
+ *     summary: Submit a new contribution
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [airportIcao, packageName, submittedXml]
+ *             properties:
+ *               userDisplayName: { type: string }
+ *               airportIcao: { type: string }
+ *               packageName: { type: string }
+ *               submittedXml: { type: string }
+ *               notes: { type: string }
+ *     responses:
+ *       201:
+ *         description: Contribution created
+ */
 contributionsApp.post('/', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1150,6 +1861,21 @@ contributionsApp.post('/', async (c) => {
 });
 
 // GET /contributions/user - Get user's contributions
+/**
+ * @openapi
+ * /contributions/user:
+ *   get:
+ *     summary: Get current user's contributions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Contributions returned
+ */
 contributionsApp.get('/user', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1182,6 +1908,22 @@ contributionsApp.get('/user', async (c) => {
 });
 
 // GET /contributions/:id - Get specific contribution
+/**
+ * @openapi
+ * /contributions/{id}:
+ *   get:
+ *     summary: Get a specific contribution
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Contribution returned
+ *       404:
+ *         description: Not found
+ */
 contributionsApp.get('/:id', async (c) => {
 	const contributionId = c.req.param('id');
 	const contributions = ServicePool.getContributions(c.env);
@@ -1195,6 +1937,35 @@ contributionsApp.get('/:id', async (c) => {
 });
 
 // POST /contributions/:id/decision - Process a decision (approve/reject)
+/**
+ * @openapi
+ * /contributions/{id}/decision:
+ *   post:
+ *     summary: Approve or reject a contribution
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [approved]
+ *             properties:
+ *               approved: { type: boolean }
+ *               rejectionReason: { type: string }
+ *               newPackageName: { type: string }
+ *     responses:
+ *       200:
+ *         description: Decision processed
+ *       403:
+ *         description: Not authorized
+ */
 contributionsApp.post('/:id/decision', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1231,6 +2002,17 @@ contributionsApp.post('/:id/decision', async (c) => {
 });
 
 // GET /contributions/user/display-name - Get user's display name
+/**
+ * @openapi
+ * /contributions/user/display-name:
+ *   get:
+ *     summary: Get display name for authenticated user
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Display name returned
+ */
 contributionsApp.get('/user/display-name', async (c) => {
 	const token = c.req.header('X-Vatsim-Token');
 	if (!token) {
@@ -1250,6 +2032,22 @@ contributionsApp.get('/user/display-name', async (c) => {
 });
 
 // DELETE /contributions/:id - Delete a contribution (admin only)
+/**
+ * @openapi
+ * /contributions/{id}:
+ *   delete:
+ *     summary: Delete a contribution
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion result
+ */
 contributionsApp.delete('/:id', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1282,6 +2080,26 @@ contributionsApp.delete('/:id', async (c) => {
 app.route('/contributions', contributionsApp);
 
 // Staff stats
+/**
+ * @openapi
+ * /staff-stats:
+ *   get:
+ *     summary: Get internal staff statistics (restricted)
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: query
+ *         name: days
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: stat
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Stats returned
+ *       403:
+ *         description: Forbidden
+ */
 app.get('/staff-stats', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1344,6 +2162,22 @@ app.get('/staff-stats', async (c) => {
 const cdnApp = new Hono<{ Bindings: Env }>();
 
 // Special case for direct file downloads
+/**
+ * @openapi
+ * /cdn/files/{fileKey}:
+ *   get:
+ *     summary: Download a file from CDN
+ *     parameters:
+ *       - in: path
+ *         name: fileKey
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: File stream
+ *       404:
+ *         description: Not found
+ */
 cdnApp.get('/files/*', async (c) => {
 	// Extract the file key from the URL - everything after /cdn/files/
 	const fileKey = c.req.param('*');
@@ -1369,6 +2203,32 @@ cdnApp.get('/files/*', async (c) => {
 });
 
 // Handle file management endpoints
+/**
+ * @openapi
+ * /cdn/upload:
+ *   post:
+ *     summary: Upload a file to CDN (staff only)
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *               path:
+ *                 type: string
+ *               key:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: File uploaded
+ */
 cdnApp.post('/upload', async (c) => {
 	// Require authentication for file uploads
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -1443,6 +2303,21 @@ cdnApp.post('/upload', async (c) => {
 });
 
 // List files
+/**
+ * @openapi
+ * /cdn/files:
+ *   get:
+ *     summary: List CDN files (staff only)
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: query
+ *         name: prefix
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Files listed
+ */
 cdnApp.get('/files', async (c) => {
 	// Require authentication for listing files
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -1495,6 +2370,22 @@ cdnApp.get('/files', async (c) => {
 });
 
 // Delete a file
+/**
+ * @openapi
+ * /cdn/files/{fileKey}:
+ *   delete:
+ *     summary: Delete a file (staff only)
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: fileKey
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion result
+ */
 cdnApp.delete('/files/*', async (c) => {
 	// Require authentication for file deletion
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -1554,6 +2445,22 @@ cdnApp.delete('/files/*', async (c) => {
 app.route('/cdn', cdnApp);
 
 // EuroScope public file listing endpoint
+/**
+ * @openapi
+ * /euroscope/files/{icao}:
+ *   get:
+ *     summary: List public EuroScope files for an airport
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Files listed
+ *       400:
+ *         description: Invalid ICAO
+ */
 app.get('/euroscope/files/:icao', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 
@@ -1622,6 +2529,30 @@ euroscopeApp.use('*', async (c, next) => {
 });
 
 // POST /euroscope/upload - Upload files to ICAO-specific folders
+/**
+ * @openapi
+ * /euroscope/upload:
+ *   post:
+ *     summary: Upload EuroScope file for an airport
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file, icao]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *               icao:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: File uploaded
+ */
 euroscopeApp.post('/upload', async (c) => {
 	const user = c.get('user');
 	const vatsimUser = c.get('vatsimUser');
@@ -1716,6 +2647,26 @@ euroscopeApp.post('/upload', async (c) => {
 });
 
 // DELETE /euroscope/files/:icao/:filename - Delete a specific file
+/**
+ * @openapi
+ * /euroscope/files/{icao}/{filename}:
+ *   delete:
+ *     summary: Delete EuroScope file
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: filename
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion result
+ */
 euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const filename = c.req.param('filename');
@@ -1766,6 +2717,22 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 });
 
 // GET /euroscope/:icao/editable - Check if user has permission to edit files for an airport
+/**
+ * @openapi
+ * /euroscope/{icao}/editable:
+ *   get:
+ *     summary: Check if EuroScope files are editable by user
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Permission status returned
+ */
 euroscopeApp.get('/:icao/editable', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const vatsimUser = c.get('vatsimUser');
@@ -1797,6 +2764,29 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 });
 app.route('/euroscope', euroscopeApp);
 
+/**
+ * @openapi
+ * /purge-cache:
+ *   post:
+ *     summary: Purge a cache key (lead developer only)
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [key]
+ *             properties:
+ *               key: { type: string }
+ *               namespace: { type: string }
+ *     responses:
+ *       200:
+ *         description: Cache purged
+ *       403:
+ *         description: Forbidden
+ */
 app.post('/purge-cache', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1846,6 +2836,15 @@ app.post('/purge-cache', async (c) => {
 });
 
 // Contributors endpoint
+/**
+ * @openapi
+ * /contributors:
+ *   get:
+ *     summary: List GitHub contributors
+ *     responses:
+ *       200:
+ *         description: Contributors returned
+ */
 app.get('/contributors',
 	withCache(() => 'github-contributors', 3600, 'github'), // Cache for 1 hour
 	async (c) => {
@@ -1864,6 +2863,22 @@ app.get('/contributors',
 );
 
 // Health endpoint
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: System/service health check
+ *     parameters:
+ *       - in: query
+ *         name: service
+ *         required: false
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: All services healthy
+ *       503:
+ *         description: One or more services degraded
+ */
 app.get('/health',
 	withCache(CacheKeys.fromUrl, 60, 'health'),
 	async (c) => {
@@ -1949,6 +2964,27 @@ app.get('/health',
 
 		return c.json(healthChecks, statusCode);
 	});
+
+// Serve OpenAPI spec
+/**
+ * @openapi
+ * /openapi.json:
+ *   get:
+ *     summary: Get OpenAPI specification
+ *     description: Returns the current OpenAPI 3.0 document for the BARS Core API.
+ *     responses:
+ *       200:
+ *         description: OpenAPI document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
+app.get('/openapi.json', (c) => {
+	return c.json(openapiSpec, 200, {
+		'Cache-Control': 'public, max-age=300',
+	});
+});
 
 // Catch all other routes
 app.notFound((c) => {
