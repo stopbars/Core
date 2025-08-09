@@ -9,14 +9,6 @@ CREATE TABLE IF NOT EXISTS users (
  last_login TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS stats (
-  id INTEGER PRIMARY KEY,
-  stat_key TEXT NOT NULL,
-  value INTEGER NOT NULL,
-  day_key TEXT NOT NULL,
-  last_updated TEXT NOT NULL,
-  UNIQUE(stat_key, day_key)
-);
 
 CREATE TABLE IF NOT EXISTS staff (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,8 +126,6 @@ CREATE INDEX IF NOT EXISTS idx_runways_airport ON runways(airport_icao);
 CREATE INDEX IF NOT EXISTS idx_runways_idents ON runways(le_ident, he_ident);
 CREATE INDEX IF NOT EXISTS idx_vatsim_id ON users(vatsim_id);
 CREATE INDEX IF NOT EXISTS idx_api_key ON users(api_key);
-CREATE INDEX IF NOT EXISTS idx_stats_day_key ON stats(day_key);
-CREATE INDEX IF NOT EXISTS idx_stats_stat_key ON stats(stat_key);
 CREATE INDEX IF NOT EXISTS idx_staff_user_id ON staff(user_id);
 CREATE INDEX IF NOT EXISTS idx_points_airport_id ON points(airport_id);
 CREATE INDEX IF NOT EXISTS idx_points_type ON points(type);

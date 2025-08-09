@@ -13,6 +13,7 @@ mode = "smart"
 
 [vars]
 VATSIM_CLIENT_ID = "1562" # Change this for local testing
+POSTHOG_HOST = "https://eu.i.posthog.com"
 
 # For local testing, update the following database configuration:
 # 1. Create your own D1 database in Cloudflare Dashboard

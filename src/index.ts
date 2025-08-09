@@ -4,13 +4,13 @@ import { cors } from 'hono/cors';
 import { PointChangeset, PointData } from './types';
 import { VatsimService } from './services/vatsim';
 import { AuthService } from './services/auth';
-import { StatsService } from './services/stats';
 import { StaffRole } from './services/roles';
 import { Connection } from './network/connection';
 import { UserService } from './services/users';
 import { DatabaseContextFactory } from './services/database-context';
 import { withCache, CacheKeys } from './services/cache';
 import { ServicePool } from './services/service-pool';
+import { PostHogService } from './services/posthog';
 
 // Shared point regex
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
@@ -55,9 +55,8 @@ export class BARS {
 		private env: Env,
 	) {
 		const vatsim = new VatsimService(env.VATSIM_CLIENT_ID, env.VATSIM_CLIENT_SECRET);
-		const stats = new StatsService(env.DB);
-		const auth = new AuthService(env.DB, vatsim, stats);
-		this.connection = new Connection(env, auth, vatsim, state, stats);
+		const auth = new AuthService(env.DB, vatsim);
+		this.connection = new Connection(env, auth, vatsim, state);
 	}
 
 	async fetch(request: Request) {
@@ -75,6 +74,43 @@ const app = new Hono<{
 		userService?: any;
 	};
 }>();
+
+// Analytics middleware (PostHog) – skip clearly useless noise (OPTIONS, favicon, configured ignores)
+app.use('*', async (c, next) => {
+	const start = Date.now();
+	await next();
+	try {
+		const url = new URL(c.req.url);
+		const path = url.pathname;
+		// Basic noise filters
+		if (c.req.method === 'OPTIONS') return; // CORS preflight
+		if (path === '/favicon.ico') return;
+		if (path.includes('/health')) return;
+		// Env-driven ignore list: comma separated exact paths or prefix* globs
+		const ignoreRaw = (c.env as any).ANALYTICS_IGNORE as string | undefined;
+		if (ignoreRaw) {
+			const ignores = ignoreRaw.split(',').map(s => s.trim()).filter(Boolean);
+			for (const pattern of ignores) {
+				if (pattern.endsWith('*')) {
+					const prefix = pattern.slice(0, -1);
+					if (path.startsWith(prefix)) return;
+				} else if (pattern === path) {
+					return;
+				}
+			}
+		}
+		const posthog = ServicePool.getPostHog(c.env);
+		posthog.track('API Request', {
+			path,
+			method: c.req.method,
+			status: c.res?.status ?? 0,
+			duration_ms: Date.now() - start,
+		}, 'anonymous');
+	} catch (err) {
+		// eslint-disable-next-line no-console
+		console.warn('[Analytics] failed', err instanceof Error ? err.message : err);
+	}
+});
 
 // Add CORS middleware
 app.use('*', cors({
@@ -1568,26 +1604,6 @@ app.put('/notam', async (c) => {
 	return c.json({ success: true });
 });
 
-// Public stats
-/**
- * @openapi
- * /public-stats:
- *   get:
- *     summary: Get public usage statistics
- *     tags:
- *       - Stats
- *     responses:
- *       200:
- *         description: Public stats returned
- */
-app.get('/public-stats',
-	withCache(() => 'public-stats', 60, 'stats'),
-	async (c) => {
-		const stats = ServicePool.getStats(c.env);
-		const publicStats = await stats.getPublicStats();
-		return c.json(publicStats);
-	}
-);
 
 // User management endpoints
 const staffUsersApp = new Hono<{
@@ -1844,25 +1860,7 @@ contributionsApp.get('/',
 		return c.json(result);
 	});
 
-// GET /contributions/stats - Get contribution statistics
-/**
- * @openapi
- * /contributions/stats:
- *   get:
- *     summary: Get contribution statistics
- *     tags:
- *       - Contributions
- *     responses:
- *       200:
- *         description: Stats returned
- */
-contributionsApp.get('/stats',
-	withCache(() => 'contribution-stats', 1800, 'contributions'),
-	async (c) => {
-		const contributions = ServicePool.getContributions(c.env);
-		const stats = await contributions.getContributionStats();
-		return c.json(stats);
-	});
+// (Removed) contribution statistics endpoint
 
 // GET /contributions/leaderboard - Get top contributors
 /**
@@ -1938,7 +1936,6 @@ contributionsApp.post('/', async (c) => {
 	}
 
 	const vatsim = ServicePool.getVatsim(c.env);
-	const stats = ServicePool.getStats(c.env);
 	const auth = ServicePool.getAuth(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
@@ -2087,7 +2084,6 @@ contributionsApp.post('/:id/decision', async (c) => {
 	}
 
 	const vatsim = ServicePool.getVatsim(c.env);
-	const stats = ServicePool.getStats(c.env);
 	const auth = ServicePool.getAuth(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
@@ -2198,88 +2194,6 @@ contributionsApp.delete('/:id', async (c) => {
 
 app.route('/contributions', contributionsApp);
 
-// Staff stats
-/**
- * @openapi
- * /staff-stats:
- *   get:
- *     x-hidden: true
- *     summary: Get internal staff statistics (restricted)
- *     tags:
- *       - Staff
- *       - Stats
- *     security:
- *       - VatsimToken: []
- *     parameters:
- *       - in: query
- *         name: days
- *         schema: { type: integer }
- *       - in: query
- *         name: stat
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: Stats returned
- *       403:
- *         description: Forbidden
- */
-app.get('/staff-stats', async (c) => {
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const stats = ServicePool.getStats(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const roles = ServicePool.getRoles(c.env);
-
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-
-	if (!user) {
-		return c.text('User not found', 404);
-	}
-
-	const isStaff = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
-	if (!isStaff) {
-		return c.text('Forbidden', 403);
-	}
-
-	// Check for daily stats query parameters
-	const days = c.req.query('days');
-	const statKey = c.req.query('stat');
-
-	// If both days and stat parameters are provided, return daily stats
-	if (days && statKey) {
-		const daysNum = parseInt(days);
-		if (isNaN(daysNum) || daysNum <= 0) {
-			return c.json({ error: 'Invalid days parameter' }, 400);
-		}
-
-		const dailyStats = await stats.getDailyStats(statKey, daysNum);
-
-		// Calculate the total count across all days
-		const totalCount = dailyStats.reduce((sum, day) => sum + day.value, 0);
-
-		return c.json({
-			dailyStats,
-			totalCount,
-		});
-	}
-
-	// Get count of active accounts
-	const activeAccountsResult = await c.env.DB.prepare('SELECT COUNT(*) as count FROM users').first();
-	const activeAccounts = activeAccountsResult?.count || 0;
-
-	const [publicStats, sensitiveStats] = await Promise.all([stats.getPublicStats(), stats.getSensitiveStats()]);
-
-	return c.json({
-		...publicStats,
-		...sensitiveStats,
-		activeAccounts,
-	});
-});
 
 // CDN Endpoints
 const cdnApp = new Hono<{ Bindings: Env }>();
@@ -2312,7 +2226,6 @@ cdnApp.get('/files/*', async (c) => {
 	}
 
 	const storage = ServicePool.getStorage(c.env);
-	const stats = ServicePool.getStats(c.env);
 
 	// Bypass rate limiting for file downloads to ensure fast CDN performance
 	const fileResponse = await storage.getFile(fileKey);
@@ -2321,7 +2234,6 @@ cdnApp.get('/files/*', async (c) => {
 		return c.text('File not found', 404);
 	}
 
-	stats.incrementStat('cdn_downloads');
 
 	// Return the file directly with proper headers for caching
 	return fileResponse;
@@ -2365,7 +2277,6 @@ cdnApp.post('/upload', async (c) => {
 	}
 
 	const vatsim = ServicePool.getVatsim(c.env);
-	const stats = ServicePool.getStats(c.env);
 	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
 
@@ -2410,8 +2321,7 @@ cdnApp.post('/upload', async (c) => {
 			size: file.size.toString(),
 		});
 
-		// Track uploads in stats
-		await stats.incrementStat('cdn_uploads');
+		// Stats tracking removed
 
 		// Return success with download URL
 		return c.json({
@@ -2528,7 +2438,6 @@ cdnApp.delete('/files/*', async (c) => {
 	}
 
 	const vatsim = ServicePool.getVatsim(c.env);
-	const stats = ServicePool.getStats(c.env);
 	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
 
@@ -2564,8 +2473,7 @@ cdnApp.delete('/files/*', async (c) => {
 			}, 404);
 		}
 
-		// Track deletions in stats
-		await stats.incrementStat('cdn_deletions');
+		// Stats tracking removed
 
 		return c.json({ success: true });
 	} catch (error) {
@@ -3036,7 +2944,7 @@ app.get('/health',
 	withCache(CacheKeys.fromUrl, 60, 'health'),
 	async (c) => {
 		const requestedService = c.req.query('service');
-		const validServices = ['database', 'storage', 'vatsim', 'auth', 'stats'];
+		const validServices = ['database', 'storage', 'vatsim', 'auth'];
 
 		if (requestedService && !validServices.includes(requestedService)) {
 			return c.json({
@@ -3099,14 +3007,7 @@ app.get('/health',
 				}
 			}
 
-			if (servicesToCheck.includes('stats')) {
-				try {
-					const stats = ServicePool.getStats(c.env);
-					await stats.getPublicStats();
-				} catch (error) {
-					healthChecks.stats = 'outage';
-				}
-			}
+			// Stats service removed
 
 		} catch (error) {
 			console.error('Health check error:', error);

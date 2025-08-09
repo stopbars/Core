@@ -1,4 +1,3 @@
-import { StatsService } from './stats';
 import { AirportService } from './airport';
 import { processBarsPolygon, deduplicateTaxiwayPoints } from './bars/handlers';
 import { BarsPolygon, BarsDBRecord, ProcessedBarsObject, BarsLightPoint, LightProperties } from './bars/types';
@@ -7,7 +6,6 @@ import { calculateDistance } from './bars/geoUtils';
 import { DatabaseSessionService } from './database-session';
 
 export class PolygonService {
-	private statsService?: StatsService;
 	private airportService: AirportService;
 	private dbSession: DatabaseSessionService;
 
@@ -15,7 +13,6 @@ export class PolygonService {
 		private db: D1Database,
 		private airportApiKey?: string,
 	) {
-		this.statsService = new StatsService(db);
 		this.airportService = new AirportService(db, airportApiKey || '');
 		this.dbSession = new DatabaseSessionService(db);
 	}
@@ -245,10 +242,7 @@ export class PolygonService {
 
 		xml += '</BarsLights>';
 
-		// Track stats
-		if (this.statsService) {
-			this.statsService.incrementStat('bars_xml_generations');
-		}
+		// Stats tracking removed
 
 		return xml;
 	}
@@ -398,10 +392,7 @@ export class PolygonService {
 
 		xml += '</Bars>';
 
-		// Track stats :P
-		if (this.statsService) {
-			this.statsService.incrementStat('bars_xml_generations');
-		}
+		// Stats tracking removed
 
 		return xml;
 	}

@@ -1,10 +1,10 @@
 import { RoleService, StaffRole } from './roles';
 import { AirportService } from './airport';
-import { StatsService } from './stats';
 import { StorageService } from './storage';
 import { SupportService } from './support';
 import { PolygonService } from './polygons';
 import { ServicePool } from './service-pool';
+import { PostHogService } from './posthog';
 
 export interface Contribution {
 	id: string;
@@ -54,7 +54,6 @@ export interface ContributionListResult {
 import { DatabaseSessionService } from './database-session';
 
 export class ContributionService {
-	private statsService: StatsService;
 	private airportService: AirportService;
 	private supportService: SupportService;
 	private polygonService: PolygonService;
@@ -66,8 +65,8 @@ export class ContributionService {
 		private roleService: RoleService,
 		apiKey: string,
 		storage: R2Bucket,
+		private posthog?: PostHogService,
 	) {
-		this.statsService = new StatsService(db);
 		this.airportService = new AirportService(db, apiKey);
 		this.supportService = new SupportService(db);
 		this.polygonService = new PolygonService(db);
@@ -110,9 +109,8 @@ export class ContributionService {
 			]
 		);
 
-		await this.statsService.incrementStat('contributions_submitted');
 
-		return {
+		const contribution: Contribution = {
 			id,
 			userId: submission.userId,
 			userDisplayName: submission.userDisplayName || null,
@@ -125,6 +123,8 @@ export class ContributionService {
 			rejectionReason: null,
 			decisionDate: null,
 		};
+		try { this.posthog?.track('Contribution Submitted', { airport: submission.airportIcao, packageName: submission.packageName, userId: submission.userId }); } catch { }
+		return contribution;
 	}
 	async getContribution(id: string): Promise<Contribution | null> {
 		const result = await this.dbSession.executeRead<Contribution>(
@@ -307,15 +307,24 @@ export class ContributionService {
 			[status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id]
 		);
 
-		await this.statsService.incrementStat(decision.approved ? 'contributions_approved' : 'contributions_rejected');
 
-		return {
+		const updated: Contribution = {
 			...contribution,
 			packageName,
 			status,
 			rejectionReason: decision.approved ? null : decision.rejectionReason || 'No reason provided',
 			decisionDate: now,
 		};
+		try {
+			this.posthog?.track(decision.approved ? 'Contribution Approved' : 'Contribution Rejected', {
+				id,
+				airport: contribution.airportIcao,
+				packageName,
+				decidedBy: userId,
+				rejectionReason: decision.approved ? undefined : decision.rejectionReason || 'No reason provided',
+			});
+		} catch { }
+		return updated;
 	}
 	async getContributionStats(): Promise<{
 		total: number;
@@ -374,6 +383,7 @@ export class ContributionService {
 			'DELETE FROM contributions WHERE id = ?',
 			[id]
 		);
+		if (result.success) { try { this.posthog?.track('Contribution Deleted', { id, userId }); } catch { } }
 		return result.success;
 	}
 	/**

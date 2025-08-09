@@ -58,10 +58,6 @@
 			"description": "Global NOTAM retrieval and (staff) updates."
 		},
 		{
-			"name": "Stats",
-			"description": "Public usage metrics and (staff) sensitive/internal statistics."
-		},
-		{
 			"name": "Contributions",
 			"description": "Community lighting package submission, review, and leaderboard."
 		},
@@ -963,17 +959,6 @@
 				}
 			}
 		},
-		"/public-stats": {
-			"get": {
-				"summary": "Get public usage statistics",
-				"tags": ["Stats"],
-				"responses": {
-					"200": {
-						"description": "Public stats returned"
-					}
-				}
-			}
-		},
 		"/staff/users": {
 			"get": {
 				"x-hidden": true,
@@ -1161,17 +1146,6 @@
 				}
 			}
 		},
-		"/contributions/stats": {
-			"get": {
-				"summary": "Get contribution statistics",
-				"tags": ["Contributions"],
-				"responses": {
-					"200": {
-						"description": "Stats returned"
-					}
-				}
-			}
-		},
 		"/contributions/leaderboard": {
 			"get": {
 				"summary": "Get top contributors",
@@ -1332,42 +1306,6 @@
 				"responses": {
 					"200": {
 						"description": "Display name returned"
-					}
-				}
-			}
-		},
-		"/staff-stats": {
-			"get": {
-				"x-hidden": true,
-				"summary": "Get internal staff statistics (restricted)",
-				"tags": ["Staff", "Stats"],
-				"security": [
-					{
-						"VatsimToken": []
-					}
-				],
-				"parameters": [
-					{
-						"in": "query",
-						"name": "days",
-						"schema": {
-							"type": "integer"
-						}
-					},
-					{
-						"in": "query",
-						"name": "stat",
-						"schema": {
-							"type": "string"
-						}
-					}
-				],
-				"responses": {
-					"200": {
-						"description": "Stats returned"
-					},
-					"403": {
-						"description": "Forbidden"
 					}
 				}
 			}

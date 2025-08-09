@@ -1,6 +1,7 @@
 import { UserRecord } from '../types';
 import { RoleService, StaffRole } from './roles';
 import { AuthService } from './auth';
+import { PostHogService } from './posthog';
 
 import { DatabaseSessionService } from './database-session';
 
@@ -10,6 +11,7 @@ export class UserService {
 		private db: D1Database,
 		private roles: RoleService,
 		private auth: AuthService,
+		private posthog?: PostHogService,
 	) {
 		this.dbSession = new DatabaseSessionService(db);
 	}
@@ -108,6 +110,7 @@ export class UserService {
 			if (!deleted) {
 				throw new Error('Failed to delete user');
 			}
+			try { this.posthog?.track('Admin Deleted User', { userId, requestingUserId }); } catch { }
 			return true;
 		} catch (error) {
 			throw new Error('Failed to delete user');
@@ -134,6 +137,7 @@ export class UserService {
 			}
 			// Use the auth service to regenerate the API key
 			const newApiKey = await this.auth.regenerateApiKey(user.id);
+			try { this.posthog?.track('Admin Regenerated User API Key', { vatsimId, requestingUserId }); } catch { }
 			return newApiKey;
 		} catch (error) {
 			console.error('Error refreshing user API token:', error);

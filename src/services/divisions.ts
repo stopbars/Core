@@ -1,4 +1,5 @@
 import { DatabaseSessionService } from './database-session';
+import { PostHogService } from './posthog';
 
 interface DivisionMember {
 	id: number;
@@ -28,7 +29,7 @@ interface DivisionAirport {
 export class DivisionService {
 	private dbSession: DatabaseSessionService;
 
-	constructor(private db: D1Database) {
+	constructor(private db: D1Database, private posthog?: PostHogService) {
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
@@ -41,6 +42,7 @@ export class DivisionService {
 		if (!division) throw new Error('Failed to create division');
 
 		await this.addMember(division.id, headVatsimId, 'nav_head');
+		try { this.posthog?.track('Division Created', { divisionId: division.id, name }); } catch { }
 
 		return division;
 	}
@@ -61,6 +63,7 @@ export class DivisionService {
 
 		const member = result.results[0] as DivisionMember;
 		if (!member) throw new Error('Failed to add member to division');
+		try { this.posthog?.track('Division Member Added', { divisionId, vatsimId, role }); } catch { }
 		return member;
 	}
 
@@ -69,6 +72,7 @@ export class DivisionService {
 			'DELETE FROM division_members WHERE division_id = ? AND vatsim_id = ?',
 			[divisionId, vatsimId]
 		);
+		try { this.posthog?.track('Division Member Removed', { divisionId, vatsimId }); } catch { }
 	}
 
 	async getMemberRole(divisionId: number, vatsimId: string): Promise<'nav_head' | 'nav_member' | null> {
@@ -90,6 +94,7 @@ export class DivisionService {
 
 		const request = result.results[0] as DivisionAirport;
 		if (!request) throw new Error('Failed to create airport request');
+		try { this.posthog?.track('Division Airport Access Requested', { divisionId, icao, requestedBy }); } catch { }
 		return request;
 	}
 	async approveAirport(airportId: number, approvedBy: string, approved: boolean): Promise<DivisionAirport> {
@@ -105,6 +110,7 @@ export class DivisionService {
 
 		const airport = result.results[0] as DivisionAirport;
 		if (!airport) throw new Error('Airport request not found');
+		try { this.posthog?.track(approved ? 'Division Airport Request Approved' : 'Division Airport Request Rejected', { airportId, approvedBy, approved }); } catch { }
 		return airport;
 	}
 
