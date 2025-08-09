@@ -25,32 +25,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate OpenAPI spec
+      - name: Generate & verify OpenAPI spec
         run: |
           npm run openapi
           npx prettier --write openapi.json || true
-
-      - name: Commit OpenAPI spec if changed
-        id: commit_spec
-        run: |
-          if git diff --quiet openapi.json; then
-            echo "No spec changes";
-            echo "spec_updated=false" >> $GITHUB_OUTPUT
-          else
-            git config user.name "github-actions"
-            git config user.email "actions@users.noreply.github.com"
-            git add openapi.json
-            git commit -m "chore: update openapi spec"
-            git push
-            echo "spec_updated=true" >> $GITHUB_OUTPUT
+          if ! git diff --quiet openapi.json; then
+            echo "::error::openapi.json is out of date. Run the OpenAPI Update PR workflow (or re-run it) so the spec is committed before merging to main.";
+            echo "Changes detected:";
+            git --no-pager diff --name-only openapi.json;
+            exit 1;
           fi
 
       - name: Prettify code
-        if: steps.commit_spec.outputs.spec_updated == 'false'
         run: npm run prettify
 
       - name: Deploy to Cloudflare Workers
-        if: steps.commit_spec.outputs.spec_updated == 'false'
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

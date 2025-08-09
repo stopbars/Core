@@ -1,0 +1,64 @@
+name: OpenAPI Update PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**/*.ts'
+      - 'scripts/**'
+      - '.github/workflows/openapi-update.yml'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate OpenAPI spec
+        run: |
+          npm run openapi
+          npx prettier --write openapi.json || true
+
+      - name: Commit updated spec (if changed)
+        run: |
+          if git diff --quiet openapi.json; then
+            echo "No OpenAPI spec changes"
+          else
+            git config user.name "openapi-bot"
+            git config user.email "openapi-bot@users.noreply.github.com"
+            git add openapi.json
+            git commit -m "chore: update openapi spec"
+            git push
+          fi
+
+      - name: Comment status on PR
+        if: github.event.pull_request.number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('node:child_process');
+            let changed = true;
+            try { execSync('git diff --quiet openapi.json'); changed = false; } catch {}
+            const body = changed ? 'OpenAPI spec updated and committed.' : 'OpenAPI spec already up to date.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
