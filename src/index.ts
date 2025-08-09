@@ -88,28 +88,46 @@ app.use('*', cors({
  * @openapi
  * /connect:
  *   get:
- *     summary: Open a real-time connection for an airport
- *     description: Upgrades the request to a WebSocket managed by the airport's Durable Object. Requires an API key.
+ *     summary: Establish a WebSocket for an airport
+ *     tags:
+ *       - RealTime
+ *     description: |
+ *       Performs a WebSocket upgrade to stream real-time airport state. Requires:
+ *       - GET with `Upgrade: websocket`
+ *       - `airport` (ICAO, 4 chars) & `key` (API key) query params
+ *       The API key is forwarded as a Bearer token to the airport's Durable Object for auth.
  *     parameters:
  *       - in: query
  *         name: airport
  *         required: true
+ *         description: Airport ICAO (4 alphanumeric characters)
  *         schema:
  *           type: string
  *           minLength: 4
  *           maxLength: 4
+ *           pattern: "^[A-Z0-9]{4}$"
  *       - in: query
  *         name: key
  *         required: true
+ *         description: User API key
  *         schema:
  *           type: string
  *     responses:
  *       101:
- *         description: Switching Protocols (WebSocket established)
+ *         description: WebSocket upgrade accepted
  *       400:
- *         description: Missing airport ID or API key
+ *         description: Missing/invalid params or not a WebSocket upgrade
+ *       401:
+ *         description: API key rejected
  */
 app.get('/connect', async (c) => {
+	const upgradeHeader = c.req.header('Upgrade');
+	if (upgradeHeader !== 'websocket') {
+		return c.json({
+			message: 'This endpoint is for WebSocket connections only. Use a WebSocket client to test.',
+		}, 400);
+	}
+
 	const airportId = c.req.query('airport');
 	const apiKey = c.req.query('key');
 
@@ -141,6 +159,8 @@ app.get('/connect', async (c) => {
  * /state:
  *   get:
  *     summary: Get current lighting/network state
+ *     tags:
+ *       - State
  *     description: Retrieves real-time state for a specific airport or all active airports.
  *     parameters:
  *       - in: query
@@ -245,6 +265,8 @@ app.get('/state', async (c) => {
  * /auth/vatsim/callback:
  *   get:
  *     summary: VATSIM OAuth callback
+ *     tags:
+ *       - Auth
  *     description: Exchanges authorization code for a VATSIM token and redirects to frontend with token.
  *     parameters:
  *       - in: query
@@ -276,6 +298,8 @@ app.get('/auth/vatsim/callback', async (c) => {
  * /auth/account:
  *   get:
  *     summary: Get authenticated account information
+ *     tags:
+ *       - Auth
  *     security:
  *       - VatsimToken: []
  *     responses:
@@ -320,6 +344,8 @@ app.get('/auth/account', async (c) => {
  * /auth/regenerate-api-key:
  *   post:
  *     summary: Regenerate API key
+ *     tags:
+ *       - Auth
  *     description: Generates a new API key for the authenticated user (24h cooldown).
  *     security:
  *       - VatsimToken: []
@@ -410,6 +436,8 @@ app.post('/auth/regenerate-api-key', async (c) => {
  * /auth/delete:
  *   delete:
  *     summary: Delete current user account
+ *     tags:
+ *       - Auth
  *     security:
  *       - VatsimToken: []
  *     responses:
@@ -446,7 +474,10 @@ app.delete('/auth/delete', async (c) => {
  * @openapi
  * /auth/is-staff:
  *   get:
+ *     x-hidden: true
  *     summary: Check staff status
+ *     tags:
+ *       - Staff
  *     security:
  *       - ApiKeyAuth: []
  *     responses:
@@ -487,6 +518,8 @@ app.get('/auth/is-staff',
  * /airports:
  *   get:
  *     summary: Get airport data
+ *     tags:
+ *       - Airports
  *     description: Fetch airport(s) by ICAO(s) or by continent.
  *     parameters:
  *       - in: query
@@ -586,6 +619,8 @@ divisionsApp.use('*', async (c, next) => {
  * /divisions:
  *   get:
  *     summary: List all divisions
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     responses:
@@ -605,7 +640,10 @@ divisionsApp.get('/', async (c) => {
  * @openapi
  * /divisions:
  *   post:
+ *     x-hidden: true
  *     summary: Create a new division
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     requestBody:
@@ -647,6 +685,8 @@ divisionsApp.post('/', async (c) => {
  * /divisions/user:
  *   get:
  *     summary: Get divisions for current user
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     responses:
@@ -669,6 +709,8 @@ divisionsApp.get('/user',
  * /divisions/{id}:
  *   get:
  *     summary: Get division details
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -702,6 +744,8 @@ divisionsApp.get('/:id',
  * /divisions/{id}/members:
  *   get:
  *     summary: List division members
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -734,7 +778,10 @@ divisionsApp.get('/:id/members', async (c) => {
  * @openapi
  * /divisions/{id}/members:
  *   post:
+ *     x-hidden: true
  *     summary: Add member to division
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -786,7 +833,10 @@ divisionsApp.post('/:id/members', async (c) => {
  * @openapi
  * /divisions/{id}/members/{vatsimId}:
  *   delete:
+ *     x-hidden: true
  *     summary: Remove member from division
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -836,6 +886,8 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
  * /divisions/{id}/airports:
  *   get:
  *     summary: List division airports
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -870,7 +922,10 @@ divisionsApp.get('/:id/airports',
  * @openapi
  * /divisions/{id}/airports:
  *   post:
+ *     x-hidden: true
  *     summary: Request airport addition to division
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -915,7 +970,10 @@ divisionsApp.post('/:id/airports', async (c) => {
  * @openapi
  * /divisions/{id}/airports/{airportId}/approve:
  *   post:
+ *     x-hidden: true
  *     summary: Approve or reject airport request
+ *     tags:
+ *       - Divisions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -975,6 +1033,8 @@ app.route('/divisions', divisionsApp);
  * /airports/{icao}/points:
  *   get:
  *     summary: List lighting/navigation points for airport
+ *     tags:
+ *       - Points
  *     parameters:
  *       - in: path
  *         name: icao
@@ -1006,7 +1066,10 @@ app.get('/airports/:icao/points',
  * @openapi
  * /airports/{icao}/points:
  *   post:
+ *     x-hidden: true
  *     summary: Create a single point
+ *     tags:
+ *       - Points
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -1059,7 +1122,10 @@ app.post('/airports/:icao/points', async (c) => {
  * @openapi
  * /airports/{icao}/points/batch:
  *   post:
+ *     x-hidden: true
  *     summary: Apply a batch point changeset
+ *     tags:
+ *       - Points
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -1109,7 +1175,10 @@ app.post('/airports/:icao/points/batch', async (c) => {
  * @openapi
  * /airports/{icao}/points/{id}:
  *   put:
+ *     x-hidden: true
  *     summary: Update a point
+ *     tags:
+ *       - Points
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -1169,7 +1238,10 @@ app.put('/airports/:icao/points/:id', async (c) => {
  * @openapi
  * /airports/{icao}/points/{id}:
  *   delete:
+ *     x-hidden: true
  *     summary: Delete a point
+ *     tags:
+ *       - Points
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -1229,6 +1301,8 @@ app.delete('/airports/:icao/points/:id', async (c) => {
  * /points/{id}:
  *   get:
  *     summary: Get a single point by ID
+ *     tags:
+ *       - Points
  *     parameters:
  *       - in: path
  *         name: id
@@ -1266,6 +1340,8 @@ app.get('/points/:id',
  * /points:
  *   get:
  *     summary: Get multiple points by IDs
+ *     tags:
+ *       - Points
  *     parameters:
  *       - in: query
  *         name: ids
@@ -1342,6 +1418,8 @@ app.get('/points',
  * /supports/generate:
  *   post:
  *     summary: Generate Light Supports and BARS XML
+ *     tags:
+ *       - Support
  *     description: Upload raw XML and generate both light supports XML and processed BARS XML.
  *     requestBody:
  *       required: true
@@ -1409,6 +1487,8 @@ app.post('/supports/generate', async (c) => {
  * /notam:
  *   get:
  *     summary: Get global NOTAM
+ *     tags:
+ *       - NOTAM
  *     responses:
  *       200:
  *         description: Current NOTAM returned
@@ -1429,7 +1509,10 @@ app.get('/notam',
  * @openapi
  * /notam:
  *   put:
+ *     x-hidden: true
  *     summary: Update global NOTAM
+ *     tags:
+ *       - NOTAM
  *     security:
  *       - VatsimToken: []
  *     requestBody:
@@ -1491,6 +1574,8 @@ app.put('/notam', async (c) => {
  * /public-stats:
  *   get:
  *     summary: Get public usage statistics
+ *     tags:
+ *       - Stats
  *     responses:
  *       200:
  *         description: Public stats returned
@@ -1541,7 +1626,10 @@ staffUsersApp.use('*', async (c, next) => {
  * @openapi
  * /staff/users:
  *   get:
+ *     x-hidden: true
  *     summary: List users (staff only)
+ *     tags:
+ *       - Staff
  *     security:
  *       - VatsimToken: []
  *     responses:
@@ -1572,7 +1660,10 @@ staffUsersApp.get('/', async (c) => {
  * @openapi
  * /staff/users/search:
  *   get:
+ *     x-hidden: true
  *     summary: Search users (staff only)
+ *     tags:
+ *       - Staff
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -1612,7 +1703,10 @@ staffUsersApp.get('/search', async (c) => {
  * @openapi
  * /staff/users/refresh-api-token:
  *   post:
+ *     x-hidden: true
  *     summary: Refresh a user's API token (staff only)
+ *     tags:
+ *       - Staff
  *     security:
  *       - VatsimToken: []
  *     requestBody:
@@ -1670,7 +1764,10 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
  * @openapi
  * /staff/users/{id}:
  *   delete:
+ *     x-hidden: true
  *     summary: Delete a user (staff only)
+ *     tags:
+ *       - Staff
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -1707,6 +1804,8 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  * /contributions:
  *   get:
  *     summary: List contributions
+ *     tags:
+ *       - Contributions
  *     parameters:
  *       - in: query
  *         name: status
@@ -1751,6 +1850,8 @@ contributionsApp.get('/',
  * /contributions/stats:
  *   get:
  *     summary: Get contribution statistics
+ *     tags:
+ *       - Contributions
  *     responses:
  *       200:
  *         description: Stats returned
@@ -1769,6 +1870,8 @@ contributionsApp.get('/stats',
  * /contributions/leaderboard:
  *   get:
  *     summary: Get top contributors
+ *     tags:
+ *       - Contributions
  *     responses:
  *       200:
  *         description: Leaderboard returned
@@ -1787,6 +1890,8 @@ contributionsApp.get('/leaderboard',
  * /contributions/top-packages:
  *   get:
  *     summary: Get most used packages
+ *     tags:
+ *       - Contributions
  *     responses:
  *       200:
  *         description: Package stats returned
@@ -1805,6 +1910,8 @@ contributionsApp.get('/top-packages',
  * /contributions:
  *   post:
  *     summary: Submit a new contribution
+ *     tags:
+ *       - Contributions
  *     security:
  *       - VatsimToken: []
  *     requestBody:
@@ -1866,6 +1973,8 @@ contributionsApp.post('/', async (c) => {
  * /contributions/user:
  *   get:
  *     summary: Get current user's contributions
+ *     tags:
+ *       - Contributions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -1913,6 +2022,8 @@ contributionsApp.get('/user', async (c) => {
  * /contributions/{id}:
  *   get:
  *     summary: Get a specific contribution
+ *     tags:
+ *       - Contributions
  *     parameters:
  *       - in: path
  *         name: id
@@ -1941,7 +2052,10 @@ contributionsApp.get('/:id', async (c) => {
  * @openapi
  * /contributions/{id}/decision:
  *   post:
+ *     x-hidden: true
  *     summary: Approve or reject a contribution
+ *     tags:
+ *       - Contributions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2007,6 +2121,8 @@ contributionsApp.post('/:id/decision', async (c) => {
  * /contributions/user/display-name:
  *   get:
  *     summary: Get display name for authenticated user
+ *     tags:
+ *       - Contributions
  *     security:
  *       - VatsimToken: []
  *     responses:
@@ -2036,7 +2152,10 @@ contributionsApp.get('/user/display-name', async (c) => {
  * @openapi
  * /contributions/{id}:
  *   delete:
+ *     x-hidden: true
  *     summary: Delete a contribution
+ *     tags:
+ *       - Contributions
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2084,7 +2203,11 @@ app.route('/contributions', contributionsApp);
  * @openapi
  * /staff-stats:
  *   get:
+ *     x-hidden: true
  *     summary: Get internal staff statistics (restricted)
+ *     tags:
+ *       - Staff
+ *       - Stats
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2167,6 +2290,8 @@ const cdnApp = new Hono<{ Bindings: Env }>();
  * /cdn/files/{fileKey}:
  *   get:
  *     summary: Download a file from CDN
+ *     tags:
+ *       - CDN
  *     parameters:
  *       - in: path
  *         name: fileKey
@@ -2207,7 +2332,10 @@ cdnApp.get('/files/*', async (c) => {
  * @openapi
  * /cdn/upload:
  *   post:
+ *     x-hidden: true
  *     summary: Upload a file to CDN (staff only)
+ *     tags:
+ *       - CDN
  *     security:
  *       - VatsimToken: []
  *     requestBody:
@@ -2307,7 +2435,10 @@ cdnApp.post('/upload', async (c) => {
  * @openapi
  * /cdn/files:
  *   get:
+ *     x-hidden: true
  *     summary: List CDN files (staff only)
+ *     tags:
+ *       - CDN
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2374,7 +2505,10 @@ cdnApp.get('/files', async (c) => {
  * @openapi
  * /cdn/files/{fileKey}:
  *   delete:
+ *     x-hidden: true
  *     summary: Delete a file (staff only)
+ *     tags:
+ *       - CDN
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2450,6 +2584,8 @@ app.route('/cdn', cdnApp);
  * /euroscope/files/{icao}:
  *   get:
  *     summary: List public EuroScope files for an airport
+ *     tags:
+ *       - EuroScope
  *     parameters:
  *       - in: path
  *         name: icao
@@ -2533,7 +2669,10 @@ euroscopeApp.use('*', async (c, next) => {
  * @openapi
  * /euroscope/upload:
  *   post:
+ *     x-hidden: true
  *     summary: Upload EuroScope file for an airport
+ *     tags:
+ *       - EuroScope
  *     security:
  *       - VatsimToken: []
  *     requestBody:
@@ -2651,7 +2790,10 @@ euroscopeApp.post('/upload', async (c) => {
  * @openapi
  * /euroscope/files/{icao}/{filename}:
  *   delete:
+ *     x-hidden: true
  *     summary: Delete EuroScope file
+ *     tags:
+ *       - EuroScope
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2721,7 +2863,10 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
  * @openapi
  * /euroscope/{icao}/editable:
  *   get:
+ *     x-hidden: true
  *     summary: Check if EuroScope files are editable by user
+ *     tags:
+ *       - EuroScope
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2768,7 +2913,11 @@ app.route('/euroscope', euroscopeApp);
  * @openapi
  * /purge-cache:
  *   post:
+ *     x-hidden: true
  *     summary: Purge a cache key (lead developer only)
+ *     tags:
+ *       - Staff
+ *       - Cache
  *     security:
  *       - VatsimToken: []
  *     requestBody:
@@ -2841,6 +2990,8 @@ app.post('/purge-cache', async (c) => {
  * /contributors:
  *   get:
  *     summary: List GitHub contributors
+ *     tags:
+ *       - GitHub
  *     responses:
  *       200:
  *         description: Contributors returned
@@ -2868,6 +3019,8 @@ app.get('/contributors',
  * /health:
  *   get:
  *     summary: System/service health check
+ *     tags:
+ *       - System
  *     parameters:
  *       - in: query
  *         name: service
@@ -2971,6 +3124,8 @@ app.get('/health',
  * /openapi.json:
  *   get:
  *     summary: Get OpenAPI specification
+ *     tags:
+ *       - System
  *     description: Returns the current OpenAPI 3.0 document for the BARS Core API.
  *     responses:
  *       200:
