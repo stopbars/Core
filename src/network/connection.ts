@@ -1,7 +1,6 @@
 import { ClientType, Packet, AirportState, AirportObject, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, Point } from '../types';
 import { AuthService } from '../services/auth';
 import { VatsimService } from '../services/vatsim';
-import { StatsService } from '../services/stats';
 import { PointsService } from '../services/points';
 import { IDService } from '../services/id';
 import { DivisionService } from '../services/divisions';
@@ -86,7 +85,6 @@ export class Connection {
 		private auth: AuthService,
 		private vatsim: VatsimService,
 		private state: DurableObjectState,
-		private stats: StatsService,
 	) {
 		this.objectId = state.id.toString();
 		this.loadPersistedState();
@@ -739,8 +737,6 @@ export class Connection {
 	}
 
 	private async trackConnection(clientType: ClientType) {
-		await this.stats.incrementStat(`${clientType}_connections`);
-		await this.stats.incrementStat('total_connections');
 		await this.updateActiveConnections(1);
 
 		// Add this object to active_objects table when first connection is made
@@ -785,8 +781,7 @@ export class Connection {
 	}
 
 	private async trackMessage(clientType: ClientType) {
-		await this.stats.incrementStat(`${clientType}_messages_sent`);
-		await this.stats.incrementStat('total_messages_sent');
+		// Stats tracking removed
 	}
 
 	private async updateActiveConnections(change: number) {

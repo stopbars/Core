@@ -2,6 +2,7 @@ import { IDService } from './id';
 import { DivisionService } from './divisions';
 import { AuthService } from './auth';
 import { Point, PointChangeset, PointData } from '../types';
+import { PostHogService } from './posthog';
 
 import { DatabaseSessionService, PreparedStatement } from './database-session';
 
@@ -20,14 +21,14 @@ export class PointsService {
 		id: string;
 		airportId: string;
 		// properties here are required-nullable instead of optional as in `Point`
-		type:           Point['type'];
-		name:           string;
-		coordinates:    string;
+		type: Point['type'];
+		name: string;
+		coordinates: string;
 		directionality: null | Required<Point>['directionality'];
-		orientation:    null | Required<Point>['orientation'];
-		color:          null | Required<Point>['color'];
-		elevated:       null | boolean;
-		ihp:            null | boolean;
+		orientation: null | Required<Point>['orientation'];
+		color: null | Required<Point>['color'];
+		elevated: null | boolean;
+		ihp: null | boolean;
 	}>;
 	private stmtDelete: PreparedStatement<{
 		id: string;
@@ -39,6 +40,7 @@ export class PointsService {
 		private idService: IDService,
 		private divisions: DivisionService,
 		private auth: AuthService,
+		private posthog?: PostHogService,
 	) {
 		this.dbSession = new DatabaseSessionService(db);
 
@@ -138,6 +140,7 @@ export class PointsService {
 			]
 		);
 
+		try { this.posthog?.track('Point Created', { airportId, userId, type: point.type }); } catch { }
 		return newPoint;
 	}
 	async updatePoint(
@@ -158,8 +161,8 @@ export class PointsService {
 		}
 
 		// Validate updates
-		const updatedPoint = { ...point, ...updates };
-		this.validatePoint(updatedPoint);
+		const mergedPoint = { ...point, ...updates };
+		this.validatePoint(mergedPoint);
 
 		// Define allowed fields for updates
 		const allowedFields = [
@@ -199,7 +202,9 @@ export class PointsService {
 			[...Object.values(processedUpdates), new Date().toISOString(), pointId]
 		);
 
-		return this.getPoint(pointId) as Promise<Point>;
+		const finalPoint = await this.getPoint(pointId) as Point;
+		try { this.posthog?.track('Point Updated', { pointId, airportId: finalPoint.airportId, userId, fields: Object.keys(processedUpdates) }); } catch { }
+		return finalPoint;
 	}
 
 	async deletePoint(pointId: string, userId: string): Promise<void> {
@@ -220,6 +225,7 @@ export class PointsService {
 			'DELETE FROM points WHERE id = ?',
 			[pointId]
 		);
+		try { this.posthog?.track('Point Deleted', { pointId, airportId: point.airportId, userId }); } catch { }
 	}
 
 	async applyChangeset(
@@ -274,20 +280,21 @@ export class PointsService {
 			.map((point) => this.stmtUpdate.bindAll({
 				id: point.id,
 				airportId,
-				type:           point.type ?? null,
-				name:           point.name ?? null,
-				coordinates:    JSON.stringify(point.coordinates),
+				type: point.type ?? null,
+				name: point.name ?? null,
+				coordinates: JSON.stringify(point.coordinates),
 				directionality: point.directionality ?? null,
-				orientation:    point.orientation ?? null,
-				color:          point.color ?? null,
-				elevated:       point.elevated ?? null,
-				ihp:            point.ihp ?? null,
+				orientation: point.orientation ?? null,
+				color: point.color ?? null,
+				elevated: point.elevated ?? null,
+				ihp: point.ihp ?? null,
 			}));
 		const deletes = (changeset.delete ?? [])
 			.map((id) => this.stmtDelete.bindAll({ id, airportId }));
 
 		await this.dbSession.executeBatch(inserts.concat(updates).concat(deletes));
 
+		try { this.posthog?.track('Points Changeset Applied', { airportId, userId, created: createdPoints.length, modified: modifiedPoints.length, deleted: (changeset.delete ?? []).length }); } catch { }
 		return createdPoints;
 	}
 

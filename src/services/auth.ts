@@ -1,7 +1,7 @@
 import { VatsimUser, UserRecord } from '../types';
 import { VatsimService } from './vatsim';
-import { StatsService } from './stats';
 import { DatabaseSessionService } from './database-session';
+import { PostHogService } from './posthog';
 
 export class AuthService {
 	private dbSession: DatabaseSessionService;
@@ -9,7 +9,7 @@ export class AuthService {
 	constructor(
 		private db: D1Database,
 		private vatsim: VatsimService,
-		private stats: StatsService,
+		private posthog?: PostHogService,
 	) {
 		this.dbSession = new DatabaseSessionService(db);
 	}
@@ -20,11 +20,18 @@ export class AuthService {
 		if (!vatsimUser.id || !vatsimUser.email) {
 			throw new Error('Invalid VATSIM user data');
 		}
-		const user = await this.getOrCreateUser(vatsimUser);
+		const { user, created } = await this.getOrCreateUser(vatsimUser);
+		try {
+			this.posthog?.track(created ? 'User Signed Up' : 'User Logged In', {
+				vatsimId: vatsimUser.id,
+				isNewUser: created,
+				userId: user.id,
+			});
+		} catch { /* ignore analytics errors */ }
 		return { user, vatsimToken: auth.access_token };
 	}
 
-	private async getOrCreateUser(vatsimUser: VatsimUser) {
+	private async getOrCreateUser(vatsimUser: VatsimUser): Promise<{ user: UserRecord; created: boolean }> {
 		// Use primary mode for authentication checks to ensure latest data
 		this.dbSession.startSession({ mode: 'first-primary' });
 
@@ -36,13 +43,11 @@ export class AuthService {
 
 		if (existingUser) {
 			await this.updateUserLastLogin(existingUser.id);
-			await this.stats.incrementStat('user_logins');
-			return existingUser;
+			return { user: existingUser, created: false };
 		}
 
 		const newUser = await this.createNewUser(vatsimUser);
-		await this.stats.incrementStat('user_signups');
-		return newUser;
+		return { user: newUser, created: true };
 	}
 
 	private generateApiKey(): string {
@@ -96,10 +101,12 @@ export class AuthService {
 			{ query: 'DELETE FROM users WHERE vatsim_id = ?', params: [vatsimId] }
 		]);
 
-		await this.stats.incrementStat('user_deletions');
-
 		const userExists = await this.getUserByVatsimId(vatsimId);
-		return !userExists;
+		const deleted = !userExists;
+		if (deleted) {
+			try { this.posthog?.track('User Deleted', { vatsimId }); } catch { }
+		}
+		return deleted;
 	}
 
 	async getUserByApiKey(apiKey: string): Promise<UserRecord | null> {
@@ -154,7 +161,8 @@ export class AuthService {
 			throw new Error('Failed to update API key');
 		}
 
-		await this.stats.incrementStat('api_key_regenerations');
-		return (result.results[0] as { api_key: string }).api_key;
+		const apiKey = (result.results[0] as { api_key: string }).api_key;
+		try { this.posthog?.track('User API Key Regenerated', { userId }); } catch { }
+		return apiKey;
 	}
 }

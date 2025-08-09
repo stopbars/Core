@@ -1,4 +1,5 @@
 import { DatabaseSessionService } from './database-session';
+import { PostHogService } from './posthog';
 
 interface AirportData {
 	latitude_deg?: number;
@@ -23,6 +24,7 @@ export class AirportService {
 	constructor(
 		private db: D1Database,
 		private apiToken: string,
+		private posthog?: PostHogService,
 	) {
 		this.dbSession = new DatabaseSessionService(db);
 	}
@@ -102,8 +104,10 @@ export class AirportService {
 				return { ...airport, runways: runwaysResult.results };
 			}
 
+			try { this.posthog?.track('Airport Fetched From External API', { icao: uppercaseIcao, hasRunways: !!airportData.runways?.length }); } catch { }
 			return airport;
 		} catch (error) {
+			try { this.posthog?.track('Airport External Fetch Failed', { icao: uppercaseIcao }); } catch { }
 			return null;
 		}
 	}

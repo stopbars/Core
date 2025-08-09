@@ -1,4 +1,3 @@
-import { StatsService } from './stats';
 import { AirportService } from './airport';
 
 interface PolygonVertex {
@@ -31,12 +30,10 @@ interface AirportData {
 }
 
 export class SupportService {
-	private statsService?: StatsService;
 	private airportService: AirportService;
 	private readonly EARTH_RADIUS = 6378137; // Earth radius in meters at equator
 
 	constructor(private db: D1Database) {
-		this.statsService = new StatsService(db);
 		// Pass the required API token parameter
 		this.airportService = new AirportService(db, process.env.AIRPORTDB_API_KEY || '');
 	}
@@ -338,10 +335,7 @@ export class SupportService {
 			// Close FSData
 			xml += '</FSData>';
 
-			// Track stats
-			if (this.statsService) {
-				await this.statsService.incrementStat('remove_generations');
-			}
+			// Stats tracking removed
 
 			return xml;
 		} catch (error: unknown) {

@@ -1,6 +1,5 @@
 // services/ServicePool.ts
 import { VatsimService } from './vatsim';
-import { StatsService } from './stats';
 import { AuthService } from './auth';
 import { RoleService } from './roles';
 import { CacheService } from './cache';
@@ -14,10 +13,10 @@ import { NotamService } from './notam';
 import { ContributionService } from './contributions';
 import { StorageService } from './storage';
 import { GitHubService } from './github';
+import { PostHogService } from './posthog';
 
 export const ServicePool = (() => {
     let vatsim: VatsimService;
-    let stats: StatsService;
     let auth: AuthService;
     let roles: RoleService;
     let cache: CacheService;
@@ -31,6 +30,7 @@ export const ServicePool = (() => {
     let contributions: ContributionService;
     let storage: StorageService;
     let github: GitHubService;
+    let posthog: PostHogService;
 
     return {
         getVatsim(env: Env) {
@@ -39,15 +39,9 @@ export const ServicePool = (() => {
             }
             return vatsim;
         },
-        getStats(env: Env) {
-            if (!stats) {
-                stats = new StatsService(env.DB);
-            }
-            return stats;
-        },
         getAuth(env: Env) {
             if (!auth) {
-                auth = new AuthService(env.DB, this.getVatsim(env), this.getStats(env));
+                auth = new AuthService(env.DB, this.getVatsim(env), this.getPostHog(env));
             }
             return auth;
         },
@@ -65,13 +59,13 @@ export const ServicePool = (() => {
         },
         getAirport(env: Env) {
             if (!airport) {
-                airport = new AirportService(env.DB, env.AIRPORTDB_API_KEY);
+                airport = new AirportService(env.DB, env.AIRPORTDB_API_KEY, this.getPostHog(env));
             }
             return airport;
         },
         getDivisions(env: Env) {
             if (!divisions) {
-                divisions = new DivisionService(env.DB);
+                divisions = new DivisionService(env.DB, this.getPostHog(env));
             }
             return divisions;
         },
@@ -83,7 +77,7 @@ export const ServicePool = (() => {
         },
         getPoints(env: Env) {
             if (!points) {
-                points = new PointsService(env.DB, this.getID(env), this.getDivisions(env), this.getAuth(env));
+                points = new PointsService(env.DB, this.getID(env), this.getDivisions(env), this.getAuth(env), this.getPostHog(env));
             }
             return points;
         },
@@ -107,7 +101,7 @@ export const ServicePool = (() => {
         },
         getContributions(env: Env) {
             if (!contributions) {
-                contributions = new ContributionService(env.DB, this.getRoles(env), env.AIRPORTDB_API_KEY, env.BARS_STORAGE);
+                contributions = new ContributionService(env.DB, this.getRoles(env), env.AIRPORTDB_API_KEY, env.BARS_STORAGE, this.getPostHog(env));
             }
             return contributions;
         },
@@ -122,6 +116,12 @@ export const ServicePool = (() => {
                 github = new GitHubService();
             }
             return github;
+        },
+        getPostHog(env: Env) {
+            if (!posthog) {
+                posthog = new PostHogService(env);
+            }
+            return posthog;
         }
     };
 })();

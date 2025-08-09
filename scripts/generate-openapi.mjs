@@ -38,7 +38,6 @@ const options = {
       { name: 'Points', description: 'Creation and management of lighting/navigation point data.' },
       { name: 'Support', description: 'Utilities for generating light support / BARS XML artifacts.' },
       { name: 'NOTAM', description: 'Global NOTAM retrieval and (staff) updates.' },
-      { name: 'Stats', description: 'Public usage metrics and (staff) sensitive/internal statistics.' },
       { name: 'Contributions', description: 'Community lighting package submission, review, and leaderboard.' },
       { name: 'Staff', description: 'Restricted staff-only operational and moderation endpoints (hidden from public docs).' },
       { name: 'CDN', description: 'File storage, upload, listing, and deletion via CDN-backed storage.' },

@@ -28,13 +28,6 @@ export interface VatsimUserResponse {
 	};
 }
 
-export interface StatsRecord {
-	id: number;
-	stat_key: string;
-	value: number;
-	day_key: string;
-	last_updated: string;
-}
 
 import { Role } from './services/roles';
 
