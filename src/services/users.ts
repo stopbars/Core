@@ -30,14 +30,14 @@ export class UserService {
 			const [usersResult, countResult] = await Promise.all([
 				this.dbSession.executeRead<any>(
 					`
-			SELECT u.id, u.vatsim_id, u.email, u.created_at, u.last_login,
-			CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
-			s.role
-			FROM users u
-			LEFT JOIN staff s ON u.id = s.user_id
-			ORDER BY u.created_at DESC
-			LIMIT ? OFFSET ?
-		  `,
+				SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.created_at, u.last_login,
+				CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
+				s.role
+				FROM users u
+				LEFT JOIN staff s ON u.id = s.user_id
+				ORDER BY u.created_at DESC
+				LIMIT ? OFFSET ?
+			  `,
 					[limit, offset]
 				),
 				this.dbSession.executeRead<{ count: number }>(
@@ -67,7 +67,7 @@ export class UserService {
 		try {
 			const result = await this.dbSession.executeRead<any>(
 				`
-		  SELECT u.id, u.vatsim_id, u.email, u.created_at, u.last_login,
+		  SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.created_at, u.last_login,
 		  CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
 		  s.role
 		  FROM users u

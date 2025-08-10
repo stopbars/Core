@@ -47,6 +47,29 @@ export class DivisionService {
 		return division;
 	}
 
+	async updateDivisionName(id: number, newName: string): Promise<Division> {
+		const result = await this.dbSession.executeWrite(
+			'UPDATE divisions SET name = ? WHERE id = ? RETURNING *',
+			[newName, id]
+		);
+		const division = result.results[0] as Division;
+		if (!division) throw new Error('Division not found');
+		try { this.posthog?.track('Division Renamed', { divisionId: id, name: newName }); } catch { }
+		return division;
+	}
+
+	async deleteDivision(id: number): Promise<boolean> {
+		const result = await this.dbSession.executeWrite(
+			'DELETE FROM divisions WHERE id = ? RETURNING id',
+			[id]
+		);
+		const deleted = !!result.results[0];
+		if (deleted) {
+			try { this.posthog?.track('Division Deleted', { divisionId: id }); } catch { }
+		}
+		return deleted;
+	}
+
 	async getDivision(id: number): Promise<Division | null> {
 		const result = await this.dbSession.executeRead<Division>(
 			'SELECT * FROM divisions WHERE id = ?',
@@ -123,8 +146,13 @@ export class DivisionService {
 	}
 
 	async getDivisionMembers(divisionId: number): Promise<DivisionMember[]> {
-		const result = await this.dbSession.executeRead<DivisionMember>(
-			'SELECT * FROM division_members WHERE division_id = ?',
+		// Use cached display_name; fallback to vatsim_id if null
+		const result = await this.dbSession.executeRead<any>(
+			`SELECT dm.id, dm.division_id, dm.vatsim_id, dm.role, dm.created_at,
+			COALESCE(u.display_name, dm.vatsim_id) AS display_name
+			FROM division_members dm
+			LEFT JOIN users u ON u.vatsim_id = dm.vatsim_id
+			WHERE dm.division_id = ?`,
 			[divisionId]
 		);
 		return result.results;

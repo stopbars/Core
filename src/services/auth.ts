@@ -82,9 +82,15 @@ export class AuthService {
 			apiKey = this.generateApiKey();
 		}
 
+		const fullName = [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ') || null;
+		const displayMode = 0;
+		const displayName = this.computeDisplayName({
+			id: 0, vatsim_id: vatsimUser.id, api_key: apiKey, email: vatsimUser.email,
+			full_name: fullName, display_mode: displayMode, created_at: '', last_login: '', vatsimToken: ''
+		}, vatsimUser);
 		const result = await this.dbSession.executeWrite(
-			'INSERT INTO users (vatsim_id, api_key, email, created_at, last_login) VALUES (?, ?, ?, ?, ?) RETURNING *',
-			[vatsimUser.id, apiKey, vatsimUser.email, new Date().toISOString(), new Date().toISOString()]
+			'INSERT INTO users (vatsim_id, api_key, email, full_name, display_mode, display_name, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
+			[vatsimUser.id, apiKey, vatsimUser.email, fullName, displayMode, displayName, new Date().toISOString(), new Date().toISOString()]
 		);
 
 		if (!result.results[0]) throw new Error('Failed to create user');
@@ -125,6 +131,64 @@ export class AuthService {
 			[vatsimId]
 		);
 		return result.results[0] || null;
+	}
+
+	computeDisplayName(user: UserRecord, vatsimUser?: VatsimUser): string {
+		const mode = (user.display_mode ?? 0);
+		const fullName = user.full_name || [vatsimUser?.first_name, vatsimUser?.last_name].filter(Boolean).join(' ').trim();
+		if (mode === 2) return user.vatsim_id;
+		if (!fullName) return user.vatsim_id;
+		const parts = fullName.split(/\s+/);
+		if (mode === 0) return parts[0];
+		if (mode === 1) {
+			const first = parts[0];
+			const lastInitial = parts.length > 1 ? parts[parts.length - 1][0] : '';
+			return lastInitial ? `${first} ${lastInitial}` : first;
+		}
+		return fullName; // fallback
+	}
+
+	async updateDisplayMode(userId: number, mode: number) {
+		if (![0, 1, 2].includes(mode)) throw new Error('Invalid display mode');
+
+		// Use primary for consistency on write
+		this.dbSession.startSession({ mode: 'first-primary' });
+
+		const current = await this.dbSession.executeRead<UserRecord>(
+			'SELECT id, vatsim_id, email, full_name, display_mode, display_name FROM users WHERE id = ?',
+			[userId]
+		);
+		const user = current.results[0];
+		if (!user) return;
+
+		if (user.display_mode === mode) return; // nothing to do
+
+		const fullNameParts = (user.full_name || '').trim().split(/\s+/).filter(Boolean);
+		const vatsimUser: VatsimUser = {
+			id: user.vatsim_id,
+			email: user.email,
+			first_name: fullNameParts[0] || '',
+			last_name: fullNameParts.slice(1).join(' '),
+		};
+
+		const displayName = this.computeDisplayName({ ...user, display_mode: mode } as UserRecord, vatsimUser);
+
+		await this.dbSession.executeWrite(
+			'UPDATE users SET display_mode = ?, display_name = ? WHERE id = ?',
+			[mode, displayName, userId]
+		);
+	}
+
+	async updateFullName(userId: number, fullName: string) {
+		await this.dbSession.executeWrite('UPDATE users SET full_name = ? WHERE id = ?', [fullName, userId]);
+		// Recompute display_name after updating full_name using existing display_mode
+		const current = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE id = ?', [userId]);
+		const user = current.results[0];
+		if (user) {
+			const vatsimUser: VatsimUser = { id: user.vatsim_id, email: user.email, first_name: fullName.split(' ')[0], last_name: fullName.split(' ').slice(1).join(' ') };
+			const displayName = this.computeDisplayName(user, vatsimUser);
+			await this.dbSession.executeWrite('UPDATE users SET display_name = ? WHERE id = ?', [displayName, userId]);
+		}
 	}
 
 	private async updateUserLastLogin(userId: number) {

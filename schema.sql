@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS users (
  api_key TEXT NOT NULL,
  last_api_key_regen DATETIME DEFAULT CURRENT_TIMESTAMP,
  email TEXT NOT NULL,
+ full_name TEXT, -- Stored full name from VATSIM (first + last)
+ display_mode INTEGER NOT NULL DEFAULT 0,
+ display_name TEXT, -- Cached computed display name
  created_at TEXT NOT NULL,
  last_login TEXT NOT NULL
 );
@@ -101,7 +104,6 @@ CREATE TABLE IF NOT EXISTS active_objects (
 CREATE TABLE IF NOT EXISTS contributions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    user_display_name TEXT,
     airport_icao TEXT NOT NULL,
     package_name TEXT NOT NULL,
     submitted_xml TEXT NOT NULL,

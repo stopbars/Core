@@ -7,6 +7,8 @@ export interface AuthResponse {
 export interface VatsimUser {
 	id: string;
 	email: string;
+	first_name?: string;
+	last_name?: string;
 }
 
 export interface UserRecord {
@@ -14,6 +16,9 @@ export interface UserRecord {
 	vatsim_id: string;
 	api_key: string;
 	email: string;
+	full_name?: string | null;
+	display_mode?: number; // 0=First,1=First LastInitial,2=CID
+	display_name?: string | null; // cached display name
 	created_at: string;
 	last_login: string;
 	vatsimToken: string;

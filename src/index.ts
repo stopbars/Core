@@ -34,7 +34,6 @@ interface ApproveAirportPayload {
 }
 
 interface ContributionSubmissionPayload {
-	userDisplayName?: string;
 	airportIcao: string;
 	packageName: string;
 	submittedXml: string;
@@ -360,15 +359,87 @@ app.get('/auth/account', async (c) => {
 		const auth = ServicePool.getAuth(c.env);
 
 		const vatsimUser = await vatsim.getUser(vatsimToken);
-		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		let user = await auth.getUserByVatsimId(vatsimUser.id);
 		if (!user) {
 			return dbContext.textResponse('User not found', { status: 404 });
 		}
+		// Backfill full_name if missing locally but available from VATSIM
+		if ((!user.full_name || user.full_name.trim() === '') && (vatsimUser.first_name || vatsimUser.last_name)) {
+			const newFullName = [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ').trim();
+			if (newFullName) {
+				try { await auth.updateFullName(user.id, newFullName); } catch { /* ignore */ }
+				const refreshed = await auth.getUserByVatsimId(vatsimUser.id);
+				if (refreshed) user = refreshed;
+			}
+		}
 
 		return dbContext.jsonResponse({
-			...user,
+			id: user.id,
+			vatsim_id: user.vatsim_id,
 			email: vatsimUser.email,
+			api_key: user.api_key,
+			full_name: user.full_name || null,
+			display_mode: user.display_mode ?? 0,
+			display_name: user.display_name || auth.computeDisplayName(user, vatsimUser),
+			created_at: user.created_at,
+			last_login: user.last_login,
 		});
+	} finally {
+		dbContext.close();
+	}
+});
+
+/**
+ * @openapi
+ * /auth/display-mode:
+ *   put:
+ *     summary: Update preferred display name mode
+ *     tags:
+ *       - Auth
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [mode]
+ *             properties:
+ *               mode:
+ *                 type: integer
+ *                 enum: [0,1,2]
+ *                 description: 0=First,1=First LastInitial,2=CID
+ *     responses:
+ *       200:
+ *         description: Updated
+ */
+app.put('/auth/display-mode', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	let body: any;
+	try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+
+	const rawMode = body?.mode;
+	const mode = Number(rawMode);
+	if (!Number.isInteger(mode) || ![0, 1, 2].includes(mode)) {
+		return c.json({ error: 'Invalid mode', message: 'mode must be integer 0,1,2' }, 400);
+	}
+
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('User not found', { status: 404 });
+		await auth.updateDisplayMode(user.id, mode);
+		return dbContext.jsonResponse({ mode });
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		const status = msg.includes('Invalid display mode') ? 400 : 500;
+		return dbContext.jsonResponse({ error: 'Failed to update display mode', message: msg }, { status });
 	} finally {
 		dbContext.close();
 	}
@@ -614,6 +685,69 @@ app.get('/airports',
 	}
 );
 
+// Nearest airport (public, unauthenticated)
+/**
+ * @openapi
+ * /airports/nearest:
+ *   get:
+ *     summary: Find nearest airport
+ *     tags:
+ *       - Airports
+ *     description: Returns the nearest airport to a given latitude/longitude. Results are cached in 5NM buckets for high performance.
+ *     parameters:
+ *       - in: query
+ *         name: lat
+ *         required: true
+ *         description: Latitude in decimal degrees (-90 to 90)
+ *         schema: { type: number }
+ *       - in: query
+ *         name: lon
+ *         required: true
+ *         description: Longitude in decimal degrees (-180 to 180)
+ *         schema: { type: number }
+ *     responses:
+ *       200:
+ *         description: Nearest airport returned
+ *       400:
+ *         description: Invalid coordinates
+ *       404:
+ *         description: No airport found
+ */
+app.get('/airports/nearest',
+	withCache((req) => {
+		// Bucket cache key by ~5NM (~9.26km). 1 degree lat ~111km => bucket size deg ≈ 9.26/111 ≈ 0.083
+		const url = new URL(req.url);
+		const lat = parseFloat(url.searchParams.get('lat') || '0');
+		const lon = parseFloat(url.searchParams.get('lon') || '0');
+		const bucketDeg = 0.083; // ~5NM
+		const bucketLat = Math.round(lat / bucketDeg);
+		const bucketLon = Math.round(lon / bucketDeg);
+		return `/airports/nearest/${bucketLat}_${bucketLon}`;
+	}, 600, 'airports'),
+	async (c) => {
+		const latStr = c.req.query('lat');
+		const lonStr = c.req.query('lon');
+
+		if (!latStr || !lonStr) {
+			return c.text('Missing lat/lon', 400);
+		}
+		const lat = parseFloat(latStr);
+		const lon = parseFloat(lonStr);
+		if (Number.isNaN(lat) || Number.isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+			return c.text('Invalid lat/lon', 400);
+		}
+
+		try {
+			const airports = ServicePool.getAirport(c.env);
+			const nearest = await airports.getNearestAirport(lat, lon);
+			if (!nearest) return c.text('No airport found', 404);
+			return c.json(nearest);
+		} catch (err) {
+			return c.json({ error: 'Failed to find nearest airport' }, 500);
+		}
+	}
+);
+
 // Divisions routes
 const divisionsApp = new Hono<{
 	Bindings: Env;
@@ -713,6 +847,99 @@ divisionsApp.post('/', async (c) => {
 	const { name, headVatsimId } = await c.req.json() as CreateDivisionPayload;
 	const division = await divisions.createDivision(name, headVatsimId);
 	return c.json(division);
+});
+
+// PUT /divisions/:id - Update division name (lead_developer only)
+/**
+ * @openapi
+ * /divisions/{id}:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update division name
+ *     tags:
+ *       - Divisions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Division updated
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Division not found
+ */
+divisionsApp.put('/:id', async (c) => {
+	const user = c.get('user');
+	const roles = ServicePool.getRoles(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
+	const id = parseInt(c.req.param('id'));
+
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) return c.text('Forbidden', 403);
+
+	const existing = await divisions.getDivision(id);
+	if (!existing) return c.text('Division not found', 404);
+
+	const body = await c.req.json() as { name: string };
+	if (!body.name || !body.name.trim()) return c.text('Invalid name', 400);
+
+	const updated = await divisions.updateDivisionName(id, body.name.trim());
+	return c.json(updated);
+});
+
+// DELETE /divisions/:id - Delete division (lead_developer only)
+/**
+ * @openapi
+ * /divisions/{id}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Delete a division
+ *     tags:
+ *       - Divisions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       204:
+ *         description: Division deleted
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Division not found
+ */
+divisionsApp.delete('/:id', async (c) => {
+	const user = c.get('user');
+	const roles = ServicePool.getRoles(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
+	const id = parseInt(c.req.param('id'));
+
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) return c.text('Forbidden', 403);
+
+	const existing = await divisions.getDivision(id);
+	if (!existing) return c.text('Division not found', 404);
+
+	await divisions.deleteDivision(id);
+	return c.body(null, 204);
 });
 
 // GET /divisions/user - Get user's divisions
@@ -1920,7 +2147,6 @@ contributionsApp.get('/top-packages',
  *             type: object
  *             required: [airportIcao, packageName, submittedXml]
  *             properties:
- *               userDisplayName: { type: string }
  *               airportIcao: { type: string }
  *               packageName: { type: string }
  *               submittedXml: { type: string }
@@ -1950,7 +2176,6 @@ contributionsApp.post('/', async (c) => {
 		const payload = await c.req.json() as ContributionSubmissionPayload;
 		const result = await contributions.createContribution({
 			userId: user.vatsim_id,
-			userDisplayName: payload.userDisplayName,
 			airportIcao: payload.airportIcao,
 			packageName: payload.packageName,
 			submittedXml: payload.submittedXml,
@@ -2111,37 +2336,6 @@ contributionsApp.post('/:id/decision', async (c) => {
 	}
 });
 
-// GET /contributions/user/display-name - Get user's display name
-/**
- * @openapi
- * /contributions/user/display-name:
- *   get:
- *     summary: Get display name for authenticated user
- *     tags:
- *       - Contributions
- *     security:
- *       - VatsimToken: []
- *     responses:
- *       200:
- *         description: Display name returned
- */
-contributionsApp.get('/user/display-name', async (c) => {
-	const token = c.req.header('X-Vatsim-Token');
-	if (!token) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const vatsimUser = await vatsim.getUser(token);
-	const contributions = ServicePool.getContributions(c.env);
-	const displayName = await contributions.getUserDisplayName(vatsimUser.id);
-
-	if (!displayName) {
-		return c.text('User not found', 404);
-	}
-
-	return c.json({ displayName });
-});
 
 // DELETE /contributions/:id - Delete a contribution (admin only)
 /**

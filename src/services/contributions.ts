@@ -22,7 +22,6 @@ export interface Contribution {
 
 export interface ContributionSubmission {
 	userId: string;
-	userDisplayName?: string;
 	airportIcao: string;
 	packageName: string;
 	submittedXml: string;
@@ -87,7 +86,12 @@ export class ContributionService {
 		const id = crypto.randomUUID();
 		const now = new Date().toISOString();
 
-		await this.updateUserDisplayNameForAllContributions(submission.userId, submission.userDisplayName || null);
+		// Get authoritative display name from users table (ignore any client-provided value)
+		const userDisplayResult = await this.dbSession.executeRead<{ display_name: string | null }>(
+			'SELECT display_name FROM users WHERE vatsim_id = ?',
+			[submission.userId]
+		);
+		const authoritativeDisplayName = userDisplayResult.results[0]?.display_name || null;
 		await this.dbSession.executeWrite(
 			`
 	  INSERT INTO contributions (
@@ -99,7 +103,7 @@ export class ContributionService {
 			[
 				id,
 				submission.userId,
-				submission.userDisplayName || null,
+				authoritativeDisplayName,
 				submission.airportIcao,
 				submission.packageName,
 				trimmedXml,
@@ -113,7 +117,7 @@ export class ContributionService {
 		const contribution: Contribution = {
 			id,
 			userId: submission.userId,
-			userDisplayName: submission.userDisplayName || null,
+			userDisplayName: authoritativeDisplayName,
 			airportIcao: submission.airportIcao,
 			packageName: submission.packageName,
 			submittedXml: trimmedXml,
@@ -515,51 +519,20 @@ export class ContributionService {
 		}>
 	> {
 		const query = `
-	  SELECT 
-		user_id, 
-		user_display_name,
-		COUNT(*) as contribution_count
-	  FROM contributions
-	  WHERE status = 'approved'
-	  GROUP BY user_id
+	  SELECT c.user_id, u.display_name, COUNT(*) as contribution_count
+	  FROM contributions c
+	  LEFT JOIN users u ON u.vatsim_id = c.user_id
+	  WHERE c.status = 'approved'
+	  GROUP BY c.user_id
 	  ORDER BY contribution_count DESC
 	  LIMIT 5
 	`;
-
 		const results = await this.dbSession.executeRead<{
 			user_id: string;
-			user_display_name: string | null;
+			display_name: string | null;
 			contribution_count: number;
-		}>(
-			query
-		);
-		return results.results.map((item) => ({
-			name: item.user_display_name || item.user_id,
-			count: item.contribution_count,
-		}));
+		}>(query);
+		return results.results.map(r => ({ name: r.display_name || r.user_id, count: r.contribution_count }));
 	}
-
-	private async updateUserDisplayNameForAllContributions(userId: string, displayName: string | null): Promise<void> {
-		await this.dbSession.executeWrite(
-			`
-	  UPDATE contributions
-	  SET user_display_name = ?
-	  WHERE user_id = ?
-	`,
-			[displayName, userId]
-		);
-	}
-	async getUserDisplayName(userId: string): Promise<string | null> {
-		const result = await this.dbSession.executeRead<{ userDisplayName: string | null }>(
-			`
-	  SELECT user_display_name as userDisplayName
-	  FROM contributions
-	  WHERE user_id = ?
-	  ORDER BY submission_date DESC
-	  LIMIT 1
-	`,
-			[userId]
-		);
-		return result.results[0]?.userDisplayName || null;
-	}
+	// Removed legacy user display name update + lookup helpers; display names now sourced directly from users table
 }
