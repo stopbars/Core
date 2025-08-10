@@ -34,18 +34,12 @@ export class AirportService {
 		const uppercaseIcao = icao.toUpperCase();
 
 		// First try to get from database using read-optimized query
-		const airportResult = await this.dbSession.executeRead<any>(
-			'SELECT * FROM airports WHERE icao = ?',
-			[uppercaseIcao]
-		);
+		const airportResult = await this.dbSession.executeRead<any>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
 		const airportFromDb = airportResult.results[0];
 
 		if (airportFromDb) {
 			// Get runways for this airport
-			const runwaysResult = await this.dbSession.executeRead<any>(
-				'SELECT * FROM runways WHERE airport_icao = ?',
-				[uppercaseIcao]
-			);
+			const runwaysResult = await this.dbSession.executeRead<any>('SELECT * FROM runways WHERE airport_icao = ?', [uppercaseIcao]);
 
 			return { ...airportFromDb, runways: runwaysResult.results };
 		}
@@ -66,10 +60,13 @@ export class AirportService {
 			};
 
 			// Save airport to database using write-optimized operation
-			await this.dbSession.executeWrite(
-				'INSERT INTO airports (icao, latitude, longitude, name, continent) VALUES (?, ?, ?, ?, ?)',
-				[airport.icao, airport.latitude, airport.longitude, airport.name, airport.continent]
-			);
+			await this.dbSession.executeWrite('INSERT INTO airports (icao, latitude, longitude, name, continent) VALUES (?, ?, ?, ?, ?)', [
+				airport.icao,
+				airport.latitude,
+				airport.longitude,
+				airport.name,
+				airport.continent,
+			]);
 
 			// Save runway data if available
 			if (airportData.runways && airportData.runways.length > 0) {
@@ -91,24 +88,30 @@ export class AirportService {
 						runway.he_ident,
 						runway.he_latitude_deg,
 						runway.he_longitude_deg,
-					]
+					],
 				}));
 
 				await this.dbSession.executeBatch(runwayStatements);
 
 				// Fetch the saved runways to return with the airport
-				const runwaysResult = await this.dbSession.executeRead<any>(
-					'SELECT * FROM runways WHERE airport_icao = ?',
-					[uppercaseIcao]
-				);
+				const runwaysResult = await this.dbSession.executeRead<any>('SELECT * FROM runways WHERE airport_icao = ?', [
+					uppercaseIcao,
+				]);
 
 				return { ...airport, runways: runwaysResult.results };
 			}
 
-			try { this.posthog?.track('Airport Fetched From External API', { icao: uppercaseIcao, hasRunways: !!airportData.runways?.length }); } catch { }
+			try {
+				this.posthog?.track('Airport Fetched From External API', {
+					icao: uppercaseIcao,
+					hasRunways: !!airportData.runways?.length,
+				});
+			} catch {}
 			return airport;
 		} catch (error) {
-			try { this.posthog?.track('Airport External Fetch Failed', { icao: uppercaseIcao }); } catch { }
+			try {
+				this.posthog?.track('Airport External Fetch Failed', { icao: uppercaseIcao });
+			} catch {}
 			return null;
 		}
 	}
@@ -134,10 +137,9 @@ export class AirportService {
 	}
 
 	async getAirportsByContinent(continent: string) {
-		const result = await this.dbSession.executeRead<any>(
-			'SELECT * FROM airports WHERE continent = ? ORDER BY icao',
-			[continent.toUpperCase()]
-		);
+		const result = await this.dbSession.executeRead<any>('SELECT * FROM airports WHERE continent = ? ORDER BY icao', [
+			continent.toUpperCase(),
+		]);
 		return { results: result.results };
 	}
 
@@ -160,7 +162,7 @@ export class AirportService {
 		const maxLon = lon + LON_BOX;
 
 		// Pre-compute cos^2(lat) to weight longitudinal delta for planar approx distance ordering
-		const cosLat = Math.cos(lat * Math.PI / 180);
+		const cosLat = Math.cos((lat * Math.PI) / 180);
 		const cosLatSq = cosLat * cosLat;
 		const approx = await this.dbSession.executeRead<any>(
 			`SELECT icao, latitude, longitude, name, continent,
@@ -169,7 +171,7 @@ export class AirportService {
 			 WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
 			 ORDER BY distance_score
 			 LIMIT 1`,
-			[lat, lat, lon, lon, cosLatSq, minLat, maxLat, minLon, maxLon]
+			[lat, lat, lon, lon, cosLatSq, minLat, maxLat, minLon, maxLon],
 		);
 
 		const row = approx.results?.[0];
@@ -179,7 +181,9 @@ export class AirportService {
 		const distance_m = calculateDistance({ lat, lon }, { lat: row.latitude, lon: row.longitude });
 		const distance_nm = distance_m / 1852;
 
-		try { this.posthog?.track('Nearest Airport Lookup', { icao: row.icao }); } catch { }
+		try {
+			this.posthog?.track('Nearest Airport Lookup', { icao: row.icao });
+		} catch {}
 
 		return {
 			icao: row.icao,

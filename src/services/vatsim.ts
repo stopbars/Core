@@ -4,7 +4,7 @@ export class VatsimService {
 	constructor(
 		private clientId: string,
 		private clientSecret: string,
-	) { }
+	) {}
 
 	async getToken(code: string): Promise<AuthResponse> {
 		const res = await fetch('https://auth.vatsim.net/oauth/token', {

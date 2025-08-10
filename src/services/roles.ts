@@ -33,19 +33,13 @@ export class RoleService {
 	}
 
 	async isStaff(userId: number): Promise<boolean> {
-		const staffResult = await this.dbSession.executeRead<StaffRecord>(
-			'SELECT * FROM staff WHERE user_id = ?',
-			[userId]
-		);
+		const staffResult = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
 		const staff = staffResult.results[0];
 		return !!staff && !!staff.role && staff.role in roleHierarchy;
 	}
 
 	async getUserRole(userId: number): Promise<StaffRole | null> {
-		const staffResult = await this.dbSession.executeRead<StaffRecord>(
-			'SELECT * FROM staff WHERE user_id = ?',
-			[userId]
-		);
+		const staffResult = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
 		const staff = staffResult.results[0];
 		if (!staff?.role) return null;
 		return staff.role as StaffRole;
@@ -73,7 +67,7 @@ export class RoleService {
 			JOIN users u ON u.vatsim_id = dm.vatsim_id
 			WHERE u.id = ?
 		`,
-			[userId]
+			[userId],
 		);
 		return rolesResult.results.reduce(
 			(acc, { role }) => ({

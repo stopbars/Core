@@ -50,7 +50,7 @@
       "description": "Creation and management of lighting/navigation point data."
     },
     {
-      "name": "Support",
+      "name": "Generation",
       "description": "Utilities for generating light support / BARS XML artifacts."
     },
     {
@@ -1106,7 +1106,7 @@
       "post": {
         "summary": "Generate Light Supports and BARS XML",
         "tags": [
-          "Support"
+          "Generation"
         ],
         "description": "Upload raw XML and generate both light supports XML and processed BARS XML.",
         "requestBody": {
@@ -1556,6 +1556,32 @@
           },
           "403": {
             "description": "Not authorized"
+          }
+        }
+      }
+    },
+    "/maps/{icao}/latest": {
+      "get": {
+        "summary": "Get latest approved BARS map XML (raw content) for an airport",
+        "tags": [
+          "Generation"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "icao",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "BARS XML document returned inline (application/xml)"
+          },
+          "404": {
+            "description": "Not found"
           }
         }
       }

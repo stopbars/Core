@@ -29,79 +29,77 @@ interface DivisionAirport {
 export class DivisionService {
 	private dbSession: DatabaseSessionService;
 
-	constructor(private db: D1Database, private posthog?: PostHogService) {
+	constructor(
+		private db: D1Database,
+		private posthog?: PostHogService,
+	) {
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
 	async createDivision(name: string, headVatsimId: string): Promise<Division> {
-		const result = await this.dbSession.executeWrite(
-			'INSERT INTO divisions (name) VALUES (?) RETURNING *',
-			[name]
-		);
+		const result = await this.dbSession.executeWrite('INSERT INTO divisions (name) VALUES (?) RETURNING *', [name]);
 		const division = result.results[0] as Division;
 		if (!division) throw new Error('Failed to create division');
 
 		await this.addMember(division.id, headVatsimId, 'nav_head');
-		try { this.posthog?.track('Division Created', { divisionId: division.id, name }); } catch { }
+		try {
+			this.posthog?.track('Division Created', { divisionId: division.id, name });
+		} catch {}
 
 		return division;
 	}
 
 	async updateDivisionName(id: number, newName: string): Promise<Division> {
-		const result = await this.dbSession.executeWrite(
-			'UPDATE divisions SET name = ? WHERE id = ? RETURNING *',
-			[newName, id]
-		);
+		const result = await this.dbSession.executeWrite('UPDATE divisions SET name = ? WHERE id = ? RETURNING *', [newName, id]);
 		const division = result.results[0] as Division;
 		if (!division) throw new Error('Division not found');
-		try { this.posthog?.track('Division Renamed', { divisionId: id, name: newName }); } catch { }
+		try {
+			this.posthog?.track('Division Renamed', { divisionId: id, name: newName });
+		} catch {}
 		return division;
 	}
 
 	async deleteDivision(id: number): Promise<boolean> {
-		const result = await this.dbSession.executeWrite(
-			'DELETE FROM divisions WHERE id = ? RETURNING id',
-			[id]
-		);
+		const result = await this.dbSession.executeWrite('DELETE FROM divisions WHERE id = ? RETURNING id', [id]);
 		const deleted = !!result.results[0];
 		if (deleted) {
-			try { this.posthog?.track('Division Deleted', { divisionId: id }); } catch { }
+			try {
+				this.posthog?.track('Division Deleted', { divisionId: id });
+			} catch {}
 		}
 		return deleted;
 	}
 
 	async getDivision(id: number): Promise<Division | null> {
-		const result = await this.dbSession.executeRead<Division>(
-			'SELECT * FROM divisions WHERE id = ?',
-			[id]
-		);
+		const result = await this.dbSession.executeRead<Division>('SELECT * FROM divisions WHERE id = ?', [id]);
 		return result.results[0] || null;
 	}
 
 	async addMember(divisionId: number, vatsimId: string, role: 'nav_head' | 'nav_member'): Promise<DivisionMember> {
 		const result = await this.dbSession.executeWrite(
 			'INSERT INTO division_members (division_id, vatsim_id, role) VALUES (?, ?, ?) RETURNING *',
-			[divisionId, vatsimId, role]
+			[divisionId, vatsimId, role],
 		);
 
 		const member = result.results[0] as DivisionMember;
 		if (!member) throw new Error('Failed to add member to division');
-		try { this.posthog?.track('Division Member Added', { divisionId, vatsimId, role }); } catch { }
+		try {
+			this.posthog?.track('Division Member Added', { divisionId, vatsimId, role });
+		} catch {}
 		return member;
 	}
 
 	async removeMember(divisionId: number, vatsimId: string): Promise<void> {
-		await this.dbSession.executeWrite(
-			'DELETE FROM division_members WHERE division_id = ? AND vatsim_id = ?',
-			[divisionId, vatsimId]
-		);
-		try { this.posthog?.track('Division Member Removed', { divisionId, vatsimId }); } catch { }
+		await this.dbSession.executeWrite('DELETE FROM division_members WHERE division_id = ? AND vatsim_id = ?', [divisionId, vatsimId]);
+		try {
+			this.posthog?.track('Division Member Removed', { divisionId, vatsimId });
+		} catch {}
 	}
 
 	async getMemberRole(divisionId: number, vatsimId: string): Promise<'nav_head' | 'nav_member' | null> {
 		const result = await this.dbSession.executeRead<{ role: 'nav_head' | 'nav_member' }>(
 			'SELECT role FROM division_members WHERE division_id = ? AND vatsim_id = ?',
-			[divisionId, vatsimId]
+			[divisionId, vatsimId],
 		);
 
 		return result.results[0]?.role || null;
@@ -112,12 +110,14 @@ export class DivisionService {
 
 		const result = await this.dbSession.executeWrite(
 			'INSERT INTO division_airports (division_id, icao, requested_by) VALUES (?, ?, ?) RETURNING *',
-			[divisionId, icao, requestedBy]
+			[divisionId, icao, requestedBy],
 		);
 
 		const request = result.results[0] as DivisionAirport;
 		if (!request) throw new Error('Failed to create airport request');
-		try { this.posthog?.track('Division Airport Access Requested', { divisionId, icao, requestedBy }); } catch { }
+		try {
+			this.posthog?.track('Division Airport Access Requested', { divisionId, icao, requestedBy });
+		} catch {}
 		return request;
 	}
 	async approveAirport(airportId: number, approvedBy: string, approved: boolean): Promise<DivisionAirport> {
@@ -128,20 +128,25 @@ export class DivisionService {
             WHERE id = ? 
             RETURNING *
         `,
-			[approved ? 'approved' : 'rejected', approvedBy, airportId]
+			[approved ? 'approved' : 'rejected', approvedBy, airportId],
 		);
 
 		const airport = result.results[0] as DivisionAirport;
 		if (!airport) throw new Error('Airport request not found');
-		try { this.posthog?.track(approved ? 'Division Airport Request Approved' : 'Division Airport Request Rejected', { airportId, approvedBy, approved }); } catch { }
+		try {
+			this.posthog?.track(approved ? 'Division Airport Request Approved' : 'Division Airport Request Rejected', {
+				airportId,
+				approvedBy,
+				approved,
+			});
+		} catch {}
 		return airport;
 	}
 
 	async getDivisionAirports(divisionId: number): Promise<DivisionAirport[]> {
-		const result = await this.dbSession.executeRead<DivisionAirport>(
-			'SELECT * FROM division_airports WHERE division_id = ?',
-			[divisionId]
-		);
+		const result = await this.dbSession.executeRead<DivisionAirport>('SELECT * FROM division_airports WHERE division_id = ?', [
+			divisionId,
+		]);
 		return result.results;
 	}
 
@@ -153,15 +158,13 @@ export class DivisionService {
 			FROM division_members dm
 			LEFT JOIN users u ON u.vatsim_id = dm.vatsim_id
 			WHERE dm.division_id = ?`,
-			[divisionId]
+			[divisionId],
 		);
 		return result.results;
 	}
 
 	async getAllDivisions(): Promise<Division[]> {
-		const result = await this.dbSession.executeRead<Division>(
-			'SELECT * FROM divisions'
-		);
+		const result = await this.dbSession.executeRead<Division>('SELECT * FROM divisions');
 		return result.results;
 	}
 
@@ -173,7 +176,7 @@ export class DivisionService {
             JOIN division_members dm ON d.id = dm.division_id 
             WHERE dm.vatsim_id = ?
         `,
-			[vatsimId]
+			[vatsimId],
 		);
 		return result.results;
 	}
@@ -185,7 +188,7 @@ export class DivisionService {
           JOIN division_members dm ON da.division_id = dm.division_id
           WHERE dm.vatsim_id = ? AND da.icao = ? AND da.status = 'approved'
         `,
-			[userId, airportIcao]
+			[userId, airportIcao],
 		);
 
 		return result.results.length > 0;
@@ -202,7 +205,7 @@ export class DivisionService {
             AND da.status = 'approved'
             LIMIT 1
         `,
-			[userId, airportIcao]
+			[userId, airportIcao],
 		);
 
 		return result.results[0]?.role || null;

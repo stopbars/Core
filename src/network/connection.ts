@@ -273,9 +273,7 @@ export class Connection {
 				}
 
 				// Ensure existing state is an object for merging
-				const baseState = (typeof existingObject.state === 'object' && existingObject.state !== null)
-					? existingObject.state
-					: {};
+				const baseState = typeof existingObject.state === 'object' && existingObject.state !== null ? existingObject.state : {};
 
 				// Apply patch using recursive merge with size limit
 				newState = recursivelyMergeObjects(baseState, packet.data.patch);
@@ -392,9 +390,11 @@ export class Connection {
 					const isPilot = this.vatsim.isPilot(status);
 					const isObserver = this.vatsim.isObserver(status);
 
-					if ((socketInfo.type === 'controller' && !isController) ||
+					if (
+						(socketInfo.type === 'controller' && !isController) ||
 						(socketInfo.type === 'pilot' && !isPilot) ||
-						(socketInfo.type === 'observer' && !isObserver)) {
+						(socketInfo.type === 'observer' && !isObserver)
+					) {
 						console.log(`User ${socketInfo.controllerId} role changed on VATSIM, closing connection`);
 						socket.send(
 							JSON.stringify({
@@ -514,11 +514,7 @@ export class Connection {
 			return new Response('User not connected to VATSIM', { status: 403 });
 		}
 		// Auto-determine client type based on VATSIM status
-		const clientType = this.vatsim.isController(status)
-			? 'controller'
-			: this.vatsim.isObserver(status)
-				? 'observer'
-				: 'pilot';
+		const clientType = this.vatsim.isController(status) ? 'controller' : this.vatsim.isObserver(status) ? 'observer' : 'pilot';
 
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
@@ -665,7 +661,9 @@ export class Connection {
 							await this.broadcast(broadcastPacket, server);
 							await this.trackMessage(clientType);
 						} catch (updateError) {
-							throw new Error(`State update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+							throw new Error(
+								`State update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
+							);
 						}
 						break;
 
@@ -688,7 +686,9 @@ export class Connection {
 						try {
 							this.handleSharedStateUpdate(packet, user.vatsim_id, socketInfo.airport);
 						} catch (updateError) {
-							throw new Error(`Shared state update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+							throw new Error(
+								`Shared state update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
+							);
 						}
 						break;
 
@@ -834,7 +834,7 @@ export class Connection {
 						controllers: [] as string[],
 						pilots: [] as string[],
 						controllerSet: new Set<string>(),
-						pilotSet: new Set<string>()
+						pilotSet: new Set<string>(),
 					},
 				);
 			const state = this.airportStates.get(airport);
@@ -959,7 +959,7 @@ export class Connection {
 			airport: airport,
 			data: {
 				sharedStatePatch: patch,
-				controllerId: controllerId
+				controllerId: controllerId,
 			},
 			timestamp: Date.now(),
 		};
@@ -974,7 +974,9 @@ export class Connection {
 						try {
 							socket.send(JSON.stringify(packet));
 						} catch (error) {
-							console.error(`Failed to send packet over WebSocket: ${error instanceof Error ? error.message : String(error)}`);
+							console.error(
+								`Failed to send packet over WebSocket: ${error instanceof Error ? error.message : String(error)}`,
+							);
 						} finally {
 							resolve();
 						}
@@ -1011,7 +1013,7 @@ export class Connection {
 			'INITIAL_STATE',
 			'CONTROLLER_CONNECT',
 			'CONTROLLER_DISCONNECT',
-			'ERROR'
+			'ERROR',
 		];
 
 		if (!validTypes.includes(packet.type)) {

@@ -20,6 +20,7 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
    cd Core
    ```
+
    <br>
 
 2. **Install Dependencies**
@@ -37,11 +38,9 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
    **Set up Cloudflare configuration:**
 
    The `wrangler.toml` file is already configured and safe to use as-is. For local testing, you'll need to:
-
    1. Create your own D1 SQL database in the [Cloudflare Dashboard](https://dash.cloudflare.com) (Storage & Databases > D1 SQL)
 
    <br>
-
    2. Edit `wrangler.toml` and update the database configuration (see comments in the file):
       - `account_id`: Your Cloudflare account ID (found in dash.cloudflare.com/your-id/home)
       - `VATSIM_CLIENT_ID`: Your VATSIM Connect application client ID
@@ -49,7 +48,6 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
       - `database_id`: Your D1 database ID (found in your database page)
 
    <br>
-
    3. Update `package.json` scripts to use your database name:
       - Replace `bars-db` with your database name in the `update-db-local` and `update-db` scripts
       - Example: `"update-db": "wrangler d1 execute bars-dev-example --remote --file schema.sql",`
@@ -72,7 +70,6 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
    <br>
 
    Edit `.dev.vars` and add your API credentials:
-
    - `VATSIM_CLIENT_SECRET`: Your VATSIM Connect application secret
    - `AIRPORTDB_API_KEY`: Your [AirportDB](https://airportdb.io/) API key (optional for basic testing)
 

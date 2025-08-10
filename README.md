@@ -9,7 +9,6 @@
 ![GitHub License](https://img.shields.io/github/license/stopbars/Core)
 [![Discord](https://img.shields.io/discord/1323993176318414889.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://stopbars.com/discord)
 
-
 Core is the foundational backend infrastructure that powers BARS. This service provides comprehensive APIs, backend systems, and real-time capabilities for all BARS services & applications across the product suite.
 
 <br>

@@ -4,10 +4,10 @@
 
 We actively maintain and apply security patches to the latest stable version of this project.
 
-| Version | Supported          |
-|---------|--------------------|
-| Latest  | ✅ Yes              |
-| Older   | ❌ No               |
+| Version | Supported |
+| ------- | --------- |
+| Latest  | ✅ Yes    |
+| Older   | ❌ No     |
 
 ## Reporting a Vulnerability
 

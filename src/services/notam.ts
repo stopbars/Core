@@ -14,7 +14,7 @@ export class NotamService {
 		try {
 			const result = await this.dbSession.executeRead<{ content: string; type: string }>(
 				'SELECT id, content, type FROM notams WHERE id = ?',
-				['global']
+				['global'],
 			);
 			if (!result.results[0]) {
 				return null;
@@ -40,7 +40,7 @@ export class NotamService {
 			}
 			await this.dbSession.executeWrite(
 				'INSERT OR REPLACE INTO notams (id, content, type, updated_by, updated_at) VALUES (?, ?, ?, ?, datetime("now"))',
-				['global', content, type, userId]
+				['global', content, type, userId],
 			);
 			return true;
 		} catch (error) {

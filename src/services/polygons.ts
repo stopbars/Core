@@ -69,7 +69,7 @@ export class PolygonService {
 		FROM points 
 		WHERE id = ?
 	  `,
-				[barsId]
+				[barsId],
 			);
 			if (!result.results[0]) {
 				return null;
@@ -175,6 +175,7 @@ export class PolygonService {
 
 		// Add each object
 		for (const obj of processedObjects) {
+			// stateId moved to per-light level (previously on BarsObject)
 			xml += `\t<BarsObject id="${obj.id}" type="${obj.type}">\n`;
 
 			// Add properties
@@ -192,7 +193,13 @@ export class PolygonService {
 
 			// Add light points
 			for (const point of obj.points) {
-				xml += '\t\t<Light>\n';
+				// Determine per-light orientation & color (point overrides object)
+				const lightOrientation: 'left' | 'right' | 'both' =
+					(point.properties?.orientation as any) || (obj.properties.orientation as any) || 'both';
+				const lightColor = (point.properties?.color || obj.properties.color || '').toLowerCase();
+				const lightStateId = this.mapLightStateId(lightOrientation, lightColor);
+				const lightStateAttr = lightStateId !== undefined ? ` stateId="${lightStateId}"` : '';
+				xml += `\t\t<Light${lightStateAttr}>\n`;
 				xml += `\t\t\t<Position>${point.lat},${point.lon}</Position>\n`;
 				xml += `\t\t\t<Heading>${point.heading.toFixed(2)}</Heading>\n`;
 
@@ -202,35 +209,30 @@ export class PolygonService {
 					const needsPropertiesTag = this.lightsNeedsPropertiesTag(point, props, obj.type);
 
 					if (needsPropertiesTag) {
-						xml += '\t\t\t<Properties>\n';
-
-						// Include color if it differs from the object-level defaults
+						let lightPropsContent = '';
 						if (point.properties.color && point.properties.color !== props.color) {
-							xml += `\t\t\t\t<Color>${point.properties.color}</Color>\n`;
+							lightPropsContent += `\t\t\t\t<Color>${point.properties.color}</Color>\n`;
 						}
-
 						if (point.properties.ihp === true && obj.type === 'stopbar' && point.properties.color === 'yellow') {
-							xml += `\t\t\t\t<IHP>${point.properties.ihp}</IHP>\n`;
+							lightPropsContent += `\t\t\t\t<IHP>${point.properties.ihp}</IHP>\n`;
 						}
-
-						// Only include elevated property when it's explicitly true
 						if (point.properties.elevated === true) {
-							xml += `\t\t\t\t<Elevated>true</Elevated>\n`;
+							lightPropsContent += `\t\t\t\t<Elevated>true</Elevated>\n`;
 						}
-
-						// For orientation, only output for stopbar type
 						if (
 							point.properties.orientation &&
 							obj.type === 'stopbar' &&
-							// Don't include "both" for elevated stopbar lights
 							!(point.properties.elevated === true && point.properties.orientation === 'both') &&
-							// Only include if it differs from the object's orientation
 							point.properties.orientation !== props.orientation
 						) {
-							xml += `\t\t\t\t<Orientation>${point.properties.orientation}</Orientation>\n`;
+							lightPropsContent += `\t\t\t\t<Orientation>${point.properties.orientation}</Orientation>\n`;
 						}
 
-						xml += '\t\t\t</Properties>\n';
+						if (lightPropsContent.length > 0) {
+							xml += '\t\t\t<Properties>\n';
+							xml += lightPropsContent;
+							xml += '\t\t\t</Properties>\n';
+						}
 					}
 				}
 
@@ -245,6 +247,65 @@ export class PolygonService {
 		// Stats tracking removed
 
 		return xml;
+	}
+	/**
+	 * Map a processed BARS object to a light stateId used by pilot client.
+	 * Mapping provided:
+	 * Uni (orientation !== 'both'):
+	 *  red=1, green=2, yellow=3, blue=4, orange=5
+	 * Bi (orientation === 'both') same color both dirs:
+	 *  red=20, green=21, yellow=22, blue=23, orange=24
+	 * Bi mixed (Dir2 green, Dir1 other):
+	 *  green-yellow=25, green-blue=26, green-orange=27
+	 */
+	private mapLightStateId(orientation: 'left' | 'right' | 'both', rawColor: string): number | undefined {
+		if (!rawColor) return undefined;
+		// Normalize color string(s)
+		const color = rawColor.toLowerCase();
+		// For mapping, strip trailing -uni markers on entire string and on segments
+		const normalized = color
+			.split('-')
+			.map((seg) => seg.replace(/uni$/i, ''))
+			.join('-')
+			.replace(/--+/g, '-');
+
+		if (orientation === 'both') {
+			// Mixed combos first (order-insensitive)
+			if (/(green-yellow|yellow-green)/.test(normalized)) return 25;
+			if (/(green-blue|blue-green)/.test(normalized)) return 26;
+			if (/(green-orange|orange-green)/.test(normalized)) return 27;
+			// Same color both directions
+			switch (normalized) {
+				case 'red':
+					return 20;
+				case 'green':
+					return 21;
+				case 'yellow':
+					return 22;
+				case 'blue':
+					return 23;
+				case 'orange':
+					return 24;
+			}
+			return undefined;
+		}
+
+		// Uni-directional: take first segment (after normalization)
+		const base = normalized.split('-')[0];
+		switch (base) {
+			case 'red':
+				return 1;
+			case 'green':
+				return 2;
+			case 'yellow':
+				return 3;
+			case 'blue':
+				return 4;
+			case 'orange':
+				return 5;
+			default:
+				return undefined;
+		}
 	}
 	/**
 	 * Helper method to determine if a light needs properties in its XML output
@@ -391,8 +452,6 @@ export class PolygonService {
 		}
 
 		xml += '</Bars>';
-
-		// Stats tracking removed
 
 		return xml;
 	}

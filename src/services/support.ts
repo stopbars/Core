@@ -136,7 +136,7 @@ export class SupportService {
 				public lat: number,
 				public lon: number,
 				public used: boolean = false,
-			) { }
+			) {}
 		}
 
 		const bounds = getBounds();

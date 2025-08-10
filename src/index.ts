@@ -88,7 +88,10 @@ app.use('*', async (c, next) => {
 		// Env-driven ignore list: comma separated exact paths or prefix* globs
 		const ignoreRaw = (c.env as any).ANALYTICS_IGNORE as string | undefined;
 		if (ignoreRaw) {
-			const ignores = ignoreRaw.split(',').map(s => s.trim()).filter(Boolean);
+			const ignores = ignoreRaw
+				.split(',')
+				.map((s) => s.trim())
+				.filter(Boolean);
 			for (const pattern of ignores) {
 				if (pattern.endsWith('*')) {
 					const prefix = pattern.slice(0, -1);
@@ -99,12 +102,16 @@ app.use('*', async (c, next) => {
 			}
 		}
 		const posthog = ServicePool.getPostHog(c.env);
-		posthog.track('API Request', {
-			path,
-			method: c.req.method,
-			status: c.res?.status ?? 0,
-			duration_ms: Date.now() - start,
-		}, 'anonymous');
+		posthog.track(
+			'API Request',
+			{
+				path,
+				method: c.req.method,
+				status: c.res?.status ?? 0,
+				duration_ms: Date.now() - start,
+			},
+			'anonymous',
+		);
 	} catch (err) {
 		// eslint-disable-next-line no-console
 		console.warn('[Analytics] failed', err instanceof Error ? err.message : err);
@@ -112,11 +119,14 @@ app.use('*', async (c, next) => {
 });
 
 // Add CORS middleware
-app.use('*', cors({
-	origin: '*',
-	allowHeaders: ['Content-Type', 'Authorization', 'X-Vatsim-Token', 'Upgrade', 'X-Client-Type'],
-	allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-}));
+app.use(
+	'*',
+	cors({
+		origin: '*',
+		allowHeaders: ['Content-Type', 'Authorization', 'X-Vatsim-Token', 'Upgrade', 'X-Client-Type'],
+		allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+	}),
+);
 
 // Connect endpoint
 /**
@@ -158,9 +168,12 @@ app.use('*', cors({
 app.get('/connect', async (c) => {
 	const upgradeHeader = c.req.header('Upgrade');
 	if (upgradeHeader !== 'websocket') {
-		return c.json({
-			message: 'This endpoint is for WebSocket connections only. Use a WebSocket client to test.',
-		}, 400);
+		return c.json(
+			{
+				message: 'This endpoint is for WebSocket connections only. Use a WebSocket client to test.',
+			},
+			400,
+		);
 	}
 
 	const airportId = c.req.query('airport');
@@ -213,9 +226,12 @@ app.get('/connect', async (c) => {
 app.get('/state', async (c) => {
 	const airport = c.req.query('airport');
 	if (!airport) {
-		return c.json({
-			error: 'Airport parameter required',
-		}, 400);
+		return c.json(
+			{
+				error: 'Airport parameter required',
+			},
+			400,
+		);
 	}
 
 	// Create database context for this request with bookmark handling
@@ -227,7 +243,7 @@ app.get('/state', async (c) => {
 			await dbContext.db.executeWrite("DELETE FROM active_objects WHERE last_updated <= datetime('now', '-2 day')");
 
 			const activeObjectsResult = await dbContext.db.executeRead<any>(
-				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')"
+				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')",
 			);
 
 			const allStates = await Promise.all(
@@ -274,9 +290,12 @@ app.get('/state', async (c) => {
 			const obj = c.env.BARS.get(id);
 
 			if (airport.length !== 4) {
-				return dbContext.jsonResponse({
-					error: 'Invalid airport ICAO',
-				}, { status: 400 });
+				return dbContext.jsonResponse(
+					{
+						error: 'Invalid airport ICAO',
+					},
+					{ status: 400 },
+				);
 			}
 
 			const stateRequest = new Request(`https://internal/state?airport=${airport}`, {
@@ -367,7 +386,11 @@ app.get('/auth/account', async (c) => {
 		if ((!user.full_name || user.full_name.trim() === '') && (vatsimUser.first_name || vatsimUser.last_name)) {
 			const newFullName = [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ').trim();
 			if (newFullName) {
-				try { await auth.updateFullName(user.id, newFullName); } catch { /* ignore */ }
+				try {
+					await auth.updateFullName(user.id, newFullName);
+				} catch {
+					/* ignore */
+				}
 				const refreshed = await auth.getUserByVatsimId(vatsimUser.id);
 				if (refreshed) user = refreshed;
 			}
@@ -419,7 +442,11 @@ app.put('/auth/display-mode', async (c) => {
 	if (!vatsimToken) return c.text('Unauthorized', 401);
 
 	let body: any;
-	try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
 
 	const rawMode = body?.mode;
 	const mode = Number(rawMode);
@@ -489,7 +516,7 @@ app.post('/auth/regenerate-api-key', async (c) => {
 		// Check when the user last regenerated their API key using session-aware query
 		const lastRegenerationResult = await dbContext.db.executeRead<{ last_api_key_regen: string }>(
 			'SELECT last_api_key_regen FROM users WHERE id = ?',
-			[user.id]
+			[user.id],
 		);
 		const lastRegeneration = lastRegenerationResult.results[0];
 
@@ -506,11 +533,14 @@ app.post('/auth/regenerate-api-key', async (c) => {
 				const remainingHours = Math.floor(remainingMs / (60 * 60 * 1000));
 				const remainingMinutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
 
-				return dbContext.jsonResponse({
-					error: 'Rate limited',
-					message: `You can only regenerate your API key once every 24 hours. Please try again in ${remainingHours} hour${remainingHours !== 1 ? 's' : ''}${remainingMinutes > 0 ? ` and ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}` : ''}.`,
-					retryAfter: Math.ceil(remainingMs / 1000),
-				}, { status: 429 });
+				return dbContext.jsonResponse(
+					{
+						error: 'Rate limited',
+						message: `You can only regenerate your API key once every 24 hours. Please try again in ${remainingHours} hour${remainingHours !== 1 ? 's' : ''}${remainingMinutes > 0 ? ` and ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}` : ''}.`,
+						retryAfter: Math.ceil(remainingMs / 1000),
+					},
+					{ status: 429 },
+				);
 			}
 		}
 
@@ -518,20 +548,20 @@ app.post('/auth/regenerate-api-key', async (c) => {
 		const newApiKey = await auth.regenerateApiKey(user.id);
 
 		// Update the last regeneration timestamp using session-aware write
-		await dbContext.db.executeWrite(
-			"UPDATE users SET last_api_key_regen = datetime('now') WHERE id = ?",
-			[user.id]
-		);
+		await dbContext.db.executeWrite("UPDATE users SET last_api_key_regen = datetime('now') WHERE id = ?", [user.id]);
 
 		return dbContext.jsonResponse({
 			success: true,
 			apiKey: newApiKey,
 		});
 	} catch (error) {
-		return dbContext.jsonResponse({
-			error: 'Failed to regenerate API key',
-			message: error instanceof Error ? error.message : 'Unknown error',
-		}, { status: 500 });
+		return dbContext.jsonResponse(
+			{
+				error: 'Failed to regenerate API key',
+				message: error instanceof Error ? error.message : 'Unknown error',
+			},
+			{ status: 500 },
+		);
 	} finally {
 		dbContext.close();
 	}
@@ -593,31 +623,29 @@ app.delete('/auth/delete', async (c) => {
  *       401:
  *         description: Unauthorized
  */
-app.get('/auth/is-staff',
-	withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'),
-	async (c) => {
-		const authHeader = c.req.header('Authorization');
-		if (!authHeader) {
-			return c.text('Unauthorized', 401);
-		}
+app.get('/auth/is-staff', withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'), async (c) => {
+	const authHeader = c.req.header('Authorization');
+	if (!authHeader) {
+		return c.text('Unauthorized', 401);
+	}
 
-		const token = authHeader.replace('Bearer ', '');
+	const token = authHeader.replace('Bearer ', '');
 
-		const vatsim = ServicePool.getVatsim(c.env);
-		const auth = ServicePool.getAuth(c.env);
-		const roles = ServicePool.getRoles(c.env);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
-		const vatsimUser = await vatsim.getUser(token);
-		const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const vatsimUser = await vatsim.getUser(token);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
 
-		if (!user) {
-			return c.text('Unauthorized', 401);
-		}
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
 
-		const isStaff = await roles.isStaff(user.id);
-		const role = await roles.getUserRole(user.id);
-		return c.json({ isStaff, role });
-	});
+	const isStaff = await roles.isStaff(user.id);
+	const role = await roles.getUserRole(user.id);
+	return c.json({ isStaff, role });
+});
 
 // Airports endpoint
 /**
@@ -648,7 +676,8 @@ app.get('/auth/is-staff',
  *       404:
  *         description: Airport not found
  */
-app.get('/airports',
+app.get(
+	'/airports',
 	withCache(CacheKeys.fromUrl, 31536000, 'airports'), // Cache for 1 year because airports data doesn't change ever :P
 	async (c) => {
 		const airports = ServicePool.getAirport(c.env);
@@ -682,7 +711,7 @@ app.get('/airports',
 		} catch (error) {
 			return c.json({ error: 'Failed to fetch airport data' }, 500);
 		}
-	}
+	},
 );
 
 // Nearest airport (public, unauthenticated)
@@ -713,17 +742,22 @@ app.get('/airports',
  *       404:
  *         description: No airport found
  */
-app.get('/airports/nearest',
-	withCache((req) => {
-		// Bucket cache key by ~5NM (~9.26km). 1 degree lat ~111km => bucket size deg ≈ 9.26/111 ≈ 0.083
-		const url = new URL(req.url);
-		const lat = parseFloat(url.searchParams.get('lat') || '0');
-		const lon = parseFloat(url.searchParams.get('lon') || '0');
-		const bucketDeg = 0.083; // ~5NM
-		const bucketLat = Math.round(lat / bucketDeg);
-		const bucketLon = Math.round(lon / bucketDeg);
-		return `/airports/nearest/${bucketLat}_${bucketLon}`;
-	}, 600, 'airports'),
+app.get(
+	'/airports/nearest',
+	withCache(
+		(req) => {
+			// Bucket cache key by ~5NM (~9.26km). 1 degree lat ~111km => bucket size deg ≈ 9.26/111 ≈ 0.083
+			const url = new URL(req.url);
+			const lat = parseFloat(url.searchParams.get('lat') || '0');
+			const lon = parseFloat(url.searchParams.get('lon') || '0');
+			const bucketDeg = 0.083; // ~5NM
+			const bucketLat = Math.round(lat / bucketDeg);
+			const bucketLon = Math.round(lon / bucketDeg);
+			return `/airports/nearest/${bucketLat}_${bucketLon}`;
+		},
+		600,
+		'airports',
+	),
 	async (c) => {
 		const latStr = c.req.query('lat');
 		const lonStr = c.req.query('lon');
@@ -745,7 +779,7 @@ app.get('/airports/nearest',
 		} catch (err) {
 			return c.json({ error: 'Failed to find nearest airport' }, 500);
 		}
-	}
+	},
 );
 
 // Divisions routes
@@ -844,7 +878,7 @@ divisionsApp.post('/', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
-	const { name, headVatsimId } = await c.req.json() as CreateDivisionPayload;
+	const { name, headVatsimId } = (await c.req.json()) as CreateDivisionPayload;
 	const division = await divisions.createDivision(name, headVatsimId);
 	return c.json(division);
 });
@@ -895,7 +929,7 @@ divisionsApp.put('/:id', async (c) => {
 	const existing = await divisions.getDivision(id);
 	if (!existing) return c.text('Division not found', 404);
 
-	const body = await c.req.json() as { name: string };
+	const body = (await c.req.json()) as { name: string };
 	if (!body.name || !body.name.trim()) return c.text('Invalid name', 400);
 
 	const updated = await divisions.updateDivisionName(id, body.name.trim());
@@ -956,15 +990,13 @@ divisionsApp.delete('/:id', async (c) => {
  *       200:
  *         description: User divisions returned
  */
-divisionsApp.get('/user',
-	withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'),
-	async (c) => {
-		const vatsimUser = c.get('vatsimUser');
-		const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/user', withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'), async (c) => {
+	const vatsimUser = c.get('vatsimUser');
+	const divisions = ServicePool.getDivisions(c.env);
 
-		const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
-		return c.json(userDivisions);
-	});
+	const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
+	return c.json(userDivisions);
+});
 
 // GET /divisions/:id - Get division details
 /**
@@ -987,19 +1019,17 @@ divisionsApp.get('/user',
  *       404:
  *         description: Division not found
  */
-divisionsApp.get('/:id',
-	withCache(CacheKeys.fromParams('id'), 2592000, 'divisions'),
-	async (c) => {
-		const divisionId = parseInt(c.req.param('id'));
-		const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/:id', withCache(CacheKeys.fromParams('id'), 2592000, 'divisions'), async (c) => {
+	const divisionId = parseInt(c.req.param('id'));
+	const divisions = ServicePool.getDivisions(c.env);
 
-		const division = await divisions.getDivision(divisionId);
-		if (!division) {
-			return c.text('Division not found', 404);
-		}
+	const division = await divisions.getDivision(divisionId);
+	if (!division) {
+		return c.text('Division not found', 404);
+	}
 
-		return c.json(division);
-	});
+	return c.json(division);
+});
 
 // GET /divisions/:id/members - List division members
 /**
@@ -1086,7 +1116,7 @@ divisionsApp.post('/:id/members', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
-	const { vatsimId, role } = await c.req.json() as AddMemberPayload;
+	const { vatsimId, role } = (await c.req.json()) as AddMemberPayload;
 	const member = await divisions.addMember(divisionId, vatsimId, role);
 	return c.json(member);
 });
@@ -1164,21 +1194,19 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
  *       404:
  *         description: Division not found
  */
-divisionsApp.get('/:id/airports',
-	withCache(CacheKeys.fromParams('id'), 600, 'divisions'),
-	async (c) => {
-		const divisionId = parseInt(c.req.param('id'));
-		const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/:id/airports', withCache(CacheKeys.fromParams('id'), 600, 'divisions'), async (c) => {
+	const divisionId = parseInt(c.req.param('id'));
+	const divisions = ServicePool.getDivisions(c.env);
 
-		// Verify division exists
-		const division = await divisions.getDivision(divisionId);
-		if (!division) {
-			return c.text('Division not found', 404);
-		}
+	// Verify division exists
+	const division = await divisions.getDivision(divisionId);
+	if (!division) {
+		return c.text('Division not found', 404);
+	}
 
-		const airports = await divisions.getDivisionAirports(divisionId);
-		return c.json(airports);
-	});
+	const airports = await divisions.getDivisionAirports(divisionId);
+	return c.json(airports);
+});
 
 // POST /divisions/:id/airports - Request airport addition (requires division membership)
 /**
@@ -1223,7 +1251,7 @@ divisionsApp.post('/:id/airports', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
-	const { icao } = await c.req.json() as RequestAirportPayload;
+	const { icao } = (await c.req.json()) as RequestAirportPayload;
 	const airport = await divisions.requestAirport(divisionId, icao, vatsimUser.id);
 	return c.json(airport);
 });
@@ -1283,7 +1311,7 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
-	const { approved } = await c.req.json() as ApproveAirportPayload;
+	const { approved } = (await c.req.json()) as ApproveAirportPayload;
 	const airport = await divisions.approveAirport(airportId, vatsimUser.id, approved);
 	return c.json(airport);
 });
@@ -1309,7 +1337,8 @@ app.route('/divisions', divisionsApp);
  *       400:
  *         description: Invalid ICAO
  */
-app.get('/airports/:icao/points',
+app.get(
+	'/airports/:icao/points',
 	withCache(CacheKeys.fromUrl, 600, 'airports'), // 1296000 - For after beta
 	async (c) => {
 		const airportId = c.req.param('icao');
@@ -1323,7 +1352,8 @@ app.get('/airports/:icao/points',
 
 		const airportPoints = await points.getAirportPoints(airportId);
 		return c.json(airportPoints);
-	});
+	},
+);
 
 /**
  * @openapi
@@ -1375,7 +1405,7 @@ app.post('/airports/:icao/points', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const pointData = await c.req.json() as PointData;
+	const pointData = (await c.req.json()) as PointData;
 	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
 	return c.json(newPoint, 201);
 });
@@ -1429,7 +1459,7 @@ app.post('/airports/:icao/points/batch', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const changeset = await c.req.json() as PointChangeset;
+	const changeset = (await c.req.json()) as PointChangeset;
 	const newPoints = await points.applyChangeset(airportId, user.vatsim_id, changeset);
 	return c.json(newPoints, 201);
 });
@@ -1492,7 +1522,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const updates = await c.req.json() as Partial<PointData>;
+	const updates = (await c.req.json()) as Partial<PointData>;
 	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
 	return c.json(updatedPoint);
 });
@@ -1577,25 +1607,23 @@ app.delete('/airports/:icao/points/:id', async (c) => {
  *       404:
  *         description: Not found
  */
-app.get('/points/:id',
-	withCache(CacheKeys.fromUrl, 3600, 'points'),
-	async (c) => {
-		const pointId = c.req.param('id');
+app.get('/points/:id', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
+	const pointId = c.req.param('id');
 
-		// Validate point ID format (alphanumeric, dash, underscore)
-		if (!pointId.match(POINT_ID_REGEX)) {
-			return c.text('Invalid point ID format', 400);
-		}
+	// Validate point ID format (alphanumeric, dash, underscore)
+	if (!pointId.match(POINT_ID_REGEX)) {
+		return c.text('Invalid point ID format', 400);
+	}
 
-		const points = ServicePool.getPoints(c.env);
-		const point = await points.getPoint(pointId);
+	const points = ServicePool.getPoints(c.env);
+	const point = await points.getPoint(pointId);
 
-		if (!point) {
-			return c.text('Point not found', 404);
-		}
+	if (!point) {
+		return c.text('Point not found', 404);
+	}
 
-		return c.json(point);
-	});
+	return c.json(point);
+});
 
 // Get multiple points by IDs (batch endpoint)
 /**
@@ -1617,63 +1645,73 @@ app.get('/points/:id',
  *       400:
  *         description: Validation error
  */
-app.get('/points',
-	withCache(CacheKeys.fromUrl, 3600, 'points'),
-	async (c) => {
-		const ids = c.req.query('ids');
+app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
+	const ids = c.req.query('ids');
 
-		if (!ids) {
-			return c.json({
+	if (!ids) {
+		return c.json(
+			{
 				error: 'Missing ids query parameter',
-				message: 'Provide comma-separated point IDs: /points?ids=id1,id2,id3'
-			}, 400);
-		}
+				message: 'Provide comma-separated point IDs: /points?ids=id1,id2,id3',
+			},
+			400,
+		);
+	}
 
-		// Parse and validate point IDs
-		const pointIds = ids.split(',')
-			.map(id => id.trim())
-			.filter(id => id.length > 0);
+	// Parse and validate point IDs
+	const pointIds = ids
+		.split(',')
+		.map((id) => id.trim())
+		.filter((id) => id.length > 0);
 
-		if (pointIds.length === 0) {
-			return c.json({
-				error: 'No valid point IDs provided'
-			}, 400);
-		}
+	if (pointIds.length === 0) {
+		return c.json(
+			{
+				error: 'No valid point IDs provided',
+			},
+			400,
+		);
+	}
 
-		if (pointIds.length > 100) {
-			return c.json({
+	if (pointIds.length > 100) {
+		return c.json(
+			{
 				error: 'Too many point IDs requested',
-				message: 'Maximum 100 points can be requested at once'
-			}, 400);
-		}
+				message: 'Maximum 100 points can be requested at once',
+			},
+			400,
+		);
+	}
 
-
-		const invalidIds = pointIds.filter(id => !id.match(POINT_ID_REGEX));
-		if (invalidIds.length > 0) {
-			return c.json({
+	const invalidIds = pointIds.filter((id) => !id.match(POINT_ID_REGEX));
+	if (invalidIds.length > 0) {
+		return c.json(
+			{
 				error: 'Invalid point ID format',
-				invalidIds
-			}, 400);
-		}
+				invalidIds,
+			},
+			400,
+		);
+	}
 
-		const points = ServicePool.getPoints(c.env);
+	const points = ServicePool.getPoints(c.env);
 
-		// Fetch all points in parallel
-		const pointPromises = pointIds.map(id => points.getPoint(id));
-		const pointResults = await Promise.all(pointPromises);
+	// Fetch all points in parallel
+	const pointPromises = pointIds.map((id) => points.getPoint(id));
+	const pointResults = await Promise.all(pointPromises);
 
-		// Filter out null results and create response
-		const foundPoints = pointResults.filter(point => point !== null);
-		const foundIds = foundPoints.map(point => point!.id);
-		const notFoundIds = pointIds.filter(id => !foundIds.includes(id));
+	// Filter out null results and create response
+	const foundPoints = pointResults.filter((point) => point !== null);
+	const foundIds = foundPoints.map((point) => point!.id);
+	const notFoundIds = pointIds.filter((id) => !foundIds.includes(id));
 
-		return c.json({
-			points: foundPoints,
-			requested: pointIds.length,
-			found: foundPoints.length,
-			notFound: notFoundIds.length > 0 ? notFoundIds : undefined
-		});
+	return c.json({
+		points: foundPoints,
+		requested: pointIds.length,
+		found: foundPoints.length,
+		notFound: notFoundIds.length > 0 ? notFoundIds : undefined,
 	});
+});
 
 // MSFS Light Supports and BARS XML generation endpoint
 /**
@@ -1710,15 +1748,21 @@ app.post('/supports/generate', async (c) => {
 		const icao = formData.get('icao')?.toString();
 
 		if (!xmlFile || !(xmlFile instanceof File)) {
-			return c.json({
-				error: 'XML file is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'XML file is required',
+				},
+				400,
+			);
 		}
 
 		if (!icao) {
-			return c.json({
-				error: 'ICAO code is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'ICAO code is required',
+				},
+				400,
+			);
 		}
 
 		const xmlContent = await xmlFile.text();
@@ -1738,9 +1782,12 @@ app.post('/supports/generate', async (c) => {
 		});
 	} catch (error) {
 		console.error('Error generating XMLs:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Unknown error generating XMLs',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Unknown error generating XMLs',
+			},
+			500,
+		);
 	}
 });
 
@@ -1756,7 +1803,8 @@ app.post('/supports/generate', async (c) => {
  *       200:
  *         description: Current NOTAM returned
  */
-app.get('/notam',
+app.get(
+	'/notam',
 	withCache(() => 'global-notam', 900, 'notam'),
 	async (c) => {
 		const notamService = ServicePool.getNotam(c.env);
@@ -1765,7 +1813,7 @@ app.get('/notam',
 			notam: notamData?.content || null,
 			type: notamData?.type || 'warning',
 		});
-	}
+	},
 );
 
 /**
@@ -1820,7 +1868,7 @@ app.put('/notam', async (c) => {
 	}
 
 	// Update the NOTAM
-	const { content, type } = await c.req.json() as { content: string; type?: string };
+	const { content, type } = (await c.req.json()) as { content: string; type?: string };
 	const notamService = ServicePool.getNotam(c.env);
 	const updated = await notamService.updateGlobalNotam(content, type, user.vatsim_id);
 
@@ -1830,7 +1878,6 @@ app.put('/notam', async (c) => {
 
 	return c.json({ success: true });
 });
-
 
 // User management endpoints
 const staffUsersApp = new Hono<{
@@ -1924,9 +1971,12 @@ staffUsersApp.get('/search', async (c) => {
 	try {
 		const query = c.req.query('q') || '';
 		if (query.length < 3) {
-			return c.json({
-				error: 'Search query must be at least 3 characters',
-			}, 400);
+			return c.json(
+				{
+					error: 'Search query must be at least 3 characters',
+				},
+				400,
+			);
 		}
 
 		const user = c.get('user');
@@ -1968,12 +2018,15 @@ staffUsersApp.get('/search', async (c) => {
  */
 staffUsersApp.post('/refresh-api-token', async (c) => {
 	try {
-		const { vatsimId } = await c.req.json() as { vatsimId: string };
+		const { vatsimId } = (await c.req.json()) as { vatsimId: string };
 
 		if (!vatsimId) {
-			return c.json({
-				error: 'VATSIM ID is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'VATSIM ID is required',
+				},
+				400,
+			);
 		}
 
 		const user = c.get('user');
@@ -2063,29 +2116,27 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *       200:
  *         description: Contributions listed
  */
-contributionsApp.get('/',
-	withCache(CacheKeys.fromUrl, 7200, 'contributions'),
-	async (c) => {
-		const contributions = ServicePool.getContributions(c.env);
+contributionsApp.get('/', async (c) => {
+	const contributions = ServicePool.getContributions(c.env);
 
-		// Parse query parameters for filtering
-		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
-		const airportIcao = c.req.query('airport') || undefined;
-		const userId = c.req.query('user') || undefined;
-		const page = 1; // Default to page 1 for user contributions
-		const limit = Number.MAX_SAFE_INTEGER;
+	// Parse query parameters for filtering
+	const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
+	const airportIcao = c.req.query('airport') || undefined;
+	const userId = c.req.query('user') || undefined;
+	const page = 1; // Default to page 1 for user contributions
+	const limit = Number.MAX_SAFE_INTEGER;
 
-		// Get contributions with filters
-		const result = await contributions.listContributions({
-			status,
-			airportIcao,
-			userId,
-			page,
-			limit,
-		});
-
-		return c.json(result);
+	// Get contributions with filters
+	const result = await contributions.listContributions({
+		status,
+		airportIcao,
+		userId,
+		page,
+		limit,
 	});
+
+	return c.json(result);
+});
 
 // (Removed) contribution statistics endpoint
 
@@ -2101,13 +2152,15 @@ contributionsApp.get('/',
  *       200:
  *         description: Leaderboard returned
  */
-contributionsApp.get('/leaderboard',
+contributionsApp.get(
+	'/leaderboard',
 	withCache(() => 'contribution-leaderboard', 1800, 'contributions'),
 	async (c) => {
 		const contributions = ServicePool.getContributions(c.env);
 		const leaderboard = await contributions.getContributionLeaderboard();
 		return c.json(leaderboard);
-	});
+	},
+);
 
 // GET /contributions/top-packages - Get a list of most used packages
 /**
@@ -2121,13 +2174,15 @@ contributionsApp.get('/leaderboard',
  *       200:
  *         description: Package stats returned
  */
-contributionsApp.get('/top-packages',
+contributionsApp.get(
+	'/top-packages',
 	withCache(() => 'contribution-top-packages', 1800, 'contributions'),
 	async (c) => {
 		const contributions = ServicePool.getContributions(c.env);
 		const topPackages = await contributions.getTopPackages();
 		return c.json(topPackages);
-	});
+	},
+);
 
 // POST /contributions - Create a new contribution
 /**
@@ -2173,7 +2228,7 @@ contributionsApp.post('/', async (c) => {
 
 	try {
 		const contributions = ServicePool.getContributions(c.env);
-		const payload = await c.req.json() as ContributionSubmissionPayload;
+		const payload = (await c.req.json()) as ContributionSubmissionPayload;
 		const result = await contributions.createContribution({
 			userId: user.vatsim_id,
 			airportIcao: payload.airportIcao,
@@ -2321,7 +2376,7 @@ contributionsApp.post('/:id/decision', async (c) => {
 	try {
 		const contributionId = c.req.param('id');
 		const contributions = ServicePool.getContributions(c.env);
-		const payload = await c.req.json() as ContributionDecisionPayload;
+		const payload = (await c.req.json()) as ContributionDecisionPayload;
 		const result = await contributions.processDecision(contributionId, user.vatsim_id, {
 			approved: payload.approved,
 			rejectionReason: payload.rejectionReason,
@@ -2335,7 +2390,6 @@ contributionsApp.post('/:id/decision', async (c) => {
 		return c.json({ error: message }, status);
 	}
 });
-
 
 // DELETE /contributions/:id - Delete a contribution (admin only)
 /**
@@ -2388,9 +2442,51 @@ contributionsApp.delete('/:id', async (c) => {
 
 app.route('/contributions', contributionsApp);
 
-
 // CDN Endpoints
 const cdnApp = new Hono<{ Bindings: Env }>();
+
+// Latest approved BARS map for an airport
+/**
+ * @openapi
+ * /maps/{icao}/latest:
+ *   get:
+ *     summary: Get latest approved BARS map XML (raw content) for an airport
+ *     tags:
+ *       - Generation
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: BARS XML document returned inline (application/xml)
+ *       404:
+ *         description: Not found
+ */
+app.get('/maps/:icao/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), async (c) => {
+	const icao = c.req.param('icao').toUpperCase();
+	const contributions = ServicePool.getContributions(c.env);
+	const storage = ServicePool.getStorage(c.env);
+
+	const latest = await contributions.getLatestApprovedContributionForAirport(icao);
+	if (!latest) {
+		return c.text('No approved map found', 404);
+	}
+
+	const safePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
+	const fileKey = `Maps/${icao}_${safePackageName}_bars.xml`;
+
+	// Fetch stored XML; if missing, return 404
+	const stored = await storage.getFile(fileKey);
+	if (!stored) {
+		return c.text('Map file not found', 404);
+	}
+	if (!stored.headers.get('content-type')) {
+		stored.headers.set('content-type', 'application/xml; charset=utf-8');
+	}
+	return stored;
+});
 
 // Special case for direct file downloads
 /**
@@ -2427,7 +2523,6 @@ cdnApp.get('/files/*', async (c) => {
 	if (!fileResponse) {
 		return c.text('File not found', 404);
 	}
-
 
 	// Return the file directly with proper headers for caching
 	return fileResponse;
@@ -2494,9 +2589,12 @@ cdnApp.post('/upload', async (c) => {
 		const customKey = formData.get('key')?.toString();
 
 		if (!file || !(file instanceof File)) {
-			return c.json({
-				error: 'File is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'File is required',
+				},
+				400,
+			);
 		}
 
 		// Create file path - use custom key if provided, otherwise generate one
@@ -2518,19 +2616,25 @@ cdnApp.post('/upload', async (c) => {
 		// Stats tracking removed
 
 		// Return success with download URL
-		return c.json({
-			success: true,
-			file: {
-				key: result.key,
-				etag: result.etag,
-				url: new URL(`/cdn/files/${result.key}`, c.req.url).toString(),
+		return c.json(
+			{
+				success: true,
+				file: {
+					key: result.key,
+					etag: result.etag,
+					url: new URL(`/cdn/files/${result.key}`, c.req.url).toString(),
+				},
 			},
-		}, 201);
+			201,
+		);
 	} catch (error) {
 		console.error('File upload error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to upload file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to upload file',
+			},
+			500,
+		);
 	}
 });
 
@@ -2598,9 +2702,12 @@ cdnApp.get('/files', async (c) => {
 		return c.json({ files });
 	} catch (error) {
 		console.error('File listing error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to list files',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to list files',
+			},
+			500,
+		);
 	}
 });
 
@@ -2652,9 +2759,12 @@ cdnApp.delete('/files/*', async (c) => {
 		const fileKey = c.req.param('*');
 
 		if (!fileKey) {
-			return c.json({
-				error: 'File not found',
-			}, 404);
+			return c.json(
+				{
+					error: 'File not found',
+				},
+				404,
+			);
 		}
 
 		// Delete the file
@@ -2662,9 +2772,12 @@ cdnApp.delete('/files/*', async (c) => {
 		const deleted = await storage.deleteFile(fileKey);
 
 		if (!deleted) {
-			return c.json({
-				error: 'File not found',
-			}, 404);
+			return c.json(
+				{
+					error: 'File not found',
+				},
+				404,
+			);
 		}
 
 		// Stats tracking removed
@@ -2672,9 +2785,12 @@ cdnApp.delete('/files/*', async (c) => {
 		return c.json({ success: true });
 	} catch (error) {
 		console.error('File deletion error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to delete file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to delete file',
+			},
+			500,
+		);
 	}
 });
 
@@ -2704,9 +2820,12 @@ app.get('/euroscope/files/:icao', async (c) => {
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
-		return c.json({
-			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-		}, 400);
+		return c.json(
+			{
+				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+			},
+			400,
+		);
 	}
 
 	try {
@@ -2729,9 +2848,12 @@ app.get('/euroscope/files/:icao', async (c) => {
 		});
 	} catch (error) {
 		console.error('EuroScope public file listing error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to list files',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to list files',
+			},
+			500,
+		);
 	}
 });
 
@@ -2804,30 +2926,42 @@ euroscopeApp.post('/upload', async (c) => {
 		const icao = formData.get('icao')?.toString()?.toUpperCase();
 
 		if (!file || !(file instanceof File)) {
-			return c.json({
-				error: 'File is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'File is required',
+				},
+				400,
+			);
 		}
 
 		if (!icao) {
-			return c.json({
-				error: 'ICAO code is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'ICAO code is required',
+				},
+				400,
+			);
 		}
 
 		// Validate ICAO format (exactly 4 uppercase letters/numbers)
 		if (!icao.match(/^[A-Z0-9]{4}$/)) {
-			return c.json({
-				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-			}, 400);
+			return c.json(
+				{
+					error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+				},
+				400,
+			);
 		}
 
 		// Check file size limit (10MB)
 		const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB in bytes
 		if (file.size > MAX_FILE_SIZE) {
-			return c.json({
-				error: 'File size exceeds 10MB limit',
-			}, 400);
+			return c.json(
+				{
+					error: 'File size exceeds 10MB limit',
+				},
+				400,
+			);
 		}
 
 		// Check if user has access to upload files for this ICAO
@@ -2835,9 +2969,12 @@ euroscopeApp.post('/upload', async (c) => {
 		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
 
 		if (!hasAccess) {
-			return c.json({
-				error: 'You do not have permission to upload files for this airport. Please ensure your division has approved access to this ICAO.',
-			}, 403);
+			return c.json(
+				{
+					error: 'You do not have permission to upload files for this airport. Please ensure your division has approved access to this ICAO.',
+				},
+				403,
+			);
 		}
 
 		// Create file path: EuroScope/ICAO/filename
@@ -2849,11 +2986,14 @@ euroscopeApp.post('/upload', async (c) => {
 		const existingFiles = await storage.listFiles(`EuroScope/${icao}/`, 10);
 
 		// Count files that are not the one being replaced
-		const otherFiles = existingFiles.objects.filter(obj => obj.key !== fileKey);
+		const otherFiles = existingFiles.objects.filter((obj) => obj.key !== fileKey);
 		if (otherFiles.length >= 2) {
-			return c.json({
-				error: 'Maximum of 2 files per ICAO code allowed. Please delete an existing file before uploading a new one.',
-			}, 400);
+			return c.json(
+				{
+					error: 'Maximum of 2 files per ICAO code allowed. Please delete an existing file before uploading a new one.',
+				},
+				400,
+			);
 		}
 
 		// Extract file data
@@ -2867,23 +3007,28 @@ euroscopeApp.post('/upload', async (c) => {
 			size: file.size.toString(),
 		});
 
-
 		// Return success with download URL
-		return c.json({
-			success: true,
-			file: {
-				key: result.key,
-				icao: icao,
-				fileName: fileName,
-				size: file.size,
-				url: new URL(`https://dev-cdn.stopbars.com/${result.key}`, c.req.url).toString(),
+		return c.json(
+			{
+				success: true,
+				file: {
+					key: result.key,
+					icao: icao,
+					fileName: fileName,
+					size: file.size,
+					url: new URL(`https://dev-cdn.stopbars.com/${result.key}`, c.req.url).toString(),
+				},
 			},
-		}, 201);
+			201,
+		);
 	} catch (error) {
 		console.error('EuroScope file upload error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to upload file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to upload file',
+			},
+			500,
+		);
 	}
 });
 
@@ -2919,9 +3064,12 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
-		return c.json({
-			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-		}, 400);
+		return c.json(
+			{
+				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+			},
+			400,
+		);
 	}
 
 	try {
@@ -2930,9 +3078,12 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
 
 		if (!hasAccess) {
-			return c.json({
-				error: 'You do not have permission to delete files for this airport. Please ensure your division has approved access to this ICAO.',
-			}, 403);
+			return c.json(
+				{
+					error: 'You do not have permission to delete files for this airport. Please ensure your division has approved access to this ICAO.',
+				},
+				403,
+			);
 		}
 
 		// Construct the file key
@@ -2943,9 +3094,12 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		const deleted = await storage.deleteFile(fileKey);
 
 		if (!deleted) {
-			return c.json({
-				error: 'File not found',
-			}, 404);
+			return c.json(
+				{
+					error: 'File not found',
+				},
+				404,
+			);
 		}
 
 		return c.json({
@@ -2954,9 +3108,12 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		});
 	} catch (error) {
 		console.error('EuroScope file deletion error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to delete file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to delete file',
+			},
+			500,
+		);
 	}
 });
 
@@ -2986,9 +3143,12 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
-		return c.json({
-			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-		}, 400);
+		return c.json(
+			{
+				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+			},
+			400,
+		);
 	}
 
 	try {
@@ -3004,9 +3164,12 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 		});
 	} catch (error) {
 		console.error('EuroScope access check error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to check airport access',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to check airport access',
+			},
+			500,
+		);
 	}
 });
 app.route('/euroscope', euroscopeApp);
@@ -3062,7 +3225,7 @@ app.post('/purge-cache', async (c) => {
 	}
 
 	try {
-		const { key, namespace } = await c.req.json() as { key: string; namespace?: string };
+		const { key, namespace } = (await c.req.json()) as { key: string; namespace?: string };
 
 		if (!key) {
 			return c.json({ error: 'Cache key is required' }, 400);
@@ -3077,12 +3240,14 @@ app.post('/purge-cache', async (c) => {
 			success: true,
 			message: `Cache key "${key}" purged successfully`,
 		});
-
 	} catch (error) {
 		console.error('Cache purge error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to purge cache',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to purge cache',
+			},
+			500,
+		);
 	}
 });
 
@@ -3098,7 +3263,8 @@ app.post('/purge-cache', async (c) => {
  *       200:
  *         description: Contributors returned
  */
-app.get('/contributors',
+app.get(
+	'/contributors',
 	withCache(() => 'github-contributors', 3600, 'github'), // Cache for 1 hour
 	async (c) => {
 		try {
@@ -3107,12 +3273,15 @@ app.get('/contributors',
 			return c.json(contributorsData);
 		} catch (error) {
 			console.error('Contributors endpoint error:', error);
-			return c.json({
-				error: 'Failed to fetch contributors data',
-				message: error instanceof Error ? error.message : 'Unknown error'
-			}, 500);
+			return c.json(
+				{
+					error: 'Failed to fetch contributors data',
+					message: error instanceof Error ? error.message : 'Unknown error',
+				},
+				500,
+			);
 		}
-	}
+	},
 );
 
 // Health endpoint
@@ -3134,84 +3303,84 @@ app.get('/contributors',
  *       503:
  *         description: One or more services degraded
  */
-app.get('/health',
-	withCache(CacheKeys.fromUrl, 60, 'health'),
-	async (c) => {
-		const requestedService = c.req.query('service');
-		const validServices = ['database', 'storage', 'vatsim', 'auth'];
+app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
+	const requestedService = c.req.query('service');
+	const validServices = ['database', 'storage', 'vatsim', 'auth'];
 
-		if (requestedService && !validServices.includes(requestedService)) {
-			return c.json({
+	if (requestedService && !validServices.includes(requestedService)) {
+		return c.json(
+			{
 				error: 'Invalid service',
 				validServices: validServices,
-			}, 400);
+			},
+			400,
+		);
+	}
+
+	const healthChecks: Record<string, string> = {};
+	const servicesToCheck = requestedService ? [requestedService] : validServices;
+
+	for (const service of servicesToCheck) {
+		healthChecks[service] = 'ok';
+	}
+
+	try {
+		if (servicesToCheck.includes('database')) {
+			try {
+				await c.env.DB.prepare('SELECT 1').first();
+			} catch (error) {
+				healthChecks.database = 'outage';
+			}
 		}
 
-		const healthChecks: Record<string, string> = {};
-		const servicesToCheck = requestedService ? [requestedService] : validServices;
-
-		for (const service of servicesToCheck) {
-			healthChecks[service] = 'ok';
+		if (servicesToCheck.includes('storage')) {
+			try {
+				const storage = ServicePool.getStorage(c.env);
+				await storage.listFiles(undefined, 1);
+			} catch (error) {
+				healthChecks.storage = 'outage';
+			}
 		}
 
-		try {
-			if (servicesToCheck.includes('database')) {
-				try {
-					await c.env.DB.prepare('SELECT 1').first();
-				} catch (error) {
-					healthChecks.database = 'outage';
+		if (servicesToCheck.includes('vatsim')) {
+			try {
+				const response = await fetch('https://auth.vatsim.net/api/user', {
+					method: 'GET',
+					headers: {
+						Accept: 'application/json',
+						'User-Agent': 'BARS-Health-Check/1.0',
+					},
+					signal: AbortSignal.timeout(5000),
+				});
+
+				if (!response.ok && response.status !== 401) {
+					throw new Error(`VATSIM API returned ${response.status}`);
 				}
+			} catch (error) {
+				console.error('VATSIM health check failed:', error);
+				healthChecks.vatsim = 'outage';
 			}
-
-			if (servicesToCheck.includes('storage')) {
-				try {
-					const storage = ServicePool.getStorage(c.env);
-					await storage.listFiles(undefined, 1);
-				} catch (error) {
-					healthChecks.storage = 'outage';
-				}
-			}
-
-			if (servicesToCheck.includes('vatsim')) {
-				try {
-					const response = await fetch('https://auth.vatsim.net/api/user', {
-						method: 'GET',
-						headers: {
-							'Accept': 'application/json',
-							'User-Agent': 'BARS-Health-Check/1.0'
-						},
-						signal: AbortSignal.timeout(5000)
-					});
-
-					if (!response.ok && response.status !== 401) {
-						throw new Error(`VATSIM API returned ${response.status}`);
-					}
-				} catch (error) {
-					console.error('VATSIM health check failed:', error);
-					healthChecks.vatsim = 'outage';
-				}
-			}
-
-			if (servicesToCheck.includes('auth')) {
-				try {
-					const auth = ServicePool.getAuth(c.env);
-					await auth.getUserByVatsimId('1658308');
-				} catch (error) {
-					healthChecks.auth = 'outage';
-				}
-			}
-
-			// Stats service removed
-
-		} catch (error) {
-			console.error('Health check error:', error);
 		}
 
-		const hasOutages = Object.values(healthChecks).some(status => status === 'outage');
-		const statusCode = hasOutages ? 503 : 200;
+		if (servicesToCheck.includes('auth')) {
+			try {
+				const auth = ServicePool.getAuth(c.env);
+				await auth.getUserByVatsimId('1658308');
+			} catch (error) {
+				healthChecks.auth = 'outage';
+			}
+		}
 
-		return c.json(healthChecks, statusCode);
-	});
+		// Stats service removed
+	} catch (error) {
+		console.error('Health check error:', error);
+	}
+
+	const hasOutages = Object.values(healthChecks).some((status) => status === 'outage');
+	const statusCode = hasOutages ? 503 : 200;
+
+	return c.json(healthChecks, statusCode);
+});
 
 // Serve OpenAPI spec
 /**

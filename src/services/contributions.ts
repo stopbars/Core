@@ -89,7 +89,7 @@ export class ContributionService {
 		// Get authoritative display name from users table (ignore any client-provided value)
 		const userDisplayResult = await this.dbSession.executeRead<{ display_name: string | null }>(
 			'SELECT display_name FROM users WHERE vatsim_id = ?',
-			[submission.userId]
+			[submission.userId],
 		);
 		const authoritativeDisplayName = userDisplayResult.results[0]?.display_name || null;
 		await this.dbSession.executeWrite(
@@ -110,9 +110,8 @@ export class ContributionService {
 				submission.notes || null,
 				now,
 				'pending',
-			]
+			],
 		);
-
 
 		const contribution: Contribution = {
 			id,
@@ -127,7 +126,13 @@ export class ContributionService {
 			rejectionReason: null,
 			decisionDate: null,
 		};
-		try { this.posthog?.track('Contribution Submitted', { airport: submission.airportIcao, packageName: submission.packageName, userId: submission.userId }); } catch { }
+		try {
+			this.posthog?.track('Contribution Submitted', {
+				airport: submission.airportIcao,
+				packageName: submission.packageName,
+				userId: submission.userId,
+			});
+		} catch {}
 		return contribution;
 	}
 	async getContribution(id: string): Promise<Contribution | null> {
@@ -142,7 +147,30 @@ export class ContributionService {
 	  FROM contributions
 	  WHERE id = ?
 	`,
-			[id]
+			[id],
+		);
+		return result.results[0] || null;
+	}
+
+	/**
+	 * Get the most recently approved contribution for an airport (by decision_date)
+	 * @param airportIcao ICAO code
+	 */
+	async getLatestApprovedContributionForAirport(airportIcao: string): Promise<Contribution | null> {
+		const result = await this.dbSession.executeRead<Contribution>(
+			`
+			SELECT 
+				id, user_id as userId, user_display_name as userDisplayName,
+				airport_icao as airportIcao, package_name as packageName,
+				submitted_xml as submittedXml, notes,
+				submission_date as submissionDate, status,
+				rejection_reason as rejectionReason, decision_date as decisionDate
+			FROM contributions
+			WHERE airport_icao = ? AND status = 'approved'
+			ORDER BY datetime(decision_date) DESC
+			LIMIT 1
+			`,
+			[airportIcao],
 		);
 		return result.results[0] || null;
 	}
@@ -174,10 +202,7 @@ export class ContributionService {
 
 		const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 		const countQuery = `SELECT COUNT(*) as total FROM contributions ${whereClause}`;
-		const countResult = await this.dbSession.executeRead<{ total: number }>(
-			countQuery,
-			params
-		);
+		const countResult = await this.dbSession.executeRead<{ total: number }>(countQuery, params);
 		const total = countResult.results[0]?.total || 0;
 
 		const offset = (page - 1) * limit;
@@ -196,10 +221,7 @@ export class ContributionService {
 	  LIMIT ? OFFSET ?
 	`;
 
-		const contributionsResult = await this.dbSession.executeRead<Contribution>(
-			query,
-			[...params, limit, offset]
-		);
+		const contributionsResult = await this.dbSession.executeRead<Contribution>(query, [...params, limit, offset]);
 		return {
 			contributions: contributionsResult.results,
 			total,
@@ -210,10 +232,7 @@ export class ContributionService {
 	}
 
 	async processDecision(id: string, userId: string, decision: ContributionDecision): Promise<Contribution> {
-		const userInfoResult = await this.dbSession.executeRead<{ id: number }>(
-			'SELECT id FROM users WHERE vatsim_id = ?',
-			[userId]
-		);
+		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [userId]);
 		const userInfo = userInfoResult.results[0];
 
 		if (!userInfo) {
@@ -253,12 +272,7 @@ export class ContributionService {
 		AND status = 'approved' 
 		AND id != ?
 	  `,
-				[
-					now,
-					contribution.airportIcao,
-					packageName,
-					id,
-				]
+				[now, contribution.airportIcao, packageName, id],
 			);
 
 			// Generate and upload the XML files to CDN
@@ -308,9 +322,8 @@ export class ContributionService {
 	  SET status = ?, rejection_reason = ?, decision_date = ?, package_name = ?
 	  WHERE id = ?
 	`,
-			[status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id]
+			[status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id],
 		);
-
 
 		const updated: Contribution = {
 			...contribution,
@@ -327,7 +340,7 @@ export class ContributionService {
 				decidedBy: userId,
 				rejectionReason: decision.approved ? undefined : decision.rejectionReason || 'No reason provided',
 			});
-		} catch { }
+		} catch {}
 		return updated;
 	}
 	async getContributionStats(): Promise<{
@@ -342,25 +355,22 @@ export class ContributionService {
 		const oneWeekAgoStr = oneWeekAgo.toISOString();
 
 		// Get counts for different statuses
-		const totalResult = await this.dbSession.executeRead<{ count: number }>(
-			'SELECT COUNT(*) as count FROM contributions',
-			[]
-		);
+		const totalResult = await this.dbSession.executeRead<{ count: number }>('SELECT COUNT(*) as count FROM contributions', []);
 		const pendingResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['pending']
+			['pending'],
 		);
 		const approvedResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['approved']
+			['approved'],
 		);
 		const rejectedResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['rejected']
+			['rejected'],
 		);
 		const lastWeekResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE submission_date > ?',
-			[oneWeekAgoStr]
+			[oneWeekAgoStr],
 		);
 		return {
 			total: totalResult.results[0]?.count || 0,
@@ -371,10 +381,7 @@ export class ContributionService {
 		};
 	}
 	async deleteContribution(id: string, userId: string): Promise<boolean> {
-		const userInfoResult = await this.dbSession.executeRead<{ id: number }>(
-			'SELECT id FROM users WHERE vatsim_id = ?',
-			[userId]
-		);
+		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [userId]);
 		const userInfo = userInfoResult.results[0];
 		if (!userInfo) {
 			throw new Error('User not found');
@@ -383,11 +390,12 @@ export class ContributionService {
 		if (!hasPermission) {
 			throw new Error('Not authorized to delete contributions');
 		}
-		const result = await this.dbSession.executeWrite(
-			'DELETE FROM contributions WHERE id = ?',
-			[id]
-		);
-		if (result.success) { try { this.posthog?.track('Contribution Deleted', { id, userId }); } catch { } }
+		const result = await this.dbSession.executeWrite('DELETE FROM contributions WHERE id = ?', [id]);
+		if (result.success) {
+			try {
+				this.posthog?.track('Contribution Deleted', { id, userId });
+			} catch {}
+		}
 		return result.success;
 	}
 	/**
@@ -435,7 +443,7 @@ export class ContributionService {
 	  FROM contributions
 	  WHERE user_id = ?
 	`,
-			[userId]
+			[userId],
 		);
 		const summaryRow = summaryResult.results[0] || { total: 0, approved: 0, pending: 0, rejected: 0 };
 		const summary = {
@@ -474,10 +482,7 @@ export class ContributionService {
 	  LIMIT ? OFFSET ?
 	`;
 
-		const contributionsResult = await this.dbSession.executeRead<Contribution>(
-			query,
-			[...params, limit, offset]
-		);
+		const contributionsResult = await this.dbSession.executeRead<Contribution>(query, [...params, limit, offset]);
 		return {
 			contributions: contributionsResult.results,
 			summary,
@@ -507,9 +512,7 @@ export class ContributionService {
 		const results = await this.dbSession.executeRead<{
 			packageName: string;
 			count: number;
-		}>(
-			query
-		);
+		}>(query);
 		return results.results;
 	}
 	async getContributionLeaderboard(): Promise<
@@ -532,7 +535,7 @@ export class ContributionService {
 			display_name: string | null;
 			contribution_count: number;
 		}>(query);
-		return results.results.map(r => ({ name: r.display_name || r.user_id, count: r.contribution_count }));
+		return results.results.map((r) => ({ name: r.display_name || r.user_id, count: r.contribution_count }));
 	}
 	// Removed legacy user display name update + lookup helpers; display names now sourced directly from users table
 }
