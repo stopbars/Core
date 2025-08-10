@@ -36,7 +36,7 @@ const options = {
       { name: 'Airports', description: 'Lookup and metadata endpoints for airports.' },
       { name: 'Divisions', description: 'Division management, membership, and associated airport access.' },
       { name: 'Points', description: 'Creation and management of lighting/navigation point data.' },
-      { name: 'Support', description: 'Utilities for generating light support / BARS XML artifacts.' },
+      { name: 'Generation', description: 'Utilities for generating light support / BARS XML artifacts.' },
       { name: 'NOTAM', description: 'Global NOTAM retrieval and (staff) updates.' },
       { name: 'Contributions', description: 'Community lighting package submission, review, and leaderboard.' },
       { name: 'Staff', description: 'Restricted staff-only operational and moderation endpoints (hidden from public docs).' },

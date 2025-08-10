@@ -1675,14 +1675,14 @@ app.get('/points',
 		});
 	});
 
-// Light Support endpoints
+// MSFS Light Supports and BARS XML generation endpoint
 /**
  * @openapi
  * /supports/generate:
  *   post:
  *     summary: Generate Light Supports and BARS XML
  *     tags:
- *       - Support
+ *       - Generation
  *     description: Upload raw XML and generate both light supports XML and processed BARS XML.
  *     requestBody:
  *       required: true
