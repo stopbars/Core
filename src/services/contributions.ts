@@ -132,7 +132,7 @@ export class ContributionService {
 				packageName: submission.packageName,
 				userId: submission.userId,
 			});
-		} catch {}
+		} catch { }
 		return contribution;
 	}
 	async getContribution(id: string): Promise<Contribution | null> {
@@ -153,10 +153,15 @@ export class ContributionService {
 	}
 
 	/**
-	 * Get the most recently approved contribution for an airport (by decision_date)
+	 * Get the most recently approved contribution for an airport & package (by decision_date)
+	 * Case-insensitive package name match.
 	 * @param airportIcao ICAO code
+	 * @param packageName Package name (case-insensitive)
 	 */
-	async getLatestApprovedContributionForAirport(airportIcao: string): Promise<Contribution | null> {
+	async getLatestApprovedContributionForAirportPackage(
+		airportIcao: string,
+		packageName: string,
+	): Promise<Contribution | null> {
 		const result = await this.dbSession.executeRead<Contribution>(
 			`
 			SELECT 
@@ -166,11 +171,11 @@ export class ContributionService {
 				submission_date as submissionDate, status,
 				rejection_reason as rejectionReason, decision_date as decisionDate
 			FROM contributions
-			WHERE airport_icao = ? AND status = 'approved'
+			WHERE airport_icao = ? AND lower(package_name) = lower(?) AND status = 'approved'
 			ORDER BY datetime(decision_date) DESC
 			LIMIT 1
 			`,
-			[airportIcao],
+			[airportIcao, packageName],
 		);
 		return result.results[0] || null;
 	}
@@ -340,7 +345,7 @@ export class ContributionService {
 				decidedBy: userId,
 				rejectionReason: decision.approved ? undefined : decision.rejectionReason || 'No reason provided',
 			});
-		} catch {}
+		} catch { }
 		return updated;
 	}
 	async getContributionStats(): Promise<{
@@ -394,7 +399,7 @@ export class ContributionService {
 		if (result.success) {
 			try {
 				this.posthog?.track('Contribution Deleted', { id, userId });
-			} catch {}
+			} catch { }
 		}
 		return result.success;
 	}

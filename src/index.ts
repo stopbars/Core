@@ -2445,17 +2445,21 @@ app.route('/contributions', contributionsApp);
 // CDN Endpoints
 const cdnApp = new Hono<{ Bindings: Env }>();
 
-// Latest approved BARS map for an airport
+// Latest approved BARS map for an airport & specific package
 /**
  * @openapi
- * /maps/{icao}/latest:
+ * /maps/{icao}/packages/{package}/latest:
  *   get:
- *     summary: Get latest approved BARS map XML (raw content) for an airport
+ *     summary: Get latest approved BARS map XML (raw content) for an airport & package
  *     tags:
  *       - Generation
  *     parameters:
  *       - in: path
  *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: package
  *         required: true
  *         schema: { type: string }
  *     responses:
@@ -2464,12 +2468,13 @@ const cdnApp = new Hono<{ Bindings: Env }>();
  *       404:
  *         description: Not found
  */
-app.get('/maps/:icao/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), async (c) => {
+app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
+	const pkg = c.req.param('package');
 	const contributions = ServicePool.getContributions(c.env);
 	const storage = ServicePool.getStorage(c.env);
 
-	const latest = await contributions.getLatestApprovedContributionForAirport(icao);
+	const latest = await contributions.getLatestApprovedContributionForAirportPackage(icao, pkg);
 	if (!latest) {
 		return c.text('No approved map found', 404);
 	}
@@ -2477,7 +2482,6 @@ app.get('/maps/:icao/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), asy
 	const safePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
 	const fileKey = `Maps/${icao}_${safePackageName}_bars.xml`;
 
-	// Fetch stored XML; if missing, return 404
 	const stored = await storage.getFile(fileKey);
 	if (!stored) {
 		return c.text('Map file not found', 404);

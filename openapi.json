@@ -1560,9 +1560,9 @@
         }
       }
     },
-    "/maps/{icao}/latest": {
+    "/maps/{icao}/packages/{package}/latest": {
       "get": {
-        "summary": "Get latest approved BARS map XML (raw content) for an airport",
+        "summary": "Get latest approved BARS map XML (raw content) for an airport & package",
         "tags": [
           "Generation"
         ],
@@ -1570,6 +1570,14 @@
           {
             "in": "path",
             "name": "icao",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "package",
             "required": true,
             "schema": {
               "type": "string"
