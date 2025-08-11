@@ -557,17 +557,13 @@ export class Connection {
 			);
 		} // Determine if there's an active state with controllers
 		const now = Date.now();
-		// Only consider controllers for determining if state is active
 		const hasActiveControllers = state.controllers.size > 0;
-		const hasRecentUpdates = now - state.lastUpdate <= this.TWO_MINUTES;
-		const hasActiveState = hasActiveControllers && hasRecentUpdates;
+		const hasActiveState = hasActiveControllers;
 
 		let stateObjects;
 		let isOffline = false;
 
 		if (clientType === 'controller' || hasActiveState) {
-			// Controllers always get the current state
-			// Pilots get active state only if controllers are online and have recent updates
 			stateObjects = Array.from(state.objects.values());
 			isOffline = false;
 		} else {
@@ -642,6 +638,41 @@ export class Connection {
 							}),
 						);
 						break;
+
+					case 'GET_STATE': {
+						// Provide current state snapshot (controllers + pilots can request; observers too)
+						const airport = packet.airport || socketInfo.airport;
+						const state = this.airportStates.get(airport);
+						let offline = false;
+						let objects: AirportObject[] = [];
+
+						// Determine if controllers currently connected for this airport
+						const hasControllers = Array.from(this.sockets.values()).some(
+							(c) => c.airport === airport && c.type === 'controller',
+						);
+
+						if (state && hasControllers) {
+							// If any controller currently connected, treat state as online regardless of recency
+							objects = Array.from(state.objects.values());
+						} else {
+							offline = true;
+							objects = await this.getOfflineStateFromPoints(airport);
+						}
+
+						const snapshot: Packet = {
+							type: 'STATE_SNAPSHOT',
+							airport,
+							data: {
+								objects,
+								sharedState: this.getSharedStateSnapshot(airport),
+								offline,
+								requestedAt: packet.timestamp || now,
+							},
+							timestamp: Date.now(),
+						};
+						server.send(JSON.stringify(snapshot));
+						break;
+					}
 
 					case 'STATE_UPDATE':
 						if (clientType === 'pilot') {
@@ -845,25 +876,13 @@ export class Connection {
 			const connectedControllers = connectedClients.controllers.length > 0;
 
 			if (state && connectedControllers) {
-				const now = Date.now();
-				// Check if there's a recent state from controllers
-				const hasRecentState = now - state.lastUpdate <= this.TWO_MINUTES;
-
-				if (hasRecentState) {
-					// Return active state with actual objects
-					objects = Array.from(state.objects.values())
-						.filter((obj) => obj.state)
-						.map((obj) => ({
-							id: obj.id,
-							state: obj.state,
-							controllerId: obj.controllerId,
-							timestamp: obj.timestamp,
-						}));
-				} else {
-					// Recent controllers but no recent state, use offline
-					isOffline = true;
-					objects = await this.getOfflineStateFromPoints(airport);
-				}
+				// Return active state with all objects regardless of recency since controllers are connected
+				objects = Array.from(state.objects.values()).map((obj) => ({
+					id: obj.id,
+					state: obj.state,
+					controllerId: obj.controllerId,
+					timestamp: obj.timestamp,
+				}));
 			} else {
 				// No controllers connected or no state exists, mark as offline
 				isOffline = true;
@@ -1014,6 +1033,8 @@ export class Connection {
 			'CONTROLLER_CONNECT',
 			'CONTROLLER_DISCONNECT',
 			'ERROR',
+			'GET_STATE',
+			'STATE_SNAPSHOT',
 		];
 
 		if (!validTypes.includes(packet.type)) {

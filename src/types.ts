@@ -91,15 +91,17 @@ export interface AirportState {
 
 export interface Packet {
 	type:
-		| 'STATE_UPDATE'
-		| 'INITIAL_STATE'
-		| 'CONTROLLER_CONNECT'
-		| 'CONTROLLER_DISCONNECT'
-		| 'SHARED_STATE_UPDATE'
-		| 'ERROR'
-		| 'HEARTBEAT'
-		| 'HEARTBEAT_ACK'
-		| 'CLOSE';
+	| 'STATE_UPDATE'
+	| 'INITIAL_STATE'
+	| 'CONTROLLER_CONNECT'
+	| 'CONTROLLER_DISCONNECT'
+	| 'SHARED_STATE_UPDATE'
+	| 'ERROR'
+	| 'HEARTBEAT'
+	| 'HEARTBEAT_ACK'
+	| 'CLOSE'
+	| 'GET_STATE'
+	| 'STATE_SNAPSHOT';
 	airport?: string;
 	data?: {
 		objectId?: string;
@@ -112,6 +114,7 @@ export interface Packet {
 		message?: string; // For error messages
 		connectionType?: ClientType; // Add connection type to data
 		offline?: boolean; // Flag to indicate if state is offline (no controllers)
+		requestedAt?: number; // For STATE_SNAPSHOT - when request was made
 	};
 	timestamp?: number; // Optional since server will set it
 }
