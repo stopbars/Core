@@ -197,7 +197,8 @@ export class PolygonService {
 				const lightOrientation: 'left' | 'right' | 'both' =
 					(point.properties?.orientation as any) || (obj.properties.orientation as any) || 'both';
 				const lightColor = (point.properties?.color || obj.properties.color || '').toLowerCase();
-				const lightStateId = this.mapLightStateId(lightOrientation, lightColor);
+				const isElevatedStopbar = obj.type === 'stopbar' && point.properties?.elevated === true;
+				const lightStateId = this.mapLightStateId(lightOrientation, lightColor, isElevatedStopbar);
 				const lightStateAttr = lightStateId !== undefined ? ` stateId="${lightStateId}"` : '';
 				xml += `\t\t<Light${lightStateAttr}>\n`;
 				xml += `\t\t\t<Position>${point.lat},${point.lon}</Position>\n`;
@@ -258,7 +259,9 @@ export class PolygonService {
 	 * Bi mixed (Dir2 green, Dir1 other):
 	 *  green-yellow=25, green-blue=26, green-orange=27
 	 */
-	private mapLightStateId(orientation: 'left' | 'right' | 'both', rawColor: string): number | undefined {
+	private mapLightStateId(orientation: 'left' | 'right' | 'both', rawColor: string, elevatedStopbar?: boolean): number | undefined {
+		// Elevated stopbar special state
+		if (elevatedStopbar) return 6;
 		if (!rawColor) return undefined;
 		// Normalize color string(s)
 		const color = rawColor.toLowerCase();

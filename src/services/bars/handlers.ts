@@ -237,23 +237,23 @@ export class StopbarHandler extends BarsTypeHandler {
 		);
 
 		// Step 2: Move the lights inward by the defined inward offset (0.3 meters)
-		// We move perpendicular to the stopbar line
+		// Now place them on the OPPOSITE side of the stopbar (flip from previous -90 to +90)
 		const startInwardPoint = calculateDestinationPoint(
 			startElevatedPoint,
 			ELEVATED_LIGHT_INWARD_OFFSET,
-			(baseLineHeading - 90) % 360, // 90 degrees right of stopbar direction
+			(baseLineHeading + 90) % 360, // opposite side perpendicular
 		);
 
 		const endInwardPoint = calculateDestinationPoint(
 			endElevatedPoint,
 			ELEVATED_LIGHT_INWARD_OFFSET,
-			(baseLineHeading - 90) % 360, // 90 degrees right of stopbar direction
-		); // Step 3: Calculate the inward headings to make the lights point toward the center of the stopbar
-		// For the first elevated light at the start of the stopbar: angle inward by the inward angle
-		const firstElevatedHeading = (baseLineHeading + ELEVATED_LIGHT_INWARD_ANGLE) % 360;
+			(baseLineHeading + 90) % 360, // opposite side perpendicular
+		);
 
-		// For the last elevated light at the end of the stopbar: angle inward by the inward angle (opposite direction)
-		const lastElevatedHeading = (baseLineHeading + 180 - ELEVATED_LIGHT_INWARD_ANGLE) % 360;
+		// Step 3: Flip headings 180° so elevated lights face the correct (opposite) way after side switch
+		// Original inward headings: base+angle and base+180-angle. We add 180 to both to flip them.
+		const firstElevatedHeading = (baseLineHeading + ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
+		const lastElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
 
 		// Add the elevated lights with correct positions and inward headings
 		elevatedLights.push({
