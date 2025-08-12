@@ -1857,6 +1857,121 @@
         }
       }
     },
+    "/releases": {
+      "get": {
+        "summary": "List all product releases (optionally filtered)",
+        "tags": [
+          "Installer"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pilot-Client",
+                "vatSys-Plugin",
+                "EuroScope-Plugin"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Releases listed"
+          }
+        }
+      }
+    },
+    "/releases/latest": {
+      "get": {
+        "summary": "Get latest release for a product",
+        "tags": [
+          "Installer"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pilot-Client",
+                "vatSys-Plugin",
+                "EuroScope-Plugin"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest release returned"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/releases/upload": {
+      "post": {
+        "x-hidden": true,
+        "summary": "Create a new product release (lead developer only)",
+        "tags": [
+          "Installer"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file",
+                  "product",
+                  "version"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "product": {
+                    "type": "string",
+                    "enum": [
+                      "Pilot-Client",
+                      "vatSys-Plugin",
+                      "EuroScope-Plugin"
+                    ]
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "changelog": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Release created"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
     "/purge-cache": {
       "post": {
         "x-hidden": true,

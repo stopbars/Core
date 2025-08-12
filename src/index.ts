@@ -5,6 +5,7 @@ import { PointChangeset, PointData } from './types';
 import { VatsimService } from './services/vatsim';
 import { AuthService } from './services/auth';
 import { StaffRole } from './services/roles';
+import { InstallerProduct } from './services/releases';
 import { Connection } from './network/connection';
 import { UserService } from './services/users';
 import { DatabaseContextFactory } from './services/database-context';
@@ -3171,6 +3172,146 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 	}
 });
 app.route('/euroscope', euroscopeApp);
+
+// Installer / Releases endpoints
+/**
+ * @openapi
+ * /releases:
+ *   get:
+ *     summary: List all product releases (optionally filtered)
+ *     tags:
+ *       - Installer
+ *     parameters:
+ *       - in: query
+ *         name: product
+ *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin] }
+ *     responses:
+ *       200:
+ *         description: Releases listed
+ */
+app.get(
+	'/releases',
+	withCache(CacheKeys.fromUrl, 300, 'installer'), // cache 5m
+	async (c) => {
+		const product = c.req.query('product') as InstallerProduct | undefined;
+		const channel = c.req.query('channel') as 'stable' | 'beta' | undefined;
+		const releasesService = ServicePool.getReleases(c.env);
+		const releases = await releasesService.listReleases(product);
+		return c.json({ releases });
+	}
+);
+
+/**
+ * @openapi
+ * /releases/latest:
+ *   get:
+ *     summary: Get latest release for a product
+ *     tags:
+ *       - Installer
+ *     parameters:
+ *       - in: query
+ *         name: product
+ *         required: true
+ *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin] }
+ *     responses:
+ *       200:
+ *         description: Latest release returned
+ *       404:
+ *         description: Not found
+ */
+app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), async (c) => {
+	const product = c.req.query('product') as InstallerProduct | undefined;
+	if (!product) return c.text('product required', 400);
+	const releasesService = ServicePool.getReleases(c.env);
+	const latest = await releasesService.getLatest(product);
+	if (!latest) return c.text('Not found', 404);
+	// Provide direct download URL via CDN domain
+	const downloadUrl = new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
+	return c.json({ ...latest, downloadUrl });
+});
+
+/**
+ * @openapi
+ * /releases/upload:
+ *   post:
+ *     x-hidden: true
+ *     summary: Create a new product release (lead developer only)
+ *     tags:
+ *       - Installer
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file, product, version]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *               product:
+ *                 type: string
+ *                 enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin]
+ *               version:
+ *                 type: string
+ *               changelog:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Release created
+ *       403:
+ *         description: Forbidden
+ */
+app.post('/releases/upload', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) return c.text('Forbidden', 403);
+	try {
+		const formData = await c.req.formData();
+		const file = formData.get('file');
+		const product = formData.get('product')?.toString() as InstallerProduct | undefined;
+		const version = formData.get('version')?.toString();
+		const changelog = formData.get('changelog')?.toString();
+		if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
+		if (!product || !version) return c.json({ error: 'product & version required' }, 400);
+		const MAX = 50 * 1024 * 1024;
+		if (file.size > MAX) return c.json({ error: 'File too large (50MB max)' }, 400);
+		const storage = ServicePool.getStorage(c.env);
+		const fileKey = `releases/${product}/${version}/${file.name}`;
+		const bytes = await file.arrayBuffer();
+		const digest = await crypto.subtle.digest('SHA-256', bytes);
+		const sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+		await storage.uploadFile(fileKey, bytes, file.type || 'application/zip', {
+			uploadedBy: user.vatsim_id,
+			product,
+			version,
+			size: file.size.toString(),
+			sha256
+		});
+		const releasesService = ServicePool.getReleases(c.env);
+		const release = await releasesService.createRelease({
+			product,
+			version,
+			fileKey,
+			fileSize: file.size,
+			fileHash: sha256,
+			changelog
+		});
+		return c.json({ success: true, release, downloadUrl: `https://dev-cdn.stopbars.com/${fileKey}` }, 201);
+	} catch (err) {
+		console.error('Release upload error', err);
+		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);
+	}
+});
 
 /**
  * @openapi

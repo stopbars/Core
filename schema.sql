@@ -170,3 +170,18 @@ CREATE TABLE IF NOT EXISTS faqs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_faqs_order ON faqs(order_position ASC);
+
+-- Installer releases table for distributable products
+CREATE TABLE IF NOT EXISTS installer_releases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product TEXT NOT NULL, -- Pilot-Client | vatSys-Plugin | EuroScope-Plugin
+    version TEXT NOT NULL,
+    file_key TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    file_hash TEXT NOT NULL, -- sha256 hex
+    changelog TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(product, version)
+);
+CREATE INDEX IF NOT EXISTS idx_installer_releases_product ON installer_releases(product);
+CREATE INDEX IF NOT EXISTS idx_installer_releases_created_at ON installer_releases(created_at DESC);
