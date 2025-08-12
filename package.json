@@ -14,7 +14,7 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.56",
-		"@types/node": "^24.1.0",
+		"@types/node": "^24.2.1",
 		"@types/swagger-jsdoc": "^6.0.4",
 		"prettier": "^3.6.2",
 		"ts-node": "^10.9.2",
