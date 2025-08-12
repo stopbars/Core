@@ -11,6 +11,7 @@ import { DatabaseContextFactory } from './services/database-context';
 import { withCache, CacheKeys } from './services/cache';
 import { ServicePool } from './services/service-pool';
 import { PostHogService } from './services/posthog';
+import { sanitizeContributionXml } from './services/xml-sanitizer';
 
 // Shared point regex
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
@@ -1748,46 +1749,39 @@ app.post('/supports/generate', async (c) => {
 		const icao = formData.get('icao')?.toString();
 
 		if (!xmlFile || !(xmlFile instanceof File)) {
-			return c.json(
-				{
-					error: 'XML file is required',
-				},
-				400,
-			);
+			return c.json({ error: 'XML file is required' }, 400);
 		}
-
 		if (!icao) {
-			return c.json(
-				{
-					error: 'ICAO code is required',
-				},
-				400,
-			);
+			return c.json({ error: 'ICAO code is required' }, 400);
 		}
 
-		const xmlContent = await xmlFile.text();
+		const MAX_XML_BYTES = 200_000;
+		if (xmlFile.size > MAX_XML_BYTES) {
+			return c.json({ error: `XML file too large (>${MAX_XML_BYTES} bytes)` }, 400);
+		}
+
+		const rawXml = await xmlFile.text();
+
+		let sanitized: string;
+		try {
+			sanitized = sanitizeContributionXml(rawXml, { maxBytes: MAX_XML_BYTES });
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : 'Invalid XML';
+			return c.json({ error: msg }, 400);
+		}
+
 		const supportService = ServicePool.getSupport(c.env);
 		const polygonService = ServicePool.getPolygons(c.env);
 
-		// Generate both XML files in parallel
 		const [supportsXml, barsXml] = await Promise.all([
-			supportService.generateLightSupportsXML(xmlContent, icao),
-			polygonService.processBarsXML(xmlContent, icao),
+			supportService.generateLightSupportsXML(sanitized, icao),
+			polygonService.processBarsXML(sanitized, icao),
 		]);
 
-		// Return both XMLs as a JSON response
-		return c.json({
-			supportsXml,
-			barsXml,
-		});
+		return c.json({ supportsXml, barsXml });
 	} catch (error) {
 		console.error('Error generating XMLs:', error);
-		return c.json(
-			{
-				error: error instanceof Error ? error.message : 'Unknown error generating XMLs',
-			},
-			500,
-		);
+		return c.json({ error: error instanceof Error ? error.message : 'Unknown error generating XMLs' }, 500);
 	}
 });
 

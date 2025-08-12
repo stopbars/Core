@@ -5,6 +5,7 @@ import { SupportService } from './support';
 import { PolygonService } from './polygons';
 import { ServicePool } from './service-pool';
 import { PostHogService } from './posthog';
+import { sanitizeContributionXml } from './xml-sanitizer';
 
 export interface Contribution {
 	id: string;
@@ -78,9 +79,13 @@ export class ContributionService {
 			throw new Error(`Airport with ICAO ${submission.airportIcao} not found`);
 		}
 
-		const trimmedXml = submission.submittedXml.trim();
-		if (!trimmedXml || !trimmedXml.startsWith('<?xml')) {
-			throw new Error('Invalid XML format');
+		// Sanitize & validate submitted XML to mitigate injection / XXE attempts
+		let trimmedXml: string;
+		try {
+			trimmedXml = sanitizeContributionXml(submission.submittedXml);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : 'Invalid XML';
+			throw new Error(msg);
 		}
 
 		const id = crypto.randomUUID();
