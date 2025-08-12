@@ -158,3 +158,15 @@ CREATE INDEX IF NOT EXISTS idx_division_airports_icao ON division_airports(icao)
 
 -- Points table composite index
 CREATE INDEX IF NOT EXISTS idx_points_airport_type ON points(airport_id, type);
+
+-- FAQs table for public frequently asked questions
+CREATE TABLE IF NOT EXISTS faqs (
+    id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    order_position INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_faqs_order ON faqs(order_position ASC);

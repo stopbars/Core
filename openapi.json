@@ -70,6 +70,10 @@
       "description": "File storage, upload, listing, and deletion via CDN-backed storage."
     },
     {
+      "name": "FAQ",
+      "description": "Frequently Asked Questions (FAQ) management and retrieval."
+    },
+    {
       "name": "EuroScope",
       "description": "EuroScope sector file upload, listing, and permission checks by ICAO."
     },
@@ -1906,6 +1910,200 @@
         "responses": {
           "200": {
             "description": "Contributors returned"
+          }
+        }
+      }
+    },
+    "/faqs": {
+      "get": {
+        "summary": "List public FAQs",
+        "tags": [
+          "FAQ"
+        ],
+        "responses": {
+          "200": {
+            "description": "FAQs returned"
+          }
+        }
+      }
+    },
+    "/staff/faqs": {
+      "post": {
+        "x-hidden": true,
+        "summary": "Create FAQ",
+        "tags": [
+          "Staff",
+          "FAQ"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "question",
+                  "answer",
+                  "order_position"
+                ],
+                "properties": {
+                  "question": {
+                    "type": "string"
+                  },
+                  "answer": {
+                    "type": "string"
+                  },
+                  "order_position": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          }
+        }
+      }
+    },
+    "/staff/faqs/{id}": {
+      "put": {
+        "x-hidden": true,
+        "summary": "Update FAQ",
+        "tags": [
+          "Staff",
+          "FAQ"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "type": "string"
+                  },
+                  "answer": {
+                    "type": "string"
+                  },
+                  "order_position": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "x-hidden": true,
+        "summary": "Delete FAQ",
+        "tags": [
+          "Staff",
+          "FAQ"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deletion result"
+          }
+        }
+      }
+    },
+    "/staff/faqs/reorder": {
+      "post": {
+        "x-hidden": true,
+        "summary": "Bulk reorder FAQs",
+        "tags": [
+          "Staff",
+          "FAQ"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "updates"
+                ],
+                "properties": {
+                  "updates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "order_position"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "order_position": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reordered"
           }
         }
       }

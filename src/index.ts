@@ -3282,6 +3282,206 @@ app.get(
 	},
 );
 
+// FAQs public endpoint
+/**
+ * @openapi
+ * /faqs:
+ *   get:
+ *     summary: List public FAQs
+ *     tags:
+ *       - FAQ
+ *     responses:
+ *       200:
+ *         description: FAQs returned
+ */
+app.get(
+	'/faqs',
+	withCache(() => 'faqs-public', 900, 'faq'),
+	async (c) => {
+		const faqService = ServicePool.getFAQs(c.env);
+		const data = await faqService.list();
+		return c.json(data);
+	},
+);
+
+// Staff FAQ management endpoints
+const faqStaffApp = new Hono<{ Bindings: Env; Variables: { user?: any } }>();
+
+faqStaffApp.use('*', async (c, next) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	// Require product manager or higher
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
+	c.set('user', user);
+	await next();
+});
+
+/**
+ * @openapi
+ * /staff/faqs:
+ *   post:
+ *     x-hidden: true
+ *     summary: Create FAQ
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [question, answer, order_position]
+ *             properties:
+ *               question: { type: string }
+ *               answer: { type: string }
+ *               order_position: { type: integer }
+ *     responses:
+ *       201:
+ *         description: Created
+ */
+faqStaffApp.post('/', async (c) => {
+	let body: any;
+	try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+	const { question, answer } = body;
+	let order_position = Number(body.order_position);
+	if (!question || !answer || !Number.isInteger(order_position)) {
+		return c.json({ error: 'question, answer, order_position required' }, 400);
+	}
+	if (order_position < 0) order_position = 0;
+	const faqService = ServicePool.getFAQs(c.env);
+	const created = await faqService.create({ question, answer, order_position });
+	// Purge public cache
+	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	return c.json(created, 201);
+});
+
+/**
+ * @openapi
+ * /staff/faqs/{id}:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update FAQ
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               question: { type: string }
+ *               answer: { type: string }
+ *               order_position: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Updated
+ *       404:
+ *         description: Not found
+ */
+faqStaffApp.put('/:id', async (c) => {
+	const id = c.req.param('id');
+	let body: any; try { body = await c.req.json(); } catch { body = {}; }
+	const faqService = ServicePool.getFAQs(c.env);
+	const updated = await faqService.update(id, {
+		question: body.question,
+		answer: body.answer,
+		order_position: Number.isInteger(body.order_position) ? body.order_position : undefined,
+	});
+	if (!updated) return c.text('Not found', 404);
+	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	return c.json(updated);
+});
+
+/**
+ * @openapi
+ * /staff/faqs/{id}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Delete FAQ
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion result
+ */
+faqStaffApp.delete('/:id', async (c) => {
+	const id = c.req.param('id');
+	const faqService = ServicePool.getFAQs(c.env);
+	const success = await faqService.delete(id);
+	if (success) { try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { } }
+	return c.json({ success });
+});
+
+/**
+ * @openapi
+ * /staff/faqs/reorder:
+ *   post:
+ *     x-hidden: true
+ *     summary: Bulk reorder FAQs
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [updates]
+ *             properties:
+ *               updates:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [id, order_position]
+ *                   properties:
+ *                     id: { type: string }
+ *                     order_position: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Reordered
+ */
+faqStaffApp.post('/reorder', async (c) => {
+	let body: any; try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+	if (!Array.isArray(body.updates)) return c.json({ error: 'updates array required' }, 400);
+	const updates = body.updates.filter((u: any) => typeof u.id === 'string' && Number.isInteger(u.order_position));
+	const faqService = ServicePool.getFAQs(c.env);
+	await faqService.reorder(updates);
+	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	return c.json({ success: true });
+});
+
+app.route('/staff/faqs', faqStaffApp);
+
 // Health endpoint
 /**
  * @openapi

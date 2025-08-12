@@ -41,6 +41,7 @@ const options = {
 			{ name: 'Contributions', description: 'Community lighting package submission, review, and leaderboard.' },
 			{ name: 'Staff', description: 'Restricted staff-only operational and moderation endpoints (hidden from public docs).' },
 			{ name: 'CDN', description: 'File storage, upload, listing, and deletion via CDN-backed storage.' },
+			{ name: 'FAQ', description: 'Frequently Asked Questions (FAQ) management and retrieval.' },
 			{ name: 'EuroScope', description: 'EuroScope sector file upload, listing, and permission checks by ICAO.' },
 			{ name: 'Cache', description: 'Administrative cache management operations.' },
 			{ name: 'GitHub', description: 'Repository contributor information.' },
