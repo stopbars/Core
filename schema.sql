@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS installer_releases (
     file_size INTEGER NOT NULL,
     file_hash TEXT NOT NULL, -- sha256 hex
     changelog TEXT,
+    image_url TEXT, -- Optional promotional image
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(product, version)
 );

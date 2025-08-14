@@ -10,6 +10,7 @@ export interface ReleaseRecord {
     file_size: number;
     file_hash: string;
     changelog?: string;
+    image_url?: string;
     created_at: string;
 }
 
@@ -20,6 +21,7 @@ export interface CreateReleaseInput {
     fileSize: number;
     fileHash: string; // sha256 hex
     changelog?: string;
+    imageUrl?: string;
 }
 
 export class ReleaseService {
@@ -29,10 +31,10 @@ export class ReleaseService {
     }
 
     async createRelease(input: CreateReleaseInput): Promise<ReleaseRecord> {
-        const { product, version, fileKey, fileSize, fileHash, changelog } = input;
+        const { product, version, fileKey, fileSize, fileHash, changelog, imageUrl } = input;
         const result = await this.dbSession.executeWrite(
-            `INSERT INTO installer_releases (product, version, file_key, file_size, file_hash, changelog) VALUES (?,?,?,?,?,?) RETURNING *`,
-            [product, version, fileKey, fileSize, fileHash, changelog || null],
+            `INSERT INTO installer_releases (product, version, file_key, file_size, file_hash, changelog, image_url) VALUES (?,?,?,?,?,?,?) RETURNING *`,
+            [product, version, fileKey, fileSize, fileHash, changelog || null, imageUrl || null],
         );
         const release = result.results[0] as ReleaseRecord;
         if (!release) throw new Error('Failed to create release');
@@ -57,5 +59,13 @@ export class ReleaseService {
             [product],
         );
         return res.results[0] || null;
+    }
+
+    async updateChangelog(id: number, changelog: string): Promise<ReleaseRecord | null> {
+        const res = await this.dbSession.executeWrite(
+            `UPDATE installer_releases SET changelog = ? WHERE id = ? RETURNING *`,
+            [changelog, id],
+        );
+        return (res.results[0] as ReleaseRecord) || null;
     }
 }

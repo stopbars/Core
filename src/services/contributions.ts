@@ -88,6 +88,29 @@ export class ContributionService {
 			throw new Error(msg);
 		}
 
+		try {
+			const latestApproved = await this.getLatestApprovedContributionForAirportPackage(
+				submission.airportIcao,
+				submission.packageName,
+			);
+			if (latestApproved) {
+				const normalize = (xml: string) =>
+					xml
+						.trim()
+						.replace(/\r/g, '')
+						.replace(/[\t ]+/g, ' ')
+						.replace(/>\s+</g, '><');
+				if (normalize(trimmedXml) === normalize(latestApproved.submittedXml)) {
+					throw new Error('Duplicate of current approved XML for this airport & package');
+				}
+			}
+		} catch (e) {
+			if (e instanceof Error && e.message.startsWith('Duplicate')) {
+				// Re-throw duplicate error directly
+				throw e;
+			}
+		}
+
 		const id = crypto.randomUUID();
 		const now = new Date().toISOString();
 

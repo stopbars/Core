@@ -1321,6 +1321,106 @@
         }
       }
     },
+    "/staff/manage": {
+      "get": {
+        "x-hidden": true,
+        "summary": "List staff members",
+        "tags": [
+          "Staff"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Staff listed"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      },
+      "post": {
+        "x-hidden": true,
+        "summary": "Add or update a staff member",
+        "tags": [
+          "Staff"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vatsimId",
+                  "role"
+                ],
+                "properties": {
+                  "vatsimId": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "LEAD_DEVELOPER",
+                      "PRODUCT_MANAGER"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Staff added/updated"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/staff/manage/{vatsimId}": {
+      "delete": {
+        "x-hidden": true,
+        "summary": "Remove staff member",
+        "tags": [
+          "Staff"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "vatsimId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Staff removed"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
     "/contributions": {
       "get": {
         "summary": "List contributions",
@@ -1956,6 +2056,11 @@
                   },
                   "changelog": {
                     "type": "string"
+                  },
+                  "image": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Optional promotional image (PNG/JPEG, max 5MB)"
                   }
                 }
               }
@@ -1968,6 +2073,67 @@
           },
           "403": {
             "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/releases/{id}/changelog": {
+      "put": {
+        "x-hidden": true,
+        "summary": "Update changelog content for a release",
+        "description": "Update only the changelog text of an existing release record.",
+        "tags": [
+          "Installer"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "changelog"
+                ],
+                "properties": {
+                  "changelog": {
+                    "type": "string",
+                    "maxLength": 20000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changelog updated"
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Release not found"
           }
         }
       }

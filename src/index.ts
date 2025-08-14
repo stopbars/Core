@@ -2087,6 +2087,126 @@ staffUsersApp.delete('/:id', async (c) => {
 
 app.route('/staff/users', staffUsersApp);
 
+// Staff management (lead developer only) – manage staff roles
+const staffManageApp = new Hono<{ Bindings: Env }>();
+
+/**
+ * @openapi
+ * /staff/manage:
+ *   get:
+ *     x-hidden: true
+ *     summary: List staff members
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200: { description: Staff listed }
+ *       403: { description: Forbidden }
+ */
+staffManageApp.get('/', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	const staff = await roles.listStaff();
+	return c.json({ staff });
+});
+
+/**
+ * @openapi
+ * /staff/manage:
+ *   post:
+ *     x-hidden: true
+ *     summary: Add or update a staff member
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [vatsimId, role]
+ *             properties:
+ *               vatsimId: { type: string }
+ *               role: { type: string, enum: [LEAD_DEVELOPER, PRODUCT_MANAGER] }
+ *     responses:
+ *       200: { description: Staff added/updated }
+ *       403: { description: Forbidden }
+ */
+staffManageApp.post('/', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	let body: any; try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+	const { vatsimId, role } = body || {};
+	if (!vatsimId || !role || !(role in StaffRole)) return c.json({ error: 'vatsimId and valid role required' }, 400);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	const targetUser = await auth.getUserByVatsimId(vatsimId);
+	if (!targetUser) return c.json({ error: 'Target user not found' }, 404);
+	try {
+		const staff = await roles.addStaff(targetUser.id, role as StaffRole);
+		return c.json({ success: true, staff });
+	} catch (e) {
+		return c.json({ error: e instanceof Error ? e.message : 'Failed to add/update staff' }, 400);
+	}
+});
+
+/**
+ * @openapi
+ * /staff/manage/{vatsimId}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Remove staff member
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: vatsimId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Staff removed }
+ *       403: { description: Forbidden }
+ */
+staffManageApp.delete('/:vatsimId', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const targetVatsimId = c.req.param('vatsimId');
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	const targetUser = await auth.getUserByVatsimId(targetVatsimId);
+	if (!targetUser) return c.json({ error: 'Target user not found' }, 404);
+	try {
+		const removed = await roles.removeStaff(targetUser.id);
+		return c.json({ success: removed });
+	} catch (e) {
+		return c.json({ error: e instanceof Error ? e.message : 'Failed to remove staff' }, 400);
+	}
+});
+
+app.route('/staff/manage', staffManageApp);
+
 // Contributions endpoints
 const contributionsApp = new Hono<{ Bindings: Env }>();
 
@@ -3194,7 +3314,6 @@ app.get(
 	withCache(CacheKeys.fromUrl, 300, 'installer'), // cache 5m
 	async (c) => {
 		const product = c.req.query('product') as InstallerProduct | undefined;
-		const channel = c.req.query('channel') as 'stable' | 'beta' | undefined;
 		const releasesService = ServicePool.getReleases(c.env);
 		const releases = await releasesService.listReleases(product);
 		return c.json({ releases });
@@ -3227,7 +3346,9 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
 	if (!latest) return c.text('Not found', 404);
 	// Provide direct download URL via CDN domain
 	const downloadUrl = new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
-	return c.json({ ...latest, downloadUrl });
+	const imageUrl = latest.image_url ? new URL(latest.image_url, c.req.url).toString() : undefined;
+	const { image_url: _omitImage, ...rest } = latest as any;
+	return c.json({ ...rest, downloadUrl, imageUrl });
 });
 
 /**
@@ -3258,6 +3379,10 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
  *                 type: string
  *               changelog:
  *                 type: string
+ *               image:
+ *                 type: string
+ *                 format: binary
+ *                 description: Optional promotional image (PNG/JPEG, max 5MB)
  *     responses:
  *       201:
  *         description: Release created
@@ -3270,33 +3395,80 @@ app.post('/releases/upload', async (c) => {
 	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
+
+	// Start remote VATSIM lookup early while we parse form data (minor latency win)
+	const vatsimUserPromise = vatsim.getUser(vatsimToken);
+
+	let formData: FormData;
+	try {
+		formData = await c.req.formData();
+	} catch {
+		return c.json({ error: 'Invalid form-data' }, 400);
+	}
+
+	const file = formData.get('file');
+	const product = formData.get('product')?.toString() as InstallerProduct | undefined;
+	const version = formData.get('version')?.toString();
+	const changelog = formData.get('changelog')?.toString();
+	const image = formData.get('image');
+
+	// Await user info only after fast local parsing work is done
+	let vatsimUser;
+	try {
+		vatsimUser = await vatsimUserPromise;
+	} catch (e) {
+		return c.text('Failed to validate user', 401);
+	}
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
 	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
 	if (!isLeadDev) return c.text('Forbidden', 403);
+
+	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
+	if (!product || !version) return c.json({ error: 'product & version required' }, 400);
+	const MAX = 90 * 1024 * 1024;
+	if (file.size > MAX) return c.json({ error: 'File too large (90MB max)' }, 400);
 	try {
-		const formData = await c.req.formData();
-		const file = formData.get('file');
-		const product = formData.get('product')?.toString() as InstallerProduct | undefined;
-		const version = formData.get('version')?.toString();
-		const changelog = formData.get('changelog')?.toString();
-		if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
-		if (!product || !version) return c.json({ error: 'product & version required' }, 400);
-		const MAX = 50 * 1024 * 1024;
-		if (file.size > MAX) return c.json({ error: 'File too large (50MB max)' }, 400);
 		const storage = ServicePool.getStorage(c.env);
 		const fileKey = `releases/${product}/${version}/${file.name}`;
 		const bytes = await file.arrayBuffer();
+		let imageBytesPromise: Promise<ArrayBuffer> | undefined;
+		if (image && image instanceof File) {
+			imageBytesPromise = image.arrayBuffer();
+		}
+
 		const digest = await crypto.subtle.digest('SHA-256', bytes);
 		const sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
-		await storage.uploadFile(fileKey, bytes, file.type || 'application/zip', {
+
+		// Validate image (after its bytes read started) before uploads
+		let imageUrl: string | undefined;
+		let imageUploadPromise: Promise<any> | undefined;
+		let imageKey: string | undefined;
+		if (image && image instanceof File) {
+			const ALLOWED = ['image/png', 'image/jpeg'];
+			const MAX_IMAGE = 5 * 1024 * 1024; // 5MB
+			if (!ALLOWED.includes(image.type)) return c.json({ error: 'Invalid image type (png or jpeg only)' }, 400);
+			if (image.size > MAX_IMAGE) return c.json({ error: 'Image too large (5MB max)' }, 400);
+			const imageExt = image.type === 'image/png' ? 'png' : 'jpg';
+			imageKey = `releases/${product}/${version}/promo.${imageExt}`;
+			// Wait for image bytes only when needed (likely already resolved by now)
+			const imgBytes = await imageBytesPromise!;
+			imageUploadPromise = storage.uploadFile(imageKey, imgBytes, image.type || 'image/png', {
+				uploadedBy: user.vatsim_id,
+				product,
+				version,
+			});
+			imageUrl = `https://dev-cdn.stopbars.com/${imageKey}`;
+		}
+		const fileUploadPromise = storage.uploadFile(fileKey, bytes, file.type || 'application/zip', {
 			uploadedBy: user.vatsim_id,
 			product,
 			version,
 			size: file.size.toString(),
 			sha256
 		});
+
+		await Promise.all([fileUploadPromise, imageUploadPromise].filter(Boolean));
 		const releasesService = ServicePool.getReleases(c.env);
 		const release = await releasesService.createRelease({
 			product,
@@ -3304,12 +3476,98 @@ app.post('/releases/upload', async (c) => {
 			fileKey,
 			fileSize: file.size,
 			fileHash: sha256,
-			changelog
+			changelog,
+			imageUrl
 		});
-		return c.json({ success: true, release, downloadUrl: `https://dev-cdn.stopbars.com/${fileKey}` }, 201);
+		return c.json({ success: true, release, downloadUrl: `https://dev-cdn.stopbars.com/${fileKey}`, imageUrl }, 201);
 	} catch (err) {
 		console.error('Release upload error', err);
 		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);
+	}
+});
+
+/**
+ * @openapi
+ * /releases/{id}/changelog:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update changelog content for a release
+ *     description: Update only the changelog text of an existing release record.
+ *     tags:
+ *       - Installer
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [changelog]
+ *             properties:
+ *               changelog:
+ *                 type: string
+ *                 maxLength: 20000
+ *     responses:
+ *       200:
+ *         description: Changelog updated
+ *       400:
+ *         description: Validation error
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Release not found
+ */
+app.put('/releases/:id/changelog', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const idRaw = c.req.param('id');
+	const id = parseInt(idRaw, 10);
+	if (Number.isNaN(id) || id <= 0) return c.text('Invalid id', 400);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const releasesService = ServicePool.getReleases(c.env);
+
+	try {
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return c.text('User not found', 404);
+		// Allow Lead Developer or Product Manager
+		const canEdit = (await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER)) || (await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER));
+		if (!canEdit) return c.text('Forbidden', 403);
+
+		let body: any;
+		try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+		const changelog = typeof body?.changelog === 'string' ? body.changelog.trim() : '';
+		if (!changelog) return c.json({ error: 'changelog required' }, 400);
+		if (changelog.length > 20000) return c.json({ error: 'changelog too long (max 20000 chars)' }, 400);
+
+		// Ensure release exists first (so we differentiate 404 vs silent update)
+		// Reusing listReleases would be inefficient; perform direct lookup.
+		const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+		try {
+			const existing = await dbContext.db.executeRead<any>('SELECT * FROM installer_releases WHERE id = ?', [id]);
+			if (!existing.results[0]) return dbContext.textResponse('Release not found', { status: 404 });
+		} finally {
+			// close early; release update uses its own session service
+			// (ReleaseService internally manages its session.)
+		}
+
+		const updated = await releasesService.updateChangelog(id, changelog);
+		if (!updated) return c.text('Release not found', 404);
+		return c.json({ success: true, release: updated });
+	} catch (err) {
+		console.error('Changelog update error', err);
+		return c.json({ error: err instanceof Error ? err.message : 'update failed' }, 500);
 	}
 });
 
