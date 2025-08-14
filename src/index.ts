@@ -13,8 +13,6 @@ import { withCache, CacheKeys } from './services/cache';
 import { ServicePool } from './services/service-pool';
 import { PostHogService } from './services/posthog';
 import { sanitizeContributionXml } from './services/xml-sanitizer';
-
-// Shared point regex
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
 interface CreateDivisionPayload {
@@ -76,18 +74,15 @@ const app = new Hono<{
 	};
 }>();
 
-// Analytics middleware (PostHog) – skip clearly useless noise (OPTIONS, favicon, configured ignores)
 app.use('*', async (c, next) => {
 	const start = Date.now();
 	await next();
 	try {
 		const url = new URL(c.req.url);
 		const path = url.pathname;
-		// Basic noise filters
-		if (c.req.method === 'OPTIONS') return; // CORS preflight
+		if (c.req.method === 'OPTIONS') return;
 		if (path === '/favicon.ico') return;
 		if (path.includes('/health')) return;
-		// Env-driven ignore list: comma separated exact paths or prefix* globs
 		const ignoreRaw = (c.env as any).ANALYTICS_IGNORE as string | undefined;
 		if (ignoreRaw) {
 			const ignores = ignoreRaw
@@ -120,7 +115,6 @@ app.use('*', async (c, next) => {
 	}
 });
 
-// Add CORS middleware
 app.use(
 	'*',
 	cors({
@@ -130,7 +124,6 @@ app.use(
 	}),
 );
 
-// Connect endpoint
 /**
  * @openapi
  * /connect:
@@ -474,7 +467,6 @@ app.put('/auth/display-mode', async (c) => {
 	}
 });
 
-// Regenerate API key
 /**
  * @openapi
  * /auth/regenerate-api-key:
@@ -569,7 +561,6 @@ app.post('/auth/regenerate-api-key', async (c) => {
 	}
 });
 
-// Delete account
 /**
  * @openapi
  * /auth/delete:
@@ -608,7 +599,6 @@ app.delete('/auth/delete', async (c) => {
 	}
 });
 
-// Check if staff
 /**
  * @openapi
  * /auth/is-staff:
@@ -649,7 +639,6 @@ app.get('/auth/is-staff', withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'
 	return c.json({ isStaff, role });
 });
 
-// Airports endpoint
 /**
  * @openapi
  * /airports:
@@ -716,7 +705,6 @@ app.get(
 	},
 );
 
-// Nearest airport (public, unauthenticated)
 /**
  * @openapi
  * /airports/nearest:
@@ -784,7 +772,6 @@ app.get(
 	},
 );
 
-// Divisions routes
 const divisionsApp = new Hono<{
 	Bindings: Env;
 	Variables: {
@@ -795,7 +782,6 @@ const divisionsApp = new Hono<{
 	};
 }>();
 
-// Middleware to get authenticated user for divisions
 divisionsApp.use('*', async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -819,7 +805,6 @@ divisionsApp.use('*', async (c, next) => {
 	await next();
 });
 
-// GET /divisions - List all divisions
 /**
  * @openapi
  * /divisions:
@@ -841,7 +826,6 @@ divisionsApp.get('/', async (c) => {
 	return c.json(allDivisions);
 });
 
-// POST /divisions - Create new division (requires lead_developer role)
 /**
  * @openapi
  * /divisions:
@@ -885,7 +869,6 @@ divisionsApp.post('/', async (c) => {
 	return c.json(division);
 });
 
-// PUT /divisions/:id - Update division name (lead_developer only)
 /**
  * @openapi
  * /divisions/{id}:
@@ -938,7 +921,6 @@ divisionsApp.put('/:id', async (c) => {
 	return c.json(updated);
 });
 
-// DELETE /divisions/:id - Delete division (lead_developer only)
 /**
  * @openapi
  * /divisions/{id}:
@@ -978,7 +960,6 @@ divisionsApp.delete('/:id', async (c) => {
 	return c.body(null, 204);
 });
 
-// GET /divisions/user - Get user's divisions
 /**
  * @openapi
  * /divisions/user:
@@ -1000,7 +981,6 @@ divisionsApp.get('/user', withCache(CacheKeys.withUser('divisions'), 3600, 'divi
 	return c.json(userDivisions);
 });
 
-// GET /divisions/:id - Get division details
 /**
  * @openapi
  * /divisions/{id}:
@@ -1033,7 +1013,6 @@ divisionsApp.get('/:id', withCache(CacheKeys.fromParams('id'), 2592000, 'divisio
 	return c.json(division);
 });
 
-// GET /divisions/:id/members - List division members
 /**
  * @openapi
  * /divisions/{id}/members:
@@ -1068,7 +1047,6 @@ divisionsApp.get('/:id/members', async (c) => {
 	return c.json(members);
 });
 
-// POST /divisions/:id/members - Add member (requires nav_head role)
 /**
  * @openapi
  * /divisions/{id}/members:
@@ -1123,7 +1101,6 @@ divisionsApp.post('/:id/members', async (c) => {
 	return c.json(member);
 });
 
-// DELETE /divisions/:id/members/:vatsimId - Remove member (requires nav_head role)
 /**
  * @openapi
  * /divisions/{id}/members/{vatsimId}:
@@ -1175,7 +1152,6 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 	return c.body(null, 204);
 });
 
-// GET /divisions/:id/airports - List division airports
 /**
  * @openapi
  * /divisions/{id}/airports:
@@ -1210,7 +1186,6 @@ divisionsApp.get('/:id/airports', withCache(CacheKeys.fromParams('id'), 600, 'di
 	return c.json(airports);
 });
 
-// POST /divisions/:id/airports - Request airport addition (requires division membership)
 /**
  * @openapi
  * /divisions/{id}/airports:
@@ -1590,7 +1565,6 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	}
 });
 
-// Get single point by ID
 /**
  * @openapi
  * /points/{id}:
@@ -1715,7 +1689,6 @@ app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
 	});
 });
 
-// MSFS Light Supports and BARS XML generation endpoint
 /**
  * @openapi
  * /supports/generate:
@@ -1786,7 +1759,6 @@ app.post('/supports/generate', async (c) => {
 	}
 });
 
-// NOTAM endpoints
 /**
  * @openapi
  * /notam:
@@ -1874,7 +1846,6 @@ app.put('/notam', async (c) => {
 	return c.json({ success: true });
 });
 
-// User management endpoints
 const staffUsersApp = new Hono<{
 	Bindings: Env;
 	Variables: {
@@ -1883,7 +1854,6 @@ const staffUsersApp = new Hono<{
 	};
 }>();
 
-// Middleware to authenticate staff users
 staffUsersApp.use('*', async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1906,7 +1876,6 @@ staffUsersApp.use('*', async (c, next) => {
 	await next();
 });
 
-// GET /staff/users - Get all users with pagination
 /**
  * @openapi
  * /staff/users:
@@ -1940,7 +1909,6 @@ staffUsersApp.get('/', async (c) => {
 	}
 });
 
-// GET /staff/users/search - Search for users
 /**
  * @openapi
  * /staff/users/search:
@@ -1986,7 +1954,6 @@ staffUsersApp.get('/search', async (c) => {
 	}
 });
 
-// POST /staff/users/refresh-api-token - Refresh a user's API token by VATSIM ID
 /**
  * @openapi
  * /staff/users/refresh-api-token:
@@ -2253,9 +2220,6 @@ contributionsApp.get('/', async (c) => {
 	return c.json(result);
 });
 
-// (Removed) contribution statistics endpoint
-
-// GET /contributions/leaderboard - Get top contributors
 /**
  * @openapi
  * /contributions/leaderboard:
@@ -2277,7 +2241,6 @@ contributionsApp.get(
 	},
 );
 
-// GET /contributions/top-packages - Get a list of most used packages
 /**
  * @openapi
  * /contributions/top-packages:
@@ -2299,7 +2262,6 @@ contributionsApp.get(
 	},
 );
 
-// POST /contributions - Create a new contribution
 /**
  * @openapi
  * /contributions:
@@ -2359,7 +2321,6 @@ contributionsApp.post('/', async (c) => {
 	}
 });
 
-// GET /contributions/user - Get user's contributions
 /**
  * @openapi
  * /contributions/user:
@@ -2408,7 +2369,6 @@ contributionsApp.get('/user', async (c) => {
 	return c.json(result);
 });
 
-// GET /contributions/:id - Get specific contribution
 /**
  * @openapi
  * /contributions/{id}:
@@ -2557,10 +2517,8 @@ contributionsApp.delete('/:id', async (c) => {
 
 app.route('/contributions', contributionsApp);
 
-// CDN Endpoints
 const cdnApp = new Hono<{ Bindings: Env }>();
 
-// Latest approved BARS map for an airport & specific package
 /**
  * @openapi
  * /maps/{icao}/packages/{package}/latest:
@@ -2607,7 +2565,6 @@ app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900
 	return stored;
 });
 
-// Special case for direct file downloads
 /**
  * @openapi
  * /cdn/files/{fileKey}:
@@ -2647,7 +2604,6 @@ cdnApp.get('/files/*', async (c) => {
 	return fileResponse;
 });
 
-// Handle file management endpoints
 /**
  * @openapi
  * /cdn/upload:
@@ -2757,7 +2713,6 @@ cdnApp.post('/upload', async (c) => {
 	}
 });
 
-// List files
 /**
  * @openapi
  * /cdn/files:
@@ -2830,7 +2785,6 @@ cdnApp.get('/files', async (c) => {
 	}
 });
 
-// Delete a file
 /**
  * @openapi
  * /cdn/files/{fileKey}:
@@ -2915,7 +2869,6 @@ cdnApp.delete('/files/*', async (c) => {
 
 app.route('/cdn', cdnApp);
 
-// EuroScope public file listing endpoint
 /**
  * @openapi
  * /euroscope/files/{icao}:
@@ -2976,7 +2929,6 @@ app.get('/euroscope/files/:icao', async (c) => {
 	}
 });
 
-// EuroScope file management endpoints
 const euroscopeApp = new Hono<{
 	Bindings: Env;
 	Variables: {
@@ -2985,7 +2937,6 @@ const euroscopeApp = new Hono<{
 	};
 }>();
 
-// Middleware for EuroScope endpoints to authenticate users
 euroscopeApp.use('*', async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -3007,7 +2958,6 @@ euroscopeApp.use('*', async (c, next) => {
 	await next();
 });
 
-// POST /euroscope/upload - Upload files to ICAO-specific folders
 /**
  * @openapi
  * /euroscope/upload:
@@ -3151,7 +3101,6 @@ euroscopeApp.post('/upload', async (c) => {
 	}
 });
 
-// DELETE /euroscope/files/:icao/:filename - Delete a specific file
 /**
  * @openapi
  * /euroscope/files/{icao}/{filename}:
@@ -3236,7 +3185,6 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	}
 });
 
-// GET /euroscope/:icao/editable - Check if user has permission to edit files for an airport
 /**
  * @openapi
  * /euroscope/{icao}/editable:
@@ -3293,7 +3241,6 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 });
 app.route('/euroscope', euroscopeApp);
 
-// Installer / Releases endpoints
 /**
  * @openapi
  * /releases:
@@ -3344,7 +3291,6 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
 	const releasesService = ServicePool.getReleases(c.env);
 	const latest = await releasesService.getLatest(product);
 	if (!latest) return c.text('Not found', 404);
-	// Provide direct download URL via CDN domain
 	const downloadUrl = new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
 	const imageUrl = latest.image_url ? new URL(latest.image_url, c.req.url).toString() : undefined;
 	const { image_url: _omitImage, ...rest } = latest as any;
@@ -3648,7 +3594,6 @@ app.post('/purge-cache', async (c) => {
 	}
 });
 
-// Contributors endpoint
 /**
  * @openapi
  * /contributors:
