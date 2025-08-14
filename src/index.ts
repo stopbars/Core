@@ -11,7 +11,6 @@ import { UserService } from './services/users';
 import { DatabaseContextFactory } from './services/database-context';
 import { withCache, CacheKeys } from './services/cache';
 import { ServicePool } from './services/service-pool';
-import { PostHogService } from './services/posthog';
 import { sanitizeContributionXml } from './services/xml-sanitizer';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
