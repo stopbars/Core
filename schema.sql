@@ -186,3 +186,15 @@ CREATE TABLE IF NOT EXISTS installer_releases (
 );
 CREATE INDEX IF NOT EXISTS idx_installer_releases_product ON installer_releases(product);
 CREATE INDEX IF NOT EXISTS idx_installer_releases_created_at ON installer_releases(created_at DESC);
+
+-- Contact messages table for public contact form submissions
+CREATE TABLE IF NOT EXISTS contact_messages (
+    id TEXT PRIMARY KEY, -- uuid
+    email TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    message TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_contact_messages_created_at ON contact_messages(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_contact_messages_ip_created ON contact_messages(ip_address, created_at DESC);

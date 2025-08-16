@@ -91,6 +91,78 @@
     }
   ],
   "paths": {
+    "/contact": {
+      "post": {
+        "summary": "Submit a contact form",
+        "tags": [
+          "Contact"
+        ],
+        "description": "Public endpoint to submit a contact/support message. Limited to 1 submission per 24 hours per IP.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email",
+                  "topic",
+                  "message"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "topic": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Message stored"
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "429": {
+            "description": "Rate limited (already submitted within 24h)"
+          }
+        }
+      },
+      "get": {
+        "summary": "List submitted contact messages",
+        "x-hidden": true,
+        "tags": [
+          "Contact",
+          "Staff"
+        ],
+        "description": "Returns all contact messages (newest first). Requires Product Manager or higher.",
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Messages returned"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
     "/connect": {
       "get": {
         "summary": "Establish a WebSocket for an airport",

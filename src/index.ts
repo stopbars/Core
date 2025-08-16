@@ -70,6 +70,7 @@ const app = new Hono<{
 		auth?: any;
 		vatsim?: any;
 		userService?: any;
+		clientIp?: string;
 	};
 }>();
 
@@ -122,6 +123,140 @@ app.use(
 		allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 	}),
 );
+
+// Extract client IP (best-effort) and attach to context
+app.use('*', async (c, next) => {
+	const cf = c.req.header('CF-Connecting-IP');
+	const real = c.req.header('X-Real-IP');
+	const fwdFor = c.req.header('X-Forwarded-For');
+	const forwarded = c.req.header('Forwarded');
+	let ip: string | undefined = cf || real;
+	if (!ip && fwdFor) {
+		ip = fwdFor.split(',')[0].trim();
+	}
+	if (!ip && forwarded) {
+		// Forwarded: for=1.2.3.4; proto=http; by=...
+		const match = forwarded.match(/for=([^;]+)/i);
+		if (match) ip = match[1].replace(/"/g, '');
+	}
+	c.set('clientIp', ip || '0.0.0.0');
+	await next();
+});
+
+/**
+ * @openapi
+ * /contact:
+ *   post:
+ *     summary: Submit a contact form
+ *     tags:
+ *       - Contact
+ *     description: Public endpoint to submit a contact/support message. Limited to 1 submission per 24 hours per IP.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, topic, message]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               topic:
+ *                 type: string
+ *               message:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Message stored
+ *       400:
+ *         description: Validation error
+ *       429:
+ *         description: Rate limited (already submitted within 24h)
+ */
+app.post('/contact', async (c) => {
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		let body: any;
+		try {
+			body = await c.req.json();
+		} catch {
+			return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 });
+		}
+		const email = typeof body.email === 'string' ? body.email.trim() : '';
+		const topic = typeof body.topic === 'string' ? body.topic.trim() : '';
+		const message = typeof body.message === 'string' ? body.message.trim() : '';
+		const ip = c.get('clientIp') || '0.0.0.0';
+
+		const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+		if (!email || !emailRegex.test(email)) {
+			return dbContext.jsonResponse({ error: 'Invalid email' }, { status: 400 });
+		}
+		if (!topic || topic.length < 3 || topic.length > 120) {
+			return dbContext.jsonResponse({ error: 'Invalid topic', message: 'topic must be 3-120 chars' }, { status: 400 });
+		}
+		if (!message || message.length < 5 || message.length > 4000) {
+			return dbContext.jsonResponse({ error: 'Invalid message', message: 'message must be 5-4000 chars' }, { status: 400 });
+		}
+
+		const contact = ServicePool.getContact(c.env);
+		const already = await contact.hasRecentSubmissionFromIp(ip, 24);
+		if (already) {
+			return dbContext.jsonResponse(
+				{ error: 'Rate limited', message: 'Only one submission per 24 hours from this IP' },
+				{ status: 429 },
+			);
+		}
+		const stored = await contact.createMessage(email, topic, message, ip);
+		return dbContext.jsonResponse({ success: true, id: stored.id, created_at: stored.created_at }, { status: 201 });
+	} finally {
+		dbContext.close();
+	}
+});
+
+/**
+ * @openapi
+ * /contact:
+ *   get:
+ *     summary: List submitted contact messages
+ *     x-hidden: true
+ *     tags:
+ *       - Contact
+ *       - Staff
+ *     description: Returns all contact messages (newest first). Requires Product Manager or higher.
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Messages returned
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+app.get('/contact', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const roles = ServicePool.getRoles(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('Unauthorized', { status: 401 });
+
+		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
+
+		const contact = ServicePool.getContact(c.env);
+		const messages = await contact.listMessages();
+		return dbContext.jsonResponse({ messages });
+	} finally {
+		dbContext.close();
+	}
+});
 
 /**
  * @openapi
@@ -1850,6 +1985,7 @@ const staffUsersApp = new Hono<{
 	Variables: {
 		user?: any;
 		userService?: any;
+		clientIp?: string;
 	};
 }>();
 
