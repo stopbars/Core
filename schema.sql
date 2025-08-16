@@ -194,7 +194,11 @@ CREATE TABLE IF NOT EXISTS contact_messages (
     topic TEXT NOT NULL,
     message TEXT NOT NULL,
     ip_address TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','handling','handled')),
+    handled_by TEXT,
+    handled_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_contact_messages_created_at ON contact_messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_contact_messages_ip_created ON contact_messages(ip_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_contact_messages_status ON contact_messages(status);

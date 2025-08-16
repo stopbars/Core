@@ -260,6 +260,129 @@ app.get('/contact', async (c) => {
 
 /**
  * @openapi
+ * /contact/{id}/status:
+ *   patch:
+ *     summary: Update contact message status
+ *     x-hidden: true
+ *     tags:
+ *       - Contact
+ *       - Staff
+ *     description: Set status to pending, handling, or handled. Requires Product Manager or higher.
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status]
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [pending, handling, handled]
+ *     responses:
+ *       200:
+ *         description: Updated message returned
+ *       400:
+ *         description: Invalid status
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Message not found
+ */
+app.patch('/contact/:id/status', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const id = c.req.param('id');
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		let body: any;
+		try { body = await c.req.json(); } catch { return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 }); }
+		const status = body?.status;
+		if (!['pending', 'handling', 'handled'].includes(status)) {
+			return dbContext.jsonResponse({ error: 'Invalid status' }, { status: 400 });
+		}
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const roles = ServicePool.getRoles(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('Unauthorized', { status: 401 });
+		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
+		const contact = ServicePool.getContact(c.env);
+		const existing = await contact.getMessage(id);
+		if (!existing) return dbContext.textResponse('Not found', { status: 404 });
+		const updated = await contact.updateStatus(id, status, user.vatsim_id);
+		return dbContext.jsonResponse({ message: updated });
+	} finally {
+		dbContext.close();
+	}
+});
+
+/**
+ * @openapi
+ * /contact/{id}:
+ *   delete:
+ *     summary: Delete a contact message
+ *     x-hidden: true
+ *     tags:
+ *       - Contact
+ *       - Staff
+ *     description: Permanently deletes a contact message. Requires Product Manager or higher.
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       204:
+ *         description: Deleted
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Not found
+ */
+app.delete('/contact/:id', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const id = c.req.param('id');
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const roles = ServicePool.getRoles(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('Unauthorized', { status: 401 });
+		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
+		const contact = ServicePool.getContact(c.env);
+		const existing = await contact.getMessage(id);
+		if (!existing) return dbContext.textResponse('Not found', { status: 404 });
+		await contact.deleteMessage(id);
+		return dbContext.textResponse('', { status: 204 });
+	} finally {
+		dbContext.close();
+	}
+});
+
+/**
+ * @openapi
  * /connect:
  *   get:
  *     summary: Establish a WebSocket for an airport

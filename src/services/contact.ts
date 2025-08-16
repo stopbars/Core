@@ -6,6 +6,9 @@ export interface ContactMessageRecord {
     topic: string;
     message: string;
     ip_address: string;
+    status: 'pending' | 'handling' | 'handled';
+    handled_by: string | null;
+    handled_at: string | null;
     created_at: string;
 }
 
@@ -18,7 +21,7 @@ export class ContactService {
     async createMessage(email: string, topic: string, message: string, ip: string): Promise<ContactMessageRecord> {
         const id = crypto.randomUUID();
         await this.dbSession.executeWrite(
-            `INSERT INTO contact_messages (id, email, topic, message, ip_address, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+            `INSERT INTO contact_messages (id, email, topic, message, ip_address, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'))`,
             [id, email, topic, message, ip],
         );
         const created = await this.getMessage(id);
@@ -28,7 +31,7 @@ export class ContactService {
 
     async getMessage(id: string): Promise<ContactMessageRecord | null> {
         const res = await this.dbSession.executeRead<ContactMessageRecord>(
-            `SELECT id, email, topic, message, ip_address, created_at FROM contact_messages WHERE id = ?`,
+            `SELECT id, email, topic, message, ip_address, status, handled_by, handled_at, created_at FROM contact_messages WHERE id = ?`,
             [id],
         );
         return res.results[0] || null;
@@ -36,10 +39,31 @@ export class ContactService {
 
     async listMessages(): Promise<ContactMessageRecord[]> {
         const res = await this.dbSession.executeRead<ContactMessageRecord>(
-            `SELECT id, email, topic, message, ip_address, created_at FROM contact_messages ORDER BY datetime(created_at) DESC`,
+            `SELECT id, email, topic, message, ip_address, status, handled_by, handled_at, created_at FROM contact_messages ORDER BY datetime(created_at) DESC`,
             [],
         );
         return res.results;
+    }
+
+    async updateStatus(id: string, status: 'pending' | 'handling' | 'handled', handlerVatsimId: string): Promise<ContactMessageRecord | null> {
+        // handled_by/handled_at only set when moving to handled, if returning to pending/handling clear handled_at but keep who last handled
+        if (status === 'handled') {
+            await this.dbSession.executeWrite(
+                `UPDATE contact_messages SET status = ?, handled_by = ?, handled_at = datetime('now') WHERE id = ?`,
+                [status, handlerVatsimId, id],
+            );
+        } else {
+            await this.dbSession.executeWrite(
+                `UPDATE contact_messages SET status = ?, handled_at = NULL WHERE id = ?`,
+                [status, id],
+            );
+        }
+        return this.getMessage(id);
+    }
+
+    async deleteMessage(id: string): Promise<boolean> {
+        const res = await this.dbSession.executeWrite(`DELETE FROM contact_messages WHERE id = ?`, [id]);
+        return !!res.success;
     }
 
     async hasRecentSubmissionFromIp(ip: string, withinHours = 24): Promise<boolean> {

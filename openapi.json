@@ -163,6 +163,112 @@
         }
       }
     },
+    "/contact/{id}/status": {
+      "patch": {
+        "summary": "Update contact message status",
+        "x-hidden": true,
+        "tags": [
+          "Contact",
+          "Staff"
+        ],
+        "description": "Set status to pending, handling, or handled. Requires Product Manager or higher.",
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "handling",
+                      "handled"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated message returned"
+          },
+          "400": {
+            "description": "Invalid status"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Message not found"
+          }
+        }
+      }
+    },
+    "/contact/{id}": {
+      "delete": {
+        "summary": "Delete a contact message",
+        "x-hidden": true,
+        "tags": [
+          "Contact",
+          "Staff"
+        ],
+        "description": "Permanently deletes a contact message. Requires Product Manager or higher.",
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/connect": {
       "get": {
         "summary": "Establish a WebSocket for an airport",
