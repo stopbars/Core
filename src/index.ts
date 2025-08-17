@@ -3509,7 +3509,7 @@ app.route('/euroscope', euroscopeApp);
  *     parameters:
  *       - in: query
  *         name: product
- *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin] }
+ *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET] }
  *     responses:
  *       200:
  *         description: Releases listed
@@ -3536,7 +3536,7 @@ app.get(
  *       - in: query
  *         name: product
  *         required: true
- *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin] }
+ *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET] }
  *     responses:
  *       200:
  *         description: Latest release returned
@@ -3549,7 +3549,9 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
 	const releasesService = ServicePool.getReleases(c.env);
 	const latest = await releasesService.getLatest(product);
 	if (!latest) return c.text('Not found', 404);
-	const downloadUrl = new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
+	const downloadUrl = product === 'SimConnect.NET'
+		? `https://www.nuget.org/packages/SimConnect.NET/${latest.version}`
+		: new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
 	const imageUrl = latest.image_url ? new URL(latest.image_url, c.req.url).toString() : undefined;
 	const { image_url: _omitImage, ...rest } = latest as any;
 	return c.json({ ...rest, downloadUrl, imageUrl });
@@ -3578,7 +3580,7 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
  *                 format: binary
  *               product:
  *                 type: string
- *                 enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin]
+ *                 enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET]
  *               version:
  *                 type: string
  *               changelog:
@@ -3587,6 +3589,9 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
  *                 type: string
  *                 format: binary
  *                 description: Optional promotional image (PNG/JPEG, max 5MB)
+ *     x-notes:
+ *       - Product "Installer" requires an .exe file upload.
+ *       - Product "SimConnect.NET" does not require a file upload (metadata + changelog only; version links to NuGet).
  *     responses:
  *       201:
  *         description: Release created
@@ -3599,8 +3604,6 @@ app.post('/releases/upload', async (c) => {
 	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
-
-	// Start remote VATSIM lookup early while we parse form data (minor latency win)
 	const vatsimUserPromise = vatsim.getUser(vatsimToken);
 
 	let formData: FormData;
@@ -3615,8 +3618,6 @@ app.post('/releases/upload', async (c) => {
 	const version = formData.get('version')?.toString();
 	const changelog = formData.get('changelog')?.toString();
 	const image = formData.get('image');
-
-	// Await user info only after fast local parsing work is done
 	let vatsimUser;
 	try {
 		vatsimUser = await vatsimUserPromise;
@@ -3628,21 +3629,49 @@ app.post('/releases/upload', async (c) => {
 	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
 	if (!isLeadDev) return c.text('Forbidden', 403);
 
-	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
 	if (!product || !version) return c.json({ error: 'product & version required' }, 400);
-	const MAX = 90 * 1024 * 1024;
-	if (file.size > MAX) return c.json({ error: 'File too large (90MB max)' }, 400);
+
+	const isSimConnect = product === 'SimConnect.NET';
+	const isInstallerExe = product === 'Installer';
+
+	if (!isSimConnect) {
+		// For all products except SimConnect.NET a file is required
+		if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
+		const MAX = 90 * 1024 * 1024;
+		if (file.size > MAX) return c.json({ error: 'File too large (90MB max)' }, 400);
+		if (isInstallerExe) {
+			// Enforce .exe extension for Installer product
+			const lower = file.name.toLowerCase();
+			if (!lower.endsWith('.exe')) return c.json({ error: 'Installer product must be a .exe file' }, 400);
+		}
+	}
+
+	if (isSimConnect && file && file instanceof File) {
+		return c.json({ error: 'SimConnect.NET releases do not accept file uploads' }, 400);
+	}
 	try {
 		const storage = ServicePool.getStorage(c.env);
-		const fileKey = `releases/${product}/${version}/${file.name}`;
-		const bytes = await file.arrayBuffer();
+		let fileKey: string;
+		let bytes: ArrayBuffer | undefined;
+		if (!isSimConnect) {
+			// File upload path for normal products
+			const uploadFile = file as File; // already validated
+			fileKey = `releases/${product}/${version}/${uploadFile.name}`;
+			bytes = await uploadFile.arrayBuffer();
+		} else {
+			// Sentinel key for external NuGet package (no bytes)
+			fileKey = `releases/${product}/${version}/EXTERNAL`;
+		}
 		let imageBytesPromise: Promise<ArrayBuffer> | undefined;
 		if (image && image instanceof File) {
 			imageBytesPromise = image.arrayBuffer();
 		}
 
-		const digest = await crypto.subtle.digest('SHA-256', bytes);
-		const sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+		let sha256 = 'external';
+		if (bytes) {
+			const digest = await crypto.subtle.digest('SHA-256', bytes);
+			sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+		}
 
 		// Validate image (after its bytes read started) before uploads
 		let imageUrl: string | undefined;
@@ -3664,26 +3693,32 @@ app.post('/releases/upload', async (c) => {
 			});
 			imageUrl = `https://dev-cdn.stopbars.com/${imageKey}`;
 		}
-		const fileUploadPromise = storage.uploadFile(fileKey, bytes, file.type || 'application/zip', {
-			uploadedBy: user.vatsim_id,
-			product,
-			version,
-			size: file.size.toString(),
-			sha256
-		});
-
-		await Promise.all([fileUploadPromise, imageUploadPromise].filter(Boolean));
+		if (!isSimConnect) {
+			const uploadFile = file as File;
+			const fileUploadPromise = storage.uploadFile(fileKey, bytes!, uploadFile.type || 'application/octet-stream', {
+				uploadedBy: user.vatsim_id,
+				product,
+				version,
+				size: uploadFile.size.toString(),
+				sha256
+			});
+			await Promise.all([fileUploadPromise, imageUploadPromise].filter(Boolean));
+		} else {
+			// Only image upload (if any) for external product
+			if (imageUploadPromise) await imageUploadPromise;
+		}
 		const releasesService = ServicePool.getReleases(c.env);
 		const release = await releasesService.createRelease({
 			product,
 			version,
 			fileKey,
-			fileSize: file.size,
+			fileSize: bytes ? (file as File).size : 0,
 			fileHash: sha256,
 			changelog,
 			imageUrl
 		});
-		return c.json({ success: true, release, downloadUrl: `https://dev-cdn.stopbars.com/${fileKey}`, imageUrl }, 201);
+		const downloadUrl = isSimConnect ? `https://www.nuget.org/packages/SimConnect.NET/${version}` : `https://dev-cdn.stopbars.com/${fileKey}`;
+		return c.json({ success: true, release, downloadUrl, imageUrl }, 201);
 	} catch (err) {
 		console.error('Release upload error', err);
 		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);

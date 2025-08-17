@@ -174,7 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_faqs_order ON faqs(order_position ASC);
 -- Installer releases table for distributable products
 CREATE TABLE IF NOT EXISTS installer_releases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product TEXT NOT NULL, -- Pilot-Client | vatSys-Plugin | EuroScope-Plugin
+    product TEXT NOT NULL, -- Pilot-Client | vatSys-Plugin | EuroScope-Plugin | Installer | SimConnect.NET (external NuGet, no binary stored)
     version TEXT NOT NULL,
     file_key TEXT NOT NULL,
     file_size INTEGER NOT NULL,

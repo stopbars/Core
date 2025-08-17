@@ -2150,7 +2150,9 @@
               "enum": [
                 "Pilot-Client",
                 "vatSys-Plugin",
-                "EuroScope-Plugin"
+                "EuroScope-Plugin",
+                "Installer",
+                "SimConnect.NET"
               ]
             }
           }
@@ -2178,7 +2180,9 @@
               "enum": [
                 "Pilot-Client",
                 "vatSys-Plugin",
-                "EuroScope-Plugin"
+                "EuroScope-Plugin",
+                "Installer",
+                "SimConnect.NET"
               ]
             }
           }
@@ -2226,7 +2230,9 @@
                     "enum": [
                       "Pilot-Client",
                       "vatSys-Plugin",
-                      "EuroScope-Plugin"
+                      "EuroScope-Plugin",
+                      "Installer",
+                      "SimConnect.NET"
                     ]
                   },
                   "version": {
@@ -2245,6 +2251,10 @@
             }
           }
         },
+        "x-notes": [
+          "Product \"Installer\" requires an .exe file upload.",
+          "Product \"SimConnect.NET\" does not require a file upload (metadata + changelog only; version links to NuGet)."
+        ],
         "responses": {
           "201": {
             "description": "Release created"

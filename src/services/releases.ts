@@ -1,7 +1,7 @@
 import { DatabaseSessionService } from './database-session';
 import { StorageService } from './storage';
 
-export type InstallerProduct = 'Pilot-Client' | 'vatSys-Plugin' | 'EuroScope-Plugin';
+export type InstallerProduct = 'Pilot-Client' | 'vatSys-Plugin' | 'EuroScope-Plugin' | 'Installer' | 'SimConnect.NET';
 export interface ReleaseRecord {
     id: number;
     product: InstallerProduct;

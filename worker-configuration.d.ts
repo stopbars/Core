@@ -3,11 +3,11 @@
 // Runtime types generated with workerd@1.20250803.0 2024-12-18 nodejs_compat
 declare namespace Cloudflare {
 	interface Env {
-		VATSIM_CLIENT_ID: '1562';
-		POSTHOG_HOST: 'https://eu.i.posthog.com';
+		VATSIM_CLIENT_ID: "1562";
+		POSTHOG_HOST: "https://eu.i.posthog.com";
 		VATSIM_CLIENT_SECRET: string;
 		AIRPORTDB_API_KEY: string;
-		BARS: DurableObjectNamespace<import('./src/index').BARS>;
+		BARS: DurableObjectNamespace<import("./src/index").BARS>;
 		BARS_STORAGE: R2Bucket;
 		DB: D1Database;
 	}
