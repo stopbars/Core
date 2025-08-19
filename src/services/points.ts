@@ -13,10 +13,12 @@ export class PointsService {
 		id: string;
 		airportId: string;
 	}>;
-	private stmtInsert: PreparedStatement<{
-		coordinates: string;
-		createdAt: string;
-	} & Omit<Point, 'coordinates' | 'createdAt' | 'updatedAt'>>;
+	private stmtInsert: PreparedStatement<
+		{
+			coordinates: string;
+			createdAt: string;
+		} & Omit<Point, 'coordinates' | 'createdAt' | 'updatedAt'>
+	>;
 	private stmtUpdate: PreparedStatement<{
 		id: string;
 		airportId: string;
@@ -49,7 +51,7 @@ export class PointsService {
 				type, name, coordinates, directionality, orientation, color, elevated, ihp
 				FROM points
 				WHERE id = ? AND airport_id = ?;`,
-			['id', 'airportId']
+			['id', 'airportId'],
 		);
 		this.stmtInsert = this.dbSession.prepare(
 			`INSERT
@@ -59,10 +61,20 @@ export class PointsService {
 				)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 			[
-				'id', 'airportId', 'type', 'name', 'coordinates', 'directionality',
-				'orientation', 'color', 'elevated', 'ihp', 'createdAt', 'createdAt',
-				'createdBy'
-			]
+				'id',
+				'airportId',
+				'type',
+				'name',
+				'coordinates',
+				'directionality',
+				'orientation',
+				'color',
+				'elevated',
+				'ihp',
+				'createdAt',
+				'createdAt',
+				'createdBy',
+			],
 		);
 		this.stmtUpdate = this.dbSession.prepare(
 			`UPDATE points
@@ -77,22 +89,12 @@ export class PointsService {
 					ihp            = ?,
 					updated_at     = CURRENT_TIMESTAMP
 				WHERE id = ? AND airport_id = ?;`,
-			[
-				'type', 'name', 'coordinates', 'directionality', 'orientation', 'color',
-				'elevated', 'ihp', 'id', 'airportId'
-			]
+			['type', 'name', 'coordinates', 'directionality', 'orientation', 'color', 'elevated', 'ihp', 'id', 'airportId'],
 		);
-		this.stmtDelete = this.dbSession.prepare(
-			'DELETE FROM points WHERE id = ? AND airport_id = ?;',
-			['id', 'airportId']
-		);
+		this.stmtDelete = this.dbSession.prepare('DELETE FROM points WHERE id = ? AND airport_id = ?;', ['id', 'airportId']);
 	}
 
-	async createPoint(
-		airportId: string,
-		userId: string,
-		point: PointData,
-	): Promise<Point> {
+	async createPoint(airportId: string, userId: string, point: PointData): Promise<Point> {
 		// Check if user has permission for this airport
 		const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, airportId);
 		if (!hasDivisionAccess) {
@@ -137,17 +139,15 @@ export class PointsService {
 				newPoint.createdAt,
 				newPoint.updatedAt,
 				newPoint.createdBy,
-			]
+			],
 		);
 
-		try { this.posthog?.track('Point Created', { airportId, userId, type: point.type }); } catch { }
+		try {
+			this.posthog?.track('Point Created', { airportId, userId, type: point.type });
+		} catch {}
 		return newPoint;
 	}
-	async updatePoint(
-		pointId: string,
-		userId: string,
-		updates: Partial<PointData>,
-	): Promise<Point> {
+	async updatePoint(pointId: string, userId: string, updates: Partial<PointData>): Promise<Point> {
 		// Get existing point
 		const point = await this.getPoint(pointId);
 		if (!point) {
@@ -165,10 +165,7 @@ export class PointsService {
 		this.validatePoint(mergedPoint);
 
 		// Define allowed fields for updates
-		const allowedFields = [
-			'type', 'name', 'coordinates', 'directionality',
-			'orientation', 'color', 'elevated', 'ihp'
-		];
+		const allowedFields = ['type', 'name', 'coordinates', 'directionality', 'orientation', 'color', 'elevated', 'ihp'];
 		const processedUpdates: Record<string, any> = {};
 		Object.entries(updates).forEach(([key, value]) => {
 			if (allowedFields.includes(key)) {
@@ -179,14 +176,14 @@ export class PointsService {
 			return this.getPoint(pointId) as Promise<Point>;
 		}
 		const fieldMappings: Record<string, string> = {
-			'type': 'type',
-			'name': 'name',
-			'coordinates': 'coordinates',
-			'directionality': 'directionality',
-			'orientation': 'orientation',
-			'color': 'color',
-			'elevated': 'elevated',
-			'ihp': 'ihp'
+			type: 'type',
+			name: 'name',
+			coordinates: 'coordinates',
+			directionality: 'directionality',
+			orientation: 'orientation',
+			color: 'color',
+			elevated: 'elevated',
+			ihp: 'ihp',
 		};
 
 		const updateFields = Object.keys(processedUpdates)
@@ -199,11 +196,18 @@ export class PointsService {
 			SET ${updateFields}, updated_at = ?
 			WHERE id = ?
 			`,
-			[...Object.values(processedUpdates), new Date().toISOString(), pointId]
+			[...Object.values(processedUpdates), new Date().toISOString(), pointId],
 		);
 
-		const finalPoint = await this.getPoint(pointId) as Point;
-		try { this.posthog?.track('Point Updated', { pointId, airportId: finalPoint.airportId, userId, fields: Object.keys(processedUpdates) }); } catch { }
+		const finalPoint = (await this.getPoint(pointId)) as Point;
+		try {
+			this.posthog?.track('Point Updated', {
+				pointId,
+				airportId: finalPoint.airportId,
+				userId,
+				fields: Object.keys(processedUpdates),
+			});
+		} catch {}
 		return finalPoint;
 	}
 
@@ -221,25 +225,19 @@ export class PointsService {
 		}
 
 		// Delete from database
-		await this.dbSession.executeWrite(
-			'DELETE FROM points WHERE id = ?',
-			[pointId]
-		);
-		try { this.posthog?.track('Point Deleted', { pointId, airportId: point.airportId, userId }); } catch { }
+		await this.dbSession.executeWrite('DELETE FROM points WHERE id = ?', [pointId]);
+		try {
+			this.posthog?.track('Point Deleted', { pointId, airportId: point.airportId, userId });
+		} catch {}
 	}
 
-	async applyChangeset(
-		airportId: string,
-		userId: string,
-		changeset: PointChangeset
-	): Promise<Point[]> {
+	async applyChangeset(airportId: string, userId: string, changeset: PointChangeset): Promise<Point[]> {
 		const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, airportId);
 		if (!hasDivisionAccess) {
 			throw new Error('User does not have permission to apply this changeset');
 		}
 
-		const selects = Object.keys(changeset.modify ?? {})
-			.map((id) => this.stmtSelect.bindAll({ id, airportId }));
+		const selects = Object.keys(changeset.modify ?? {}).map((id) => this.stmtSelect.bindAll({ id, airportId }));
 		const modifiedPoints = (await this.dbSession.executeBatch(selects))
 			.map((result) => {
 				if (!result.results || result.results.length === 0) {
@@ -268,16 +266,17 @@ export class PointsService {
 				createdAt: now,
 				updatedAt: now,
 				createdBy: userId,
-			}))
+			})),
 		);
 
-		const inserts = createdPoints
-			.map((point) => this.stmtInsert.bindAll({
+		const inserts = createdPoints.map((point) =>
+			this.stmtInsert.bindAll({
 				...point,
-				coordinates: JSON.stringify(point.coordinates)
-			}));
-		const updates = modifiedPoints
-			.map((point) => this.stmtUpdate.bindAll({
+				coordinates: JSON.stringify(point.coordinates),
+			}),
+		);
+		const updates = modifiedPoints.map((point) =>
+			this.stmtUpdate.bindAll({
 				id: point.id,
 				airportId,
 				type: point.type ?? null,
@@ -288,30 +287,32 @@ export class PointsService {
 				color: point.color ?? null,
 				elevated: point.elevated ?? null,
 				ihp: point.ihp ?? null,
-			}));
-		const deletes = (changeset.delete ?? [])
-			.map((id) => this.stmtDelete.bindAll({ id, airportId }));
+			}),
+		);
+		const deletes = (changeset.delete ?? []).map((id) => this.stmtDelete.bindAll({ id, airportId }));
 
 		await this.dbSession.executeBatch(inserts.concat(updates).concat(deletes));
 
-		try { this.posthog?.track('Points Changeset Applied', { airportId, userId, created: createdPoints.length, modified: modifiedPoints.length, deleted: (changeset.delete ?? []).length }); } catch { }
+		try {
+			this.posthog?.track('Points Changeset Applied', {
+				airportId,
+				userId,
+				created: createdPoints.length,
+				modified: modifiedPoints.length,
+				deleted: (changeset.delete ?? []).length,
+			});
+		} catch {}
 		return createdPoints;
 	}
 
 	async getPoint(pointId: string): Promise<Point | null> {
-		const result = await this.dbSession.executeRead<any>(
-			'SELECT * FROM points WHERE id = ?',
-			[pointId]
-		);
+		const result = await this.dbSession.executeRead<any>('SELECT * FROM points WHERE id = ?', [pointId]);
 		if (!result.results[0]) return null;
 		return this.mapPointFromDb(result.results[0]);
 	}
 
 	async getAirportPoints(airportId: string): Promise<Point[]> {
-		const results = await this.dbSession.executeRead<any>(
-			'SELECT * FROM points WHERE airport_id = ?',
-			[airportId]
-		);
+		const results = await this.dbSession.executeRead<any>('SELECT * FROM points WHERE airport_id = ?', [airportId]);
 		return results.results.map(this.mapPointFromDb);
 	}
 

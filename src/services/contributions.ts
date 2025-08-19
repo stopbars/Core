@@ -5,6 +5,7 @@ import { SupportService } from './support';
 import { PolygonService } from './polygons';
 import { ServicePool } from './service-pool';
 import { PostHogService } from './posthog';
+import { sanitizeContributionXml } from './xml-sanitizer';
 
 export interface Contribution {
 	id: string;
@@ -22,7 +23,6 @@ export interface Contribution {
 
 export interface ContributionSubmission {
 	userId: string;
-	userDisplayName?: string;
 	airportIcao: string;
 	packageName: string;
 	submittedXml: string;
@@ -79,15 +79,47 @@ export class ContributionService {
 			throw new Error(`Airport with ICAO ${submission.airportIcao} not found`);
 		}
 
-		const trimmedXml = submission.submittedXml.trim();
-		if (!trimmedXml || !trimmedXml.startsWith('<?xml')) {
-			throw new Error('Invalid XML format');
+		// Sanitize & validate submitted XML to mitigate injection / XXE attempts
+		let trimmedXml: string;
+		try {
+			trimmedXml = sanitizeContributionXml(submission.submittedXml);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : 'Invalid XML';
+			throw new Error(msg);
+		}
+
+		try {
+			const latestApproved = await this.getLatestApprovedContributionForAirportPackage(
+				submission.airportIcao,
+				submission.packageName,
+			);
+			if (latestApproved) {
+				const normalize = (xml: string) =>
+					xml
+						.trim()
+						.replace(/\r/g, '')
+						.replace(/[\t ]+/g, ' ')
+						.replace(/>\s+</g, '><');
+				if (normalize(trimmedXml) === normalize(latestApproved.submittedXml)) {
+					throw new Error('Duplicate of current approved XML for this airport & package');
+				}
+			}
+		} catch (e) {
+			if (e instanceof Error && e.message.startsWith('Duplicate')) {
+				// Re-throw duplicate error directly
+				throw e;
+			}
 		}
 
 		const id = crypto.randomUUID();
 		const now = new Date().toISOString();
 
-		await this.updateUserDisplayNameForAllContributions(submission.userId, submission.userDisplayName || null);
+		// Get authoritative display name from users table (ignore any client-provided value)
+		const userDisplayResult = await this.dbSession.executeRead<{ display_name: string | null }>(
+			'SELECT display_name FROM users WHERE vatsim_id = ?',
+			[submission.userId],
+		);
+		const authoritativeDisplayName = userDisplayResult.results[0]?.display_name || null;
 		await this.dbSession.executeWrite(
 			`
 	  INSERT INTO contributions (
@@ -99,21 +131,20 @@ export class ContributionService {
 			[
 				id,
 				submission.userId,
-				submission.userDisplayName || null,
+				authoritativeDisplayName,
 				submission.airportIcao,
 				submission.packageName,
 				trimmedXml,
 				submission.notes || null,
 				now,
 				'pending',
-			]
+			],
 		);
-
 
 		const contribution: Contribution = {
 			id,
 			userId: submission.userId,
-			userDisplayName: submission.userDisplayName || null,
+			userDisplayName: authoritativeDisplayName,
 			airportIcao: submission.airportIcao,
 			packageName: submission.packageName,
 			submittedXml: trimmedXml,
@@ -123,7 +154,13 @@ export class ContributionService {
 			rejectionReason: null,
 			decisionDate: null,
 		};
-		try { this.posthog?.track('Contribution Submitted', { airport: submission.airportIcao, packageName: submission.packageName, userId: submission.userId }); } catch { }
+		try {
+			this.posthog?.track('Contribution Submitted', {
+				airport: submission.airportIcao,
+				packageName: submission.packageName,
+				userId: submission.userId,
+			});
+		} catch { }
 		return contribution;
 	}
 	async getContribution(id: string): Promise<Contribution | null> {
@@ -138,7 +175,35 @@ export class ContributionService {
 	  FROM contributions
 	  WHERE id = ?
 	`,
-			[id]
+			[id],
+		);
+		return result.results[0] || null;
+	}
+
+	/**
+	 * Get the most recently approved contribution for an airport & package (by decision_date)
+	 * Case-insensitive package name match.
+	 * @param airportIcao ICAO code
+	 * @param packageName Package name (case-insensitive)
+	 */
+	async getLatestApprovedContributionForAirportPackage(
+		airportIcao: string,
+		packageName: string,
+	): Promise<Contribution | null> {
+		const result = await this.dbSession.executeRead<Contribution>(
+			`
+			SELECT 
+				id, user_id as userId, user_display_name as userDisplayName,
+				airport_icao as airportIcao, package_name as packageName,
+				submitted_xml as submittedXml, notes,
+				submission_date as submissionDate, status,
+				rejection_reason as rejectionReason, decision_date as decisionDate
+			FROM contributions
+			WHERE airport_icao = ? AND lower(package_name) = lower(?) AND status = 'approved'
+			ORDER BY datetime(decision_date) DESC
+			LIMIT 1
+			`,
+			[airportIcao, packageName],
 		);
 		return result.results[0] || null;
 	}
@@ -170,10 +235,7 @@ export class ContributionService {
 
 		const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 		const countQuery = `SELECT COUNT(*) as total FROM contributions ${whereClause}`;
-		const countResult = await this.dbSession.executeRead<{ total: number }>(
-			countQuery,
-			params
-		);
+		const countResult = await this.dbSession.executeRead<{ total: number }>(countQuery, params);
 		const total = countResult.results[0]?.total || 0;
 
 		const offset = (page - 1) * limit;
@@ -192,10 +254,7 @@ export class ContributionService {
 	  LIMIT ? OFFSET ?
 	`;
 
-		const contributionsResult = await this.dbSession.executeRead<Contribution>(
-			query,
-			[...params, limit, offset]
-		);
+		const contributionsResult = await this.dbSession.executeRead<Contribution>(query, [...params, limit, offset]);
 		return {
 			contributions: contributionsResult.results,
 			total,
@@ -206,10 +265,7 @@ export class ContributionService {
 	}
 
 	async processDecision(id: string, userId: string, decision: ContributionDecision): Promise<Contribution> {
-		const userInfoResult = await this.dbSession.executeRead<{ id: number }>(
-			'SELECT id FROM users WHERE vatsim_id = ?',
-			[userId]
-		);
+		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [userId]);
 		const userInfo = userInfoResult.results[0];
 
 		if (!userInfo) {
@@ -249,12 +305,7 @@ export class ContributionService {
 		AND status = 'approved' 
 		AND id != ?
 	  `,
-				[
-					now,
-					contribution.airportIcao,
-					packageName,
-					id,
-				]
+				[now, contribution.airportIcao, packageName, id],
 			);
 
 			// Generate and upload the XML files to CDN
@@ -304,9 +355,8 @@ export class ContributionService {
 	  SET status = ?, rejection_reason = ?, decision_date = ?, package_name = ?
 	  WHERE id = ?
 	`,
-			[status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id]
+			[status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id],
 		);
-
 
 		const updated: Contribution = {
 			...contribution,
@@ -338,25 +388,22 @@ export class ContributionService {
 		const oneWeekAgoStr = oneWeekAgo.toISOString();
 
 		// Get counts for different statuses
-		const totalResult = await this.dbSession.executeRead<{ count: number }>(
-			'SELECT COUNT(*) as count FROM contributions',
-			[]
-		);
+		const totalResult = await this.dbSession.executeRead<{ count: number }>('SELECT COUNT(*) as count FROM contributions', []);
 		const pendingResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['pending']
+			['pending'],
 		);
 		const approvedResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['approved']
+			['approved'],
 		);
 		const rejectedResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['rejected']
+			['rejected'],
 		);
 		const lastWeekResult = await this.dbSession.executeRead<{ count: number }>(
 			'SELECT COUNT(*) as count FROM contributions WHERE submission_date > ?',
-			[oneWeekAgoStr]
+			[oneWeekAgoStr],
 		);
 		return {
 			total: totalResult.results[0]?.count || 0,
@@ -367,10 +414,7 @@ export class ContributionService {
 		};
 	}
 	async deleteContribution(id: string, userId: string): Promise<boolean> {
-		const userInfoResult = await this.dbSession.executeRead<{ id: number }>(
-			'SELECT id FROM users WHERE vatsim_id = ?',
-			[userId]
-		);
+		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [userId]);
 		const userInfo = userInfoResult.results[0];
 		if (!userInfo) {
 			throw new Error('User not found');
@@ -379,11 +423,12 @@ export class ContributionService {
 		if (!hasPermission) {
 			throw new Error('Not authorized to delete contributions');
 		}
-		const result = await this.dbSession.executeWrite(
-			'DELETE FROM contributions WHERE id = ?',
-			[id]
-		);
-		if (result.success) { try { this.posthog?.track('Contribution Deleted', { id, userId }); } catch { } }
+		const result = await this.dbSession.executeWrite('DELETE FROM contributions WHERE id = ?', [id]);
+		if (result.success) {
+			try {
+				this.posthog?.track('Contribution Deleted', { id, userId });
+			} catch { }
+		}
 		return result.success;
 	}
 	/**
@@ -431,7 +476,7 @@ export class ContributionService {
 	  FROM contributions
 	  WHERE user_id = ?
 	`,
-			[userId]
+			[userId],
 		);
 		const summaryRow = summaryResult.results[0] || { total: 0, approved: 0, pending: 0, rejected: 0 };
 		const summary = {
@@ -470,10 +515,7 @@ export class ContributionService {
 	  LIMIT ? OFFSET ?
 	`;
 
-		const contributionsResult = await this.dbSession.executeRead<Contribution>(
-			query,
-			[...params, limit, offset]
-		);
+		const contributionsResult = await this.dbSession.executeRead<Contribution>(query, [...params, limit, offset]);
 		return {
 			contributions: contributionsResult.results,
 			summary,
@@ -503,9 +545,7 @@ export class ContributionService {
 		const results = await this.dbSession.executeRead<{
 			packageName: string;
 			count: number;
-		}>(
-			query
-		);
+		}>(query);
 		return results.results;
 	}
 	async getContributionLeaderboard(): Promise<
@@ -515,51 +555,20 @@ export class ContributionService {
 		}>
 	> {
 		const query = `
-	  SELECT 
-		user_id, 
-		user_display_name,
-		COUNT(*) as contribution_count
-	  FROM contributions
-	  WHERE status = 'approved'
-	  GROUP BY user_id
+	  SELECT c.user_id, u.display_name, COUNT(*) as contribution_count
+	  FROM contributions c
+	  LEFT JOIN users u ON u.vatsim_id = c.user_id
+	  WHERE c.status = 'approved'
+	  GROUP BY c.user_id
 	  ORDER BY contribution_count DESC
 	  LIMIT 5
 	`;
-
 		const results = await this.dbSession.executeRead<{
 			user_id: string;
-			user_display_name: string | null;
+			display_name: string | null;
 			contribution_count: number;
-		}>(
-			query
-		);
-		return results.results.map((item) => ({
-			name: item.user_display_name || item.user_id,
-			count: item.contribution_count,
-		}));
+		}>(query);
+		return results.results.map((r) => ({ name: r.display_name || r.user_id, count: r.contribution_count }));
 	}
-
-	private async updateUserDisplayNameForAllContributions(userId: string, displayName: string | null): Promise<void> {
-		await this.dbSession.executeWrite(
-			`
-	  UPDATE contributions
-	  SET user_display_name = ?
-	  WHERE user_id = ?
-	`,
-			[displayName, userId]
-		);
-	}
-	async getUserDisplayName(userId: string): Promise<string | null> {
-		const result = await this.dbSession.executeRead<{ userDisplayName: string | null }>(
-			`
-	  SELECT user_display_name as userDisplayName
-	  FROM contributions
-	  WHERE user_id = ?
-	  ORDER BY submission_date DESC
-	  LIMIT 1
-	`,
-			[userId]
-		);
-		return result.results[0]?.userDisplayName || null;
-	}
+	// Removed legacy user display name update + lookup helpers; display names now sourced directly from users table
 }

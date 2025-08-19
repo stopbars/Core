@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS users (
  api_key TEXT NOT NULL,
  last_api_key_regen DATETIME DEFAULT CURRENT_TIMESTAMP,
  email TEXT NOT NULL,
+ full_name TEXT, -- Stored full name from VATSIM (first + last)
+ display_mode INTEGER NOT NULL DEFAULT 0,
+ display_name TEXT, -- Cached computed display name
  created_at TEXT NOT NULL,
  last_login TEXT NOT NULL
 );
@@ -101,7 +104,6 @@ CREATE TABLE IF NOT EXISTS active_objects (
 CREATE TABLE IF NOT EXISTS contributions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    user_display_name TEXT,
     airport_icao TEXT NOT NULL,
     package_name TEXT NOT NULL,
     submitted_xml TEXT NOT NULL,
@@ -156,3 +158,47 @@ CREATE INDEX IF NOT EXISTS idx_division_airports_icao ON division_airports(icao)
 
 -- Points table composite index
 CREATE INDEX IF NOT EXISTS idx_points_airport_type ON points(airport_id, type);
+
+-- FAQs table for public frequently asked questions
+CREATE TABLE IF NOT EXISTS faqs (
+    id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    order_position INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_faqs_order ON faqs(order_position ASC);
+
+-- Installer releases table for distributable products
+CREATE TABLE IF NOT EXISTS installer_releases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product TEXT NOT NULL, -- Pilot-Client | vatSys-Plugin | EuroScope-Plugin | Installer | SimConnect.NET (external NuGet, no binary stored)
+    version TEXT NOT NULL,
+    file_key TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    file_hash TEXT NOT NULL, -- sha256 hex
+    changelog TEXT,
+    image_url TEXT, -- Optional promotional image
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(product, version)
+);
+CREATE INDEX IF NOT EXISTS idx_installer_releases_product ON installer_releases(product);
+CREATE INDEX IF NOT EXISTS idx_installer_releases_created_at ON installer_releases(created_at DESC);
+
+-- Contact messages table for public contact form submissions
+CREATE TABLE IF NOT EXISTS contact_messages (
+    id TEXT PRIMARY KEY, -- uuid
+    email TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    message TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','handling','handled')),
+    handled_by TEXT,
+    handled_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_contact_messages_created_at ON contact_messages(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_contact_messages_ip_created ON contact_messages(ip_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_contact_messages_status ON contact_messages(status);

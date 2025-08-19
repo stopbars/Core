@@ -50,7 +50,7 @@
 			"description": "Creation and management of lighting/navigation point data."
 		},
 		{
-			"name": "Support",
+			"name": "Generation",
 			"description": "Utilities for generating light support / BARS XML artifacts."
 		},
 		{
@@ -70,6 +70,10 @@
 			"description": "File storage, upload, listing, and deletion via CDN-backed storage."
 		},
 		{
+			"name": "FAQ",
+			"description": "Frequently Asked Questions (FAQ) management and retrieval."
+		},
+		{
 			"name": "EuroScope",
 			"description": "EuroScope sector file upload, listing, and permission checks by ICAO."
 		},
@@ -87,6 +91,163 @@
 		}
 	],
 	"paths": {
+		"/contact": {
+			"post": {
+				"summary": "Submit a contact form",
+				"tags": ["Contact"],
+				"description": "Public endpoint to submit a contact/support message. Limited to 1 submission per 24 hours per IP.",
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["email", "topic", "message"],
+								"properties": {
+									"email": {
+										"type": "string",
+										"format": "email"
+									},
+									"topic": {
+										"type": "string"
+									},
+									"message": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Message stored"
+					},
+					"400": {
+						"description": "Validation error"
+					},
+					"429": {
+						"description": "Rate limited (already submitted within 24h)"
+					}
+				}
+			},
+			"get": {
+				"summary": "List submitted contact messages",
+				"x-hidden": true,
+				"tags": ["Contact", "Staff"],
+				"description": "Returns all contact messages (newest first). Requires Product Manager or higher.",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Messages returned"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/contact/{id}/status": {
+			"patch": {
+				"summary": "Update contact message status",
+				"x-hidden": true,
+				"tags": ["Contact", "Staff"],
+				"description": "Set status to pending, handling, or handled. Requires Product Manager or higher.",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["status"],
+								"properties": {
+									"status": {
+										"type": "string",
+										"enum": ["pending", "handling", "handled"]
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Updated message returned"
+					},
+					"400": {
+						"description": "Invalid status"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Message not found"
+					}
+				}
+			}
+		},
+		"/contact/{id}": {
+			"delete": {
+				"summary": "Delete a contact message",
+				"x-hidden": true,
+				"tags": ["Contact", "Staff"],
+				"description": "Permanently deletes a contact message. Requires Product Manager or higher.",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Deleted"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			}
+		},
 		"/connect": {
 			"get": {
 				"summary": "Establish a WebSocket for an airport",
@@ -201,6 +362,40 @@
 				}
 			}
 		},
+		"/auth/display-mode": {
+			"put": {
+				"summary": "Update preferred display name mode",
+				"tags": ["Auth"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["mode"],
+								"properties": {
+									"mode": {
+										"type": "integer",
+										"enum": [0, 1, 2],
+										"description": "0=First,1=First LastInitial,2=CID"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Updated"
+					}
+				}
+			}
+		},
 		"/auth/regenerate-api-key": {
 			"post": {
 				"summary": "Regenerate API key",
@@ -306,6 +501,44 @@
 				}
 			}
 		},
+		"/airports/nearest": {
+			"get": {
+				"summary": "Find nearest airport",
+				"tags": ["Airports"],
+				"description": "Returns the nearest airport to a given latitude/longitude. Results are cached in 5NM buckets for high performance.",
+				"parameters": [
+					{
+						"in": "query",
+						"name": "lat",
+						"required": true,
+						"description": "Latitude in decimal degrees (-90 to 90)",
+						"schema": {
+							"type": "number"
+						}
+					},
+					{
+						"in": "query",
+						"name": "lon",
+						"required": true,
+						"description": "Longitude in decimal degrees (-180 to 180)",
+						"schema": {
+							"type": "number"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Nearest airport returned"
+					},
+					"400": {
+						"description": "Invalid coordinates"
+					},
+					"404": {
+						"description": "No airport found"
+					}
+				}
+			}
+		},
 		"/divisions": {
 			"get": {
 				"summary": "List all divisions",
@@ -362,23 +595,85 @@
 				}
 			}
 		},
-		"/divisions/user": {
-			"get": {
-				"summary": "Get divisions for current user",
+		"/divisions/{id}": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update division name",
 				"tags": ["Divisions"],
 				"security": [
 					{
 						"VatsimToken": []
 					}
 				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["name"],
+								"properties": {
+									"name": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
 				"responses": {
 					"200": {
-						"description": "User divisions returned"
+						"description": "Division updated"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Division not found"
 					}
 				}
-			}
-		},
-		"/divisions/{id}": {
+			},
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete a division",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Division deleted"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Division not found"
+					}
+				}
+			},
 			"get": {
 				"summary": "Get division details",
 				"tags": ["Divisions"],
@@ -403,6 +698,22 @@
 					},
 					"404": {
 						"description": "Division not found"
+					}
+				}
+			}
+		},
+		"/divisions/user": {
+			"get": {
+				"summary": "Get divisions for current user",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "User divisions returned"
 					}
 				}
 			}
@@ -879,7 +1190,7 @@
 		"/supports/generate": {
 			"post": {
 				"summary": "Generate Light Supports and BARS XML",
-				"tags": ["Support"],
+				"tags": ["Generation"],
 				"description": "Upload raw XML and generate both light supports XML and processed BARS XML.",
 				"requestBody": {
 					"required": true,
@@ -1070,6 +1381,94 @@
 				}
 			}
 		},
+		"/staff/manage": {
+			"get": {
+				"x-hidden": true,
+				"summary": "List staff members",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Staff listed"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			},
+			"post": {
+				"x-hidden": true,
+				"summary": "Add or update a staff member",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["vatsimId", "role"],
+								"properties": {
+									"vatsimId": {
+										"type": "string"
+									},
+									"role": {
+										"type": "string",
+										"enum": ["LEAD_DEVELOPER", "PRODUCT_MANAGER"]
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Staff added/updated"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/staff/manage/{vatsimId}": {
+			"delete": {
+				"x-hidden": true,
+				"summary": "Remove staff member",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "vatsimId",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Staff removed"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
 		"/contributions": {
 			"get": {
 				"summary": "List contributions",
@@ -1119,9 +1518,6 @@
 								"type": "object",
 								"required": ["airportIcao", "packageName", "submittedXml"],
 								"properties": {
-									"userDisplayName": {
-										"type": "string"
-									},
 									"airportIcao": {
 										"type": "string"
 									},
@@ -1294,18 +1690,34 @@
 				}
 			}
 		},
-		"/contributions/user/display-name": {
+		"/maps/{icao}/packages/{package}/latest": {
 			"get": {
-				"summary": "Get display name for authenticated user",
-				"tags": ["Contributions"],
-				"security": [
+				"summary": "Get latest approved BARS map XML (raw content) for an airport & package",
+				"tags": ["Generation"],
+				"parameters": [
 					{
-						"VatsimToken": []
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "path",
+						"name": "package",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
 					"200": {
-						"description": "Display name returned"
+						"description": "BARS XML document returned inline (application/xml)"
+					},
+					"404": {
+						"description": "Not found"
 					}
 				}
 			}
@@ -1548,6 +1960,165 @@
 				}
 			}
 		},
+		"/releases": {
+			"get": {
+				"summary": "List all product releases (optionally filtered)",
+				"tags": ["Installer"],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "product",
+						"schema": {
+							"type": "string",
+							"enum": ["Pilot-Client", "vatSys-Plugin", "EuroScope-Plugin", "Installer", "SimConnect.NET"]
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Releases listed"
+					}
+				}
+			}
+		},
+		"/releases/latest": {
+			"get": {
+				"summary": "Get latest release for a product",
+				"tags": ["Installer"],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "product",
+						"required": true,
+						"schema": {
+							"type": "string",
+							"enum": ["Pilot-Client", "vatSys-Plugin", "EuroScope-Plugin", "Installer", "SimConnect.NET"]
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Latest release returned"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			}
+		},
+		"/releases/upload": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Create a new product release (lead developer only)",
+				"tags": ["Installer"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"multipart/form-data": {
+							"schema": {
+								"type": "object",
+								"required": ["file", "product", "version"],
+								"properties": {
+									"file": {
+										"type": "string",
+										"format": "binary"
+									},
+									"product": {
+										"type": "string",
+										"enum": ["Pilot-Client", "vatSys-Plugin", "EuroScope-Plugin", "Installer", "SimConnect.NET"]
+									},
+									"version": {
+										"type": "string"
+									},
+									"changelog": {
+										"type": "string"
+									},
+									"image": {
+										"type": "string",
+										"format": "binary",
+										"description": "Optional promotional image (PNG/JPEG, max 5MB)"
+									}
+								}
+							}
+						}
+					}
+				},
+				"x-notes": [
+					"Product \"Installer\" requires an .exe file upload.",
+					"Product \"SimConnect.NET\" does not require a file upload (metadata + changelog only; version links to NuGet)."
+				],
+				"responses": {
+					"201": {
+						"description": "Release created"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/releases/{id}/changelog": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update changelog content for a release",
+				"description": "Update only the changelog text of an existing release record.",
+				"tags": ["Installer"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["changelog"],
+								"properties": {
+									"changelog": {
+										"type": "string",
+										"maxLength": 20000
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Changelog updated"
+					},
+					"400": {
+						"description": "Validation error"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Release not found"
+					}
+				}
+			}
+		},
 		"/purge-cache": {
 			"post": {
 				"x-hidden": true,
@@ -1594,6 +2165,177 @@
 				"responses": {
 					"200": {
 						"description": "Contributors returned"
+					}
+				}
+			}
+		},
+		"/faqs": {
+			"get": {
+				"summary": "List public FAQs",
+				"tags": ["FAQ"],
+				"responses": {
+					"200": {
+						"description": "FAQs returned"
+					}
+				}
+			}
+		},
+		"/staff/faqs": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Create FAQ",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["question", "answer", "order_position"],
+								"properties": {
+									"question": {
+										"type": "string"
+									},
+									"answer": {
+										"type": "string"
+									},
+									"order_position": {
+										"type": "integer"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Created"
+					}
+				}
+			}
+		},
+		"/staff/faqs/{id}": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update FAQ",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"question": {
+										"type": "string"
+									},
+									"answer": {
+										"type": "string"
+									},
+									"order_position": {
+										"type": "integer"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Updated"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			},
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete FAQ",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Deletion result"
+					}
+				}
+			}
+		},
+		"/staff/faqs/reorder": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Bulk reorder FAQs",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["updates"],
+								"properties": {
+									"updates": {
+										"type": "array",
+										"items": {
+											"type": "object",
+											"required": ["id", "order_position"],
+											"properties": {
+												"id": {
+													"type": "string"
+												},
+												"order_position": {
+													"type": "integer"
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Reordered"
 					}
 				}
 			}

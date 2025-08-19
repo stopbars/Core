@@ -5,14 +5,13 @@ import { PointChangeset, PointData } from './types';
 import { VatsimService } from './services/vatsim';
 import { AuthService } from './services/auth';
 import { StaffRole } from './services/roles';
+import { InstallerProduct } from './services/releases';
 import { Connection } from './network/connection';
 import { UserService } from './services/users';
 import { DatabaseContextFactory } from './services/database-context';
 import { withCache, CacheKeys } from './services/cache';
 import { ServicePool } from './services/service-pool';
-import { PostHogService } from './services/posthog';
-
-// Shared point regex
+import { sanitizeContributionXml } from './services/xml-sanitizer';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
 interface CreateDivisionPayload {
@@ -34,7 +33,6 @@ interface ApproveAirportPayload {
 }
 
 interface ContributionSubmissionPayload {
-	userDisplayName?: string;
 	airportIcao: string;
 	packageName: string;
 	submittedXml: string;
@@ -72,24 +70,25 @@ const app = new Hono<{
 		auth?: any;
 		vatsim?: any;
 		userService?: any;
+		clientIp?: string;
 	};
 }>();
 
-// Analytics middleware (PostHog) – skip clearly useless noise (OPTIONS, favicon, configured ignores)
 app.use('*', async (c, next) => {
 	const start = Date.now();
 	await next();
 	try {
 		const url = new URL(c.req.url);
 		const path = url.pathname;
-		// Basic noise filters
-		if (c.req.method === 'OPTIONS') return; // CORS preflight
+		if (c.req.method === 'OPTIONS') return;
 		if (path === '/favicon.ico') return;
 		if (path.includes('/health')) return;
-		// Env-driven ignore list: comma separated exact paths or prefix* globs
 		const ignoreRaw = (c.env as any).ANALYTICS_IGNORE as string | undefined;
 		if (ignoreRaw) {
-			const ignores = ignoreRaw.split(',').map(s => s.trim()).filter(Boolean);
+			const ignores = ignoreRaw
+				.split(',')
+				.map((s) => s.trim())
+				.filter(Boolean);
 			for (const pattern of ignores) {
 				if (pattern.endsWith('*')) {
 					const prefix = pattern.slice(0, -1);
@@ -100,26 +99,288 @@ app.use('*', async (c, next) => {
 			}
 		}
 		const posthog = ServicePool.getPostHog(c.env);
-		posthog.track('API Request', {
-			path,
-			method: c.req.method,
-			status: c.res?.status ?? 0,
-			duration_ms: Date.now() - start,
-		}, 'anonymous');
+		posthog.track(
+			'API Request',
+			{
+				path,
+				method: c.req.method,
+				status: c.res?.status ?? 0,
+				duration_ms: Date.now() - start,
+			},
+			'anonymous',
+		);
 	} catch (err) {
 		// eslint-disable-next-line no-console
 		console.warn('[Analytics] failed', err instanceof Error ? err.message : err);
 	}
 });
 
-// Add CORS middleware
-app.use('*', cors({
-	origin: '*',
-	allowHeaders: ['Content-Type', 'Authorization', 'X-Vatsim-Token', 'Upgrade', 'X-Client-Type'],
-	allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-}));
+app.use(
+	'*',
+	cors({
+		origin: '*',
+		allowHeaders: ['Content-Type', 'Authorization', 'X-Vatsim-Token', 'Upgrade', 'X-Client-Type'],
+		allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+	}),
+);
 
-// Connect endpoint
+// Extract client IP (best-effort) and attach to context
+app.use('*', async (c, next) => {
+	const cf = c.req.header('CF-Connecting-IP');
+	const real = c.req.header('X-Real-IP');
+	const fwdFor = c.req.header('X-Forwarded-For');
+	const forwarded = c.req.header('Forwarded');
+	let ip: string | undefined = cf || real;
+	if (!ip && fwdFor) {
+		ip = fwdFor.split(',')[0].trim();
+	}
+	if (!ip && forwarded) {
+		// Forwarded: for=1.2.3.4; proto=http; by=...
+		const match = forwarded.match(/for=([^;]+)/i);
+		if (match) ip = match[1].replace(/"/g, '');
+	}
+	c.set('clientIp', ip || '0.0.0.0');
+	await next();
+});
+
+/**
+ * @openapi
+ * /contact:
+ *   post:
+ *     summary: Submit a contact form
+ *     tags:
+ *       - Contact
+ *     description: Public endpoint to submit a contact/support message. Limited to 1 submission per 24 hours per IP.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, topic, message]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               topic:
+ *                 type: string
+ *               message:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Message stored
+ *       400:
+ *         description: Validation error
+ *       429:
+ *         description: Rate limited (already submitted within 24h)
+ */
+app.post('/contact', async (c) => {
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		let body: any;
+		try {
+			body = await c.req.json();
+		} catch {
+			return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 });
+		}
+		const email = typeof body.email === 'string' ? body.email.trim() : '';
+		const topic = typeof body.topic === 'string' ? body.topic.trim() : '';
+		const message = typeof body.message === 'string' ? body.message.trim() : '';
+		const ip = c.get('clientIp') || '0.0.0.0';
+
+		const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+		if (!email || !emailRegex.test(email)) {
+			return dbContext.jsonResponse({ error: 'Invalid email' }, { status: 400 });
+		}
+		if (!topic || topic.length < 3 || topic.length > 120) {
+			return dbContext.jsonResponse({ error: 'Invalid topic', message: 'topic must be 3-120 chars' }, { status: 400 });
+		}
+		if (!message || message.length < 5 || message.length > 4000) {
+			return dbContext.jsonResponse({ error: 'Invalid message', message: 'message must be 5-4000 chars' }, { status: 400 });
+		}
+
+		const contact = ServicePool.getContact(c.env);
+		const already = await contact.hasRecentSubmissionFromIp(ip, 24);
+		if (already) {
+			return dbContext.jsonResponse(
+				{ error: 'Rate limited', message: 'Only one submission per 24 hours from this IP' },
+				{ status: 429 },
+			);
+		}
+		const stored = await contact.createMessage(email, topic, message, ip);
+		return dbContext.jsonResponse({ success: true, id: stored.id, created_at: stored.created_at }, { status: 201 });
+	} finally {
+		dbContext.close();
+	}
+});
+
+/**
+ * @openapi
+ * /contact:
+ *   get:
+ *     summary: List submitted contact messages
+ *     x-hidden: true
+ *     tags:
+ *       - Contact
+ *       - Staff
+ *     description: Returns all contact messages (newest first). Requires Product Manager or higher.
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Messages returned
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+app.get('/contact', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const roles = ServicePool.getRoles(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('Unauthorized', { status: 401 });
+
+		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
+
+		const contact = ServicePool.getContact(c.env);
+		const messages = await contact.listMessages();
+		return dbContext.jsonResponse({ messages });
+	} finally {
+		dbContext.close();
+	}
+});
+
+/**
+ * @openapi
+ * /contact/{id}/status:
+ *   patch:
+ *     summary: Update contact message status
+ *     x-hidden: true
+ *     tags:
+ *       - Contact
+ *       - Staff
+ *     description: Set status to pending, handling, or handled. Requires Product Manager or higher.
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status]
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [pending, handling, handled]
+ *     responses:
+ *       200:
+ *         description: Updated message returned
+ *       400:
+ *         description: Invalid status
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Message not found
+ */
+app.patch('/contact/:id/status', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const id = c.req.param('id');
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		let body: any;
+		try { body = await c.req.json(); } catch { return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 }); }
+		const status = body?.status;
+		if (!['pending', 'handling', 'handled'].includes(status)) {
+			return dbContext.jsonResponse({ error: 'Invalid status' }, { status: 400 });
+		}
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const roles = ServicePool.getRoles(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('Unauthorized', { status: 401 });
+		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
+		const contact = ServicePool.getContact(c.env);
+		const existing = await contact.getMessage(id);
+		if (!existing) return dbContext.textResponse('Not found', { status: 404 });
+		const updated = await contact.updateStatus(id, status, user.vatsim_id);
+		return dbContext.jsonResponse({ message: updated });
+	} finally {
+		dbContext.close();
+	}
+});
+
+/**
+ * @openapi
+ * /contact/{id}:
+ *   delete:
+ *     summary: Delete a contact message
+ *     x-hidden: true
+ *     tags:
+ *       - Contact
+ *       - Staff
+ *     description: Permanently deletes a contact message. Requires Product Manager or higher.
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       204:
+ *         description: Deleted
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Not found
+ */
+app.delete('/contact/:id', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const id = c.req.param('id');
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const roles = ServicePool.getRoles(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('Unauthorized', { status: 401 });
+		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
+		const contact = ServicePool.getContact(c.env);
+		const existing = await contact.getMessage(id);
+		if (!existing) return dbContext.textResponse('Not found', { status: 404 });
+		await contact.deleteMessage(id);
+		return dbContext.textResponse('', { status: 204 });
+	} finally {
+		dbContext.close();
+	}
+});
+
 /**
  * @openapi
  * /connect:
@@ -159,9 +420,12 @@ app.use('*', cors({
 app.get('/connect', async (c) => {
 	const upgradeHeader = c.req.header('Upgrade');
 	if (upgradeHeader !== 'websocket') {
-		return c.json({
-			message: 'This endpoint is for WebSocket connections only. Use a WebSocket client to test.',
-		}, 400);
+		return c.json(
+			{
+				message: 'This endpoint is for WebSocket connections only. Use a WebSocket client to test.',
+			},
+			400,
+		);
 	}
 
 	const airportId = c.req.query('airport');
@@ -214,9 +478,12 @@ app.get('/connect', async (c) => {
 app.get('/state', async (c) => {
 	const airport = c.req.query('airport');
 	if (!airport) {
-		return c.json({
-			error: 'Airport parameter required',
-		}, 400);
+		return c.json(
+			{
+				error: 'Airport parameter required',
+			},
+			400,
+		);
 	}
 
 	// Create database context for this request with bookmark handling
@@ -228,7 +495,7 @@ app.get('/state', async (c) => {
 			await dbContext.db.executeWrite("DELETE FROM active_objects WHERE last_updated <= datetime('now', '-2 day')");
 
 			const activeObjectsResult = await dbContext.db.executeRead<any>(
-				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')"
+				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')",
 			);
 
 			const allStates = await Promise.all(
@@ -275,9 +542,12 @@ app.get('/state', async (c) => {
 			const obj = c.env.BARS.get(id);
 
 			if (airport.length !== 4) {
-				return dbContext.jsonResponse({
-					error: 'Invalid airport ICAO',
-				}, { status: 400 });
+				return dbContext.jsonResponse(
+					{
+						error: 'Invalid airport ICAO',
+					},
+					{ status: 400 },
+				);
 			}
 
 			const stateRequest = new Request(`https://internal/state?airport=${airport}`, {
@@ -360,21 +630,100 @@ app.get('/auth/account', async (c) => {
 		const auth = ServicePool.getAuth(c.env);
 
 		const vatsimUser = await vatsim.getUser(vatsimToken);
-		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		let user = await auth.getUserByVatsimId(vatsimUser.id);
 		if (!user) {
 			return dbContext.textResponse('User not found', { status: 404 });
 		}
+		// Backfill full_name if missing locally but available from VATSIM
+		if ((!user.full_name || user.full_name.trim() === '') && (vatsimUser.first_name || vatsimUser.last_name)) {
+			const newFullName = [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ').trim();
+			if (newFullName) {
+				try {
+					await auth.updateFullName(user.id, newFullName);
+				} catch {
+					/* ignore */
+				}
+				const refreshed = await auth.getUserByVatsimId(vatsimUser.id);
+				if (refreshed) user = refreshed;
+			}
+		}
 
 		return dbContext.jsonResponse({
-			...user,
+			id: user.id,
+			vatsim_id: user.vatsim_id,
 			email: vatsimUser.email,
+			api_key: user.api_key,
+			full_name: user.full_name || null,
+			display_mode: user.display_mode ?? 0,
+			display_name: user.display_name || auth.computeDisplayName(user, vatsimUser),
+			created_at: user.created_at,
+			last_login: user.last_login,
 		});
 	} finally {
 		dbContext.close();
 	}
 });
 
-// Regenerate API key
+/**
+ * @openapi
+ * /auth/display-mode:
+ *   put:
+ *     summary: Update preferred display name mode
+ *     tags:
+ *       - Auth
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [mode]
+ *             properties:
+ *               mode:
+ *                 type: integer
+ *                 enum: [0,1,2]
+ *                 description: 0=First,1=First LastInitial,2=CID
+ *     responses:
+ *       200:
+ *         description: Updated
+ */
+app.put('/auth/display-mode', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	let body: any;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
+
+	const rawMode = body?.mode;
+	const mode = Number(rawMode);
+	if (!Number.isInteger(mode) || ![0, 1, 2].includes(mode)) {
+		return c.json({ error: 'Invalid mode', message: 'mode must be integer 0,1,2' }, 400);
+	}
+
+	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+	try {
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return dbContext.textResponse('User not found', { status: 404 });
+		await auth.updateDisplayMode(user.id, mode);
+		return dbContext.jsonResponse({ mode });
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Unknown error';
+		const status = msg.includes('Invalid display mode') ? 400 : 500;
+		return dbContext.jsonResponse({ error: 'Failed to update display mode', message: msg }, { status });
+	} finally {
+		dbContext.close();
+	}
+});
+
 /**
  * @openapi
  * /auth/regenerate-api-key:
@@ -418,7 +767,7 @@ app.post('/auth/regenerate-api-key', async (c) => {
 		// Check when the user last regenerated their API key using session-aware query
 		const lastRegenerationResult = await dbContext.db.executeRead<{ last_api_key_regen: string }>(
 			'SELECT last_api_key_regen FROM users WHERE id = ?',
-			[user.id]
+			[user.id],
 		);
 		const lastRegeneration = lastRegenerationResult.results[0];
 
@@ -435,11 +784,14 @@ app.post('/auth/regenerate-api-key', async (c) => {
 				const remainingHours = Math.floor(remainingMs / (60 * 60 * 1000));
 				const remainingMinutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
 
-				return dbContext.jsonResponse({
-					error: 'Rate limited',
-					message: `You can only regenerate your API key once every 24 hours. Please try again in ${remainingHours} hour${remainingHours !== 1 ? 's' : ''}${remainingMinutes > 0 ? ` and ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}` : ''}.`,
-					retryAfter: Math.ceil(remainingMs / 1000),
-				}, { status: 429 });
+				return dbContext.jsonResponse(
+					{
+						error: 'Rate limited',
+						message: `You can only regenerate your API key once every 24 hours. Please try again in ${remainingHours} hour${remainingHours !== 1 ? 's' : ''}${remainingMinutes > 0 ? ` and ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}` : ''}.`,
+						retryAfter: Math.ceil(remainingMs / 1000),
+					},
+					{ status: 429 },
+				);
 			}
 		}
 
@@ -447,26 +799,25 @@ app.post('/auth/regenerate-api-key', async (c) => {
 		const newApiKey = await auth.regenerateApiKey(user.id);
 
 		// Update the last regeneration timestamp using session-aware write
-		await dbContext.db.executeWrite(
-			"UPDATE users SET last_api_key_regen = datetime('now') WHERE id = ?",
-			[user.id]
-		);
+		await dbContext.db.executeWrite("UPDATE users SET last_api_key_regen = datetime('now') WHERE id = ?", [user.id]);
 
 		return dbContext.jsonResponse({
 			success: true,
 			apiKey: newApiKey,
 		});
 	} catch (error) {
-		return dbContext.jsonResponse({
-			error: 'Failed to regenerate API key',
-			message: error instanceof Error ? error.message : 'Unknown error',
-		}, { status: 500 });
+		return dbContext.jsonResponse(
+			{
+				error: 'Failed to regenerate API key',
+				message: error instanceof Error ? error.message : 'Unknown error',
+			},
+			{ status: 500 },
+		);
 	} finally {
 		dbContext.close();
 	}
 });
 
-// Delete account
 /**
  * @openapi
  * /auth/delete:
@@ -505,7 +856,6 @@ app.delete('/auth/delete', async (c) => {
 	}
 });
 
-// Check if staff
 /**
  * @openapi
  * /auth/is-staff:
@@ -522,33 +872,30 @@ app.delete('/auth/delete', async (c) => {
  *       401:
  *         description: Unauthorized
  */
-app.get('/auth/is-staff',
-	withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'),
-	async (c) => {
-		const authHeader = c.req.header('Authorization');
-		if (!authHeader) {
-			return c.text('Unauthorized', 401);
-		}
+app.get('/auth/is-staff', withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'), async (c) => {
+	const authHeader = c.req.header('Authorization');
+	if (!authHeader) {
+		return c.text('Unauthorized', 401);
+	}
 
-		const token = authHeader.replace('Bearer ', '');
+	const token = authHeader.replace('Bearer ', '');
 
-		const vatsim = ServicePool.getVatsim(c.env);
-		const auth = ServicePool.getAuth(c.env);
-		const roles = ServicePool.getRoles(c.env);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 
-		const vatsimUser = await vatsim.getUser(token);
-		const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const vatsimUser = await vatsim.getUser(token);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
 
-		if (!user) {
-			return c.text('Unauthorized', 401);
-		}
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
 
-		const isStaff = await roles.isStaff(user.id);
-		const role = await roles.getUserRole(user.id);
-		return c.json({ isStaff, role });
-	});
+	const isStaff = await roles.isStaff(user.id);
+	const role = await roles.getUserRole(user.id);
+	return c.json({ isStaff, role });
+});
 
-// Airports endpoint
 /**
  * @openapi
  * /airports:
@@ -577,7 +924,8 @@ app.get('/auth/is-staff',
  *       404:
  *         description: Airport not found
  */
-app.get('/airports',
+app.get(
+	'/airports',
 	withCache(CacheKeys.fromUrl, 31536000, 'airports'), // Cache for 1 year because airports data doesn't change ever :P
 	async (c) => {
 		const airports = ServicePool.getAirport(c.env);
@@ -611,10 +959,76 @@ app.get('/airports',
 		} catch (error) {
 			return c.json({ error: 'Failed to fetch airport data' }, 500);
 		}
-	}
+	},
 );
 
-// Divisions routes
+/**
+ * @openapi
+ * /airports/nearest:
+ *   get:
+ *     summary: Find nearest airport
+ *     tags:
+ *       - Airports
+ *     description: Returns the nearest airport to a given latitude/longitude. Results are cached in 5NM buckets for high performance.
+ *     parameters:
+ *       - in: query
+ *         name: lat
+ *         required: true
+ *         description: Latitude in decimal degrees (-90 to 90)
+ *         schema: { type: number }
+ *       - in: query
+ *         name: lon
+ *         required: true
+ *         description: Longitude in decimal degrees (-180 to 180)
+ *         schema: { type: number }
+ *     responses:
+ *       200:
+ *         description: Nearest airport returned
+ *       400:
+ *         description: Invalid coordinates
+ *       404:
+ *         description: No airport found
+ */
+app.get(
+	'/airports/nearest',
+	withCache(
+		(req) => {
+			// Bucket cache key by ~5NM (~9.26km). 1 degree lat ~111km => bucket size deg ≈ 9.26/111 ≈ 0.083
+			const url = new URL(req.url);
+			const lat = parseFloat(url.searchParams.get('lat') || '0');
+			const lon = parseFloat(url.searchParams.get('lon') || '0');
+			const bucketDeg = 0.083; // ~5NM
+			const bucketLat = Math.round(lat / bucketDeg);
+			const bucketLon = Math.round(lon / bucketDeg);
+			return `/airports/nearest/${bucketLat}_${bucketLon}`;
+		},
+		600,
+		'airports',
+	),
+	async (c) => {
+		const latStr = c.req.query('lat');
+		const lonStr = c.req.query('lon');
+
+		if (!latStr || !lonStr) {
+			return c.text('Missing lat/lon', 400);
+		}
+		const lat = parseFloat(latStr);
+		const lon = parseFloat(lonStr);
+		if (Number.isNaN(lat) || Number.isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+			return c.text('Invalid lat/lon', 400);
+		}
+
+		try {
+			const airports = ServicePool.getAirport(c.env);
+			const nearest = await airports.getNearestAirport(lat, lon);
+			if (!nearest) return c.text('No airport found', 404);
+			return c.json(nearest);
+		} catch (err) {
+			return c.json({ error: 'Failed to find nearest airport' }, 500);
+		}
+	},
+);
+
 const divisionsApp = new Hono<{
 	Bindings: Env;
 	Variables: {
@@ -625,7 +1039,6 @@ const divisionsApp = new Hono<{
 	};
 }>();
 
-// Middleware to get authenticated user for divisions
 divisionsApp.use('*', async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -649,7 +1062,6 @@ divisionsApp.use('*', async (c, next) => {
 	await next();
 });
 
-// GET /divisions - List all divisions
 /**
  * @openapi
  * /divisions:
@@ -671,7 +1083,6 @@ divisionsApp.get('/', async (c) => {
 	return c.json(allDivisions);
 });
 
-// POST /divisions - Create new division (requires lead_developer role)
 /**
  * @openapi
  * /divisions:
@@ -710,12 +1121,102 @@ divisionsApp.post('/', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
-	const { name, headVatsimId } = await c.req.json() as CreateDivisionPayload;
+	const { name, headVatsimId } = (await c.req.json()) as CreateDivisionPayload;
 	const division = await divisions.createDivision(name, headVatsimId);
 	return c.json(division);
 });
 
-// GET /divisions/user - Get user's divisions
+/**
+ * @openapi
+ * /divisions/{id}:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update division name
+ *     tags:
+ *       - Divisions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Division updated
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Division not found
+ */
+divisionsApp.put('/:id', async (c) => {
+	const user = c.get('user');
+	const roles = ServicePool.getRoles(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
+	const id = parseInt(c.req.param('id'));
+
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) return c.text('Forbidden', 403);
+
+	const existing = await divisions.getDivision(id);
+	if (!existing) return c.text('Division not found', 404);
+
+	const body = (await c.req.json()) as { name: string };
+	if (!body.name || !body.name.trim()) return c.text('Invalid name', 400);
+
+	const updated = await divisions.updateDivisionName(id, body.name.trim());
+	return c.json(updated);
+});
+
+/**
+ * @openapi
+ * /divisions/{id}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Delete a division
+ *     tags:
+ *       - Divisions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       204:
+ *         description: Division deleted
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Division not found
+ */
+divisionsApp.delete('/:id', async (c) => {
+	const user = c.get('user');
+	const roles = ServicePool.getRoles(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
+	const id = parseInt(c.req.param('id'));
+
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) return c.text('Forbidden', 403);
+
+	const existing = await divisions.getDivision(id);
+	if (!existing) return c.text('Division not found', 404);
+
+	await divisions.deleteDivision(id);
+	return c.body(null, 204);
+});
+
 /**
  * @openapi
  * /divisions/user:
@@ -729,17 +1230,14 @@ divisionsApp.post('/', async (c) => {
  *       200:
  *         description: User divisions returned
  */
-divisionsApp.get('/user',
-	withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'),
-	async (c) => {
-		const vatsimUser = c.get('vatsimUser');
-		const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/user', withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'), async (c) => {
+	const vatsimUser = c.get('vatsimUser');
+	const divisions = ServicePool.getDivisions(c.env);
 
-		const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
-		return c.json(userDivisions);
-	});
+	const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
+	return c.json(userDivisions);
+});
 
-// GET /divisions/:id - Get division details
 /**
  * @openapi
  * /divisions/{id}:
@@ -760,21 +1258,18 @@ divisionsApp.get('/user',
  *       404:
  *         description: Division not found
  */
-divisionsApp.get('/:id',
-	withCache(CacheKeys.fromParams('id'), 2592000, 'divisions'),
-	async (c) => {
-		const divisionId = parseInt(c.req.param('id'));
-		const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/:id', withCache(CacheKeys.fromParams('id'), 2592000, 'divisions'), async (c) => {
+	const divisionId = parseInt(c.req.param('id'));
+	const divisions = ServicePool.getDivisions(c.env);
 
-		const division = await divisions.getDivision(divisionId);
-		if (!division) {
-			return c.text('Division not found', 404);
-		}
+	const division = await divisions.getDivision(divisionId);
+	if (!division) {
+		return c.text('Division not found', 404);
+	}
 
-		return c.json(division);
-	});
+	return c.json(division);
+});
 
-// GET /divisions/:id/members - List division members
 /**
  * @openapi
  * /divisions/{id}/members:
@@ -809,7 +1304,6 @@ divisionsApp.get('/:id/members', async (c) => {
 	return c.json(members);
 });
 
-// POST /divisions/:id/members - Add member (requires nav_head role)
 /**
  * @openapi
  * /divisions/{id}/members:
@@ -859,12 +1353,11 @@ divisionsApp.post('/:id/members', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
-	const { vatsimId, role } = await c.req.json() as AddMemberPayload;
+	const { vatsimId, role } = (await c.req.json()) as AddMemberPayload;
 	const member = await divisions.addMember(divisionId, vatsimId, role);
 	return c.json(member);
 });
 
-// DELETE /divisions/:id/members/:vatsimId - Remove member (requires nav_head role)
 /**
  * @openapi
  * /divisions/{id}/members/{vatsimId}:
@@ -916,7 +1409,6 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 	return c.body(null, 204);
 });
 
-// GET /divisions/:id/airports - List division airports
 /**
  * @openapi
  * /divisions/{id}/airports:
@@ -937,23 +1429,20 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
  *       404:
  *         description: Division not found
  */
-divisionsApp.get('/:id/airports',
-	withCache(CacheKeys.fromParams('id'), 600, 'divisions'),
-	async (c) => {
-		const divisionId = parseInt(c.req.param('id'));
-		const divisions = ServicePool.getDivisions(c.env);
+divisionsApp.get('/:id/airports', withCache(CacheKeys.fromParams('id'), 600, 'divisions'), async (c) => {
+	const divisionId = parseInt(c.req.param('id'));
+	const divisions = ServicePool.getDivisions(c.env);
 
-		// Verify division exists
-		const division = await divisions.getDivision(divisionId);
-		if (!division) {
-			return c.text('Division not found', 404);
-		}
+	// Verify division exists
+	const division = await divisions.getDivision(divisionId);
+	if (!division) {
+		return c.text('Division not found', 404);
+	}
 
-		const airports = await divisions.getDivisionAirports(divisionId);
-		return c.json(airports);
-	});
+	const airports = await divisions.getDivisionAirports(divisionId);
+	return c.json(airports);
+});
 
-// POST /divisions/:id/airports - Request airport addition (requires division membership)
 /**
  * @openapi
  * /divisions/{id}/airports:
@@ -996,7 +1485,7 @@ divisionsApp.post('/:id/airports', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
-	const { icao } = await c.req.json() as RequestAirportPayload;
+	const { icao } = (await c.req.json()) as RequestAirportPayload;
 	const airport = await divisions.requestAirport(divisionId, icao, vatsimUser.id);
 	return c.json(airport);
 });
@@ -1056,7 +1545,7 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
-	const { approved } = await c.req.json() as ApproveAirportPayload;
+	const { approved } = (await c.req.json()) as ApproveAirportPayload;
 	const airport = await divisions.approveAirport(airportId, vatsimUser.id, approved);
 	return c.json(airport);
 });
@@ -1082,7 +1571,8 @@ app.route('/divisions', divisionsApp);
  *       400:
  *         description: Invalid ICAO
  */
-app.get('/airports/:icao/points',
+app.get(
+	'/airports/:icao/points',
 	withCache(CacheKeys.fromUrl, 600, 'airports'), // 1296000 - For after beta
 	async (c) => {
 		const airportId = c.req.param('icao');
@@ -1096,7 +1586,8 @@ app.get('/airports/:icao/points',
 
 		const airportPoints = await points.getAirportPoints(airportId);
 		return c.json(airportPoints);
-	});
+	},
+);
 
 /**
  * @openapi
@@ -1148,7 +1639,7 @@ app.post('/airports/:icao/points', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const pointData = await c.req.json() as PointData;
+	const pointData = (await c.req.json()) as PointData;
 	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
 	return c.json(newPoint, 201);
 });
@@ -1202,7 +1693,7 @@ app.post('/airports/:icao/points/batch', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const changeset = await c.req.json() as PointChangeset;
+	const changeset = (await c.req.json()) as PointChangeset;
 	const newPoints = await points.applyChangeset(airportId, user.vatsim_id, changeset);
 	return c.json(newPoints, 201);
 });
@@ -1265,7 +1756,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	const updates = await c.req.json() as Partial<PointData>;
+	const updates = (await c.req.json()) as Partial<PointData>;
 	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
 	return c.json(updatedPoint);
 });
@@ -1331,7 +1822,6 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	}
 });
 
-// Get single point by ID
 /**
  * @openapi
  * /points/{id}:
@@ -1350,25 +1840,23 @@ app.delete('/airports/:icao/points/:id', async (c) => {
  *       404:
  *         description: Not found
  */
-app.get('/points/:id',
-	withCache(CacheKeys.fromUrl, 3600, 'points'),
-	async (c) => {
-		const pointId = c.req.param('id');
+app.get('/points/:id', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
+	const pointId = c.req.param('id');
 
-		// Validate point ID format (alphanumeric, dash, underscore)
-		if (!pointId.match(POINT_ID_REGEX)) {
-			return c.text('Invalid point ID format', 400);
-		}
+	// Validate point ID format (alphanumeric, dash, underscore)
+	if (!pointId.match(POINT_ID_REGEX)) {
+		return c.text('Invalid point ID format', 400);
+	}
 
-		const points = ServicePool.getPoints(c.env);
-		const point = await points.getPoint(pointId);
+	const points = ServicePool.getPoints(c.env);
+	const point = await points.getPoint(pointId);
 
-		if (!point) {
-			return c.text('Point not found', 404);
-		}
+	if (!point) {
+		return c.text('Point not found', 404);
+	}
 
-		return c.json(point);
-	});
+	return c.json(point);
+});
 
 // Get multiple points by IDs (batch endpoint)
 /**
@@ -1390,72 +1878,81 @@ app.get('/points/:id',
  *       400:
  *         description: Validation error
  */
-app.get('/points',
-	withCache(CacheKeys.fromUrl, 3600, 'points'),
-	async (c) => {
-		const ids = c.req.query('ids');
+app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
+	const ids = c.req.query('ids');
 
-		if (!ids) {
-			return c.json({
+	if (!ids) {
+		return c.json(
+			{
 				error: 'Missing ids query parameter',
-				message: 'Provide comma-separated point IDs: /points?ids=id1,id2,id3'
-			}, 400);
-		}
+				message: 'Provide comma-separated point IDs: /points?ids=id1,id2,id3',
+			},
+			400,
+		);
+	}
 
-		// Parse and validate point IDs
-		const pointIds = ids.split(',')
-			.map(id => id.trim())
-			.filter(id => id.length > 0);
+	// Parse and validate point IDs
+	const pointIds = ids
+		.split(',')
+		.map((id) => id.trim())
+		.filter((id) => id.length > 0);
 
-		if (pointIds.length === 0) {
-			return c.json({
-				error: 'No valid point IDs provided'
-			}, 400);
-		}
+	if (pointIds.length === 0) {
+		return c.json(
+			{
+				error: 'No valid point IDs provided',
+			},
+			400,
+		);
+	}
 
-		if (pointIds.length > 100) {
-			return c.json({
+	if (pointIds.length > 100) {
+		return c.json(
+			{
 				error: 'Too many point IDs requested',
-				message: 'Maximum 100 points can be requested at once'
-			}, 400);
-		}
+				message: 'Maximum 100 points can be requested at once',
+			},
+			400,
+		);
+	}
 
-
-		const invalidIds = pointIds.filter(id => !id.match(POINT_ID_REGEX));
-		if (invalidIds.length > 0) {
-			return c.json({
+	const invalidIds = pointIds.filter((id) => !id.match(POINT_ID_REGEX));
+	if (invalidIds.length > 0) {
+		return c.json(
+			{
 				error: 'Invalid point ID format',
-				invalidIds
-			}, 400);
-		}
+				invalidIds,
+			},
+			400,
+		);
+	}
 
-		const points = ServicePool.getPoints(c.env);
+	const points = ServicePool.getPoints(c.env);
 
-		// Fetch all points in parallel
-		const pointPromises = pointIds.map(id => points.getPoint(id));
-		const pointResults = await Promise.all(pointPromises);
+	// Fetch all points in parallel
+	const pointPromises = pointIds.map((id) => points.getPoint(id));
+	const pointResults = await Promise.all(pointPromises);
 
-		// Filter out null results and create response
-		const foundPoints = pointResults.filter(point => point !== null);
-		const foundIds = foundPoints.map(point => point!.id);
-		const notFoundIds = pointIds.filter(id => !foundIds.includes(id));
+	// Filter out null results and create response
+	const foundPoints = pointResults.filter((point) => point !== null);
+	const foundIds = foundPoints.map((point) => point!.id);
+	const notFoundIds = pointIds.filter((id) => !foundIds.includes(id));
 
-		return c.json({
-			points: foundPoints,
-			requested: pointIds.length,
-			found: foundPoints.length,
-			notFound: notFoundIds.length > 0 ? notFoundIds : undefined
-		});
+	return c.json({
+		points: foundPoints,
+		requested: pointIds.length,
+		found: foundPoints.length,
+		notFound: notFoundIds.length > 0 ? notFoundIds : undefined,
 	});
+});
 
-// Light Support endpoints
 /**
  * @openapi
  * /supports/generate:
  *   post:
  *     summary: Generate Light Supports and BARS XML
  *     tags:
- *       - Support
+ *       - Generation
  *     description: Upload raw XML and generate both light supports XML and processed BARS XML.
  *     requestBody:
  *       required: true
@@ -1483,41 +1980,42 @@ app.post('/supports/generate', async (c) => {
 		const icao = formData.get('icao')?.toString();
 
 		if (!xmlFile || !(xmlFile instanceof File)) {
-			return c.json({
-				error: 'XML file is required',
-			}, 400);
+			return c.json({ error: 'XML file is required' }, 400);
 		}
-
 		if (!icao) {
-			return c.json({
-				error: 'ICAO code is required',
-			}, 400);
+			return c.json({ error: 'ICAO code is required' }, 400);
 		}
 
-		const xmlContent = await xmlFile.text();
+		const MAX_XML_BYTES = 200_000;
+		if (xmlFile.size > MAX_XML_BYTES) {
+			return c.json({ error: `XML file too large (>${MAX_XML_BYTES} bytes)` }, 400);
+		}
+
+		const rawXml = await xmlFile.text();
+
+		let sanitized: string;
+		try {
+			sanitized = sanitizeContributionXml(rawXml, { maxBytes: MAX_XML_BYTES });
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : 'Invalid XML';
+			return c.json({ error: msg }, 400);
+		}
+
 		const supportService = ServicePool.getSupport(c.env);
 		const polygonService = ServicePool.getPolygons(c.env);
 
-		// Generate both XML files in parallel
 		const [supportsXml, barsXml] = await Promise.all([
-			supportService.generateLightSupportsXML(xmlContent, icao),
-			polygonService.processBarsXML(xmlContent, icao),
+			supportService.generateLightSupportsXML(sanitized, icao),
+			polygonService.processBarsXML(sanitized, icao),
 		]);
 
-		// Return both XMLs as a JSON response
-		return c.json({
-			supportsXml,
-			barsXml,
-		});
+		return c.json({ supportsXml, barsXml });
 	} catch (error) {
 		console.error('Error generating XMLs:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Unknown error generating XMLs',
-		}, 500);
+		return c.json({ error: error instanceof Error ? error.message : 'Unknown error generating XMLs' }, 500);
 	}
 });
 
-// NOTAM endpoints
 /**
  * @openapi
  * /notam:
@@ -1529,7 +2027,8 @@ app.post('/supports/generate', async (c) => {
  *       200:
  *         description: Current NOTAM returned
  */
-app.get('/notam',
+app.get(
+	'/notam',
 	withCache(() => 'global-notam', 900, 'notam'),
 	async (c) => {
 		const notamService = ServicePool.getNotam(c.env);
@@ -1538,7 +2037,7 @@ app.get('/notam',
 			notam: notamData?.content || null,
 			type: notamData?.type || 'warning',
 		});
-	}
+	},
 );
 
 /**
@@ -1593,7 +2092,7 @@ app.put('/notam', async (c) => {
 	}
 
 	// Update the NOTAM
-	const { content, type } = await c.req.json() as { content: string; type?: string };
+	const { content, type } = (await c.req.json()) as { content: string; type?: string };
 	const notamService = ServicePool.getNotam(c.env);
 	const updated = await notamService.updateGlobalNotam(content, type, user.vatsim_id);
 
@@ -1604,17 +2103,15 @@ app.put('/notam', async (c) => {
 	return c.json({ success: true });
 });
 
-
-// User management endpoints
 const staffUsersApp = new Hono<{
 	Bindings: Env;
 	Variables: {
 		user?: any;
 		userService?: any;
+		clientIp?: string;
 	};
 }>();
 
-// Middleware to authenticate staff users
 staffUsersApp.use('*', async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -1637,7 +2134,6 @@ staffUsersApp.use('*', async (c, next) => {
 	await next();
 });
 
-// GET /staff/users - Get all users with pagination
 /**
  * @openapi
  * /staff/users:
@@ -1671,7 +2167,6 @@ staffUsersApp.get('/', async (c) => {
 	}
 });
 
-// GET /staff/users/search - Search for users
 /**
  * @openapi
  * /staff/users/search:
@@ -1697,9 +2192,12 @@ staffUsersApp.get('/search', async (c) => {
 	try {
 		const query = c.req.query('q') || '';
 		if (query.length < 3) {
-			return c.json({
-				error: 'Search query must be at least 3 characters',
-			}, 400);
+			return c.json(
+				{
+					error: 'Search query must be at least 3 characters',
+				},
+				400,
+			);
 		}
 
 		const user = c.get('user');
@@ -1714,7 +2212,6 @@ staffUsersApp.get('/search', async (c) => {
 	}
 });
 
-// POST /staff/users/refresh-api-token - Refresh a user's API token by VATSIM ID
 /**
  * @openapi
  * /staff/users/refresh-api-token:
@@ -1741,12 +2238,15 @@ staffUsersApp.get('/search', async (c) => {
  */
 staffUsersApp.post('/refresh-api-token', async (c) => {
 	try {
-		const { vatsimId } = await c.req.json() as { vatsimId: string };
+		const { vatsimId } = (await c.req.json()) as { vatsimId: string };
 
 		if (!vatsimId) {
-			return c.json({
-				error: 'VATSIM ID is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'VATSIM ID is required',
+				},
+				400,
+			);
 		}
 
 		const user = c.get('user');
@@ -1812,6 +2312,126 @@ staffUsersApp.delete('/:id', async (c) => {
 
 app.route('/staff/users', staffUsersApp);
 
+// Staff management (lead developer only) – manage staff roles
+const staffManageApp = new Hono<{ Bindings: Env }>();
+
+/**
+ * @openapi
+ * /staff/manage:
+ *   get:
+ *     x-hidden: true
+ *     summary: List staff members
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200: { description: Staff listed }
+ *       403: { description: Forbidden }
+ */
+staffManageApp.get('/', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	const staff = await roles.listStaff();
+	return c.json({ staff });
+});
+
+/**
+ * @openapi
+ * /staff/manage:
+ *   post:
+ *     x-hidden: true
+ *     summary: Add or update a staff member
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [vatsimId, role]
+ *             properties:
+ *               vatsimId: { type: string }
+ *               role: { type: string, enum: [LEAD_DEVELOPER, PRODUCT_MANAGER] }
+ *     responses:
+ *       200: { description: Staff added/updated }
+ *       403: { description: Forbidden }
+ */
+staffManageApp.post('/', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	let body: any; try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+	const { vatsimId, role } = body || {};
+	if (!vatsimId || !role || !(role in StaffRole)) return c.json({ error: 'vatsimId and valid role required' }, 400);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	const targetUser = await auth.getUserByVatsimId(vatsimId);
+	if (!targetUser) return c.json({ error: 'Target user not found' }, 404);
+	try {
+		const staff = await roles.addStaff(targetUser.id, role as StaffRole);
+		return c.json({ success: true, staff });
+	} catch (e) {
+		return c.json({ error: e instanceof Error ? e.message : 'Failed to add/update staff' }, 400);
+	}
+});
+
+/**
+ * @openapi
+ * /staff/manage/{vatsimId}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Remove staff member
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: vatsimId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Staff removed }
+ *       403: { description: Forbidden }
+ */
+staffManageApp.delete('/:vatsimId', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const targetVatsimId = c.req.param('vatsimId');
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	const targetUser = await auth.getUserByVatsimId(targetVatsimId);
+	if (!targetUser) return c.json({ error: 'Target user not found' }, 404);
+	try {
+		const removed = await roles.removeStaff(targetUser.id);
+		return c.json({ success: removed });
+	} catch (e) {
+		return c.json({ error: e instanceof Error ? e.message : 'Failed to remove staff' }, 400);
+	}
+});
+
+app.route('/staff/manage', staffManageApp);
+
 // Contributions endpoints
 const contributionsApp = new Hono<{ Bindings: Env }>();
 
@@ -1836,33 +2456,28 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *       200:
  *         description: Contributions listed
  */
-contributionsApp.get('/',
-	withCache(CacheKeys.fromUrl, 7200, 'contributions'),
-	async (c) => {
-		const contributions = ServicePool.getContributions(c.env);
+contributionsApp.get('/', async (c) => {
+	const contributions = ServicePool.getContributions(c.env);
 
-		// Parse query parameters for filtering
-		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
-		const airportIcao = c.req.query('airport') || undefined;
-		const userId = c.req.query('user') || undefined;
-		const page = 1; // Default to page 1 for user contributions
-		const limit = Number.MAX_SAFE_INTEGER;
+	// Parse query parameters for filtering
+	const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
+	const airportIcao = c.req.query('airport') || undefined;
+	const userId = c.req.query('user') || undefined;
+	const page = 1; // Default to page 1 for user contributions
+	const limit = Number.MAX_SAFE_INTEGER;
 
-		// Get contributions with filters
-		const result = await contributions.listContributions({
-			status,
-			airportIcao,
-			userId,
-			page,
-			limit,
-		});
-
-		return c.json(result);
+	// Get contributions with filters
+	const result = await contributions.listContributions({
+		status,
+		airportIcao,
+		userId,
+		page,
+		limit,
 	});
 
-// (Removed) contribution statistics endpoint
+	return c.json(result);
+});
 
-// GET /contributions/leaderboard - Get top contributors
 /**
  * @openapi
  * /contributions/leaderboard:
@@ -1874,15 +2489,16 @@ contributionsApp.get('/',
  *       200:
  *         description: Leaderboard returned
  */
-contributionsApp.get('/leaderboard',
+contributionsApp.get(
+	'/leaderboard',
 	withCache(() => 'contribution-leaderboard', 1800, 'contributions'),
 	async (c) => {
 		const contributions = ServicePool.getContributions(c.env);
 		const leaderboard = await contributions.getContributionLeaderboard();
 		return c.json(leaderboard);
-	});
+	},
+);
 
-// GET /contributions/top-packages - Get a list of most used packages
 /**
  * @openapi
  * /contributions/top-packages:
@@ -1894,15 +2510,16 @@ contributionsApp.get('/leaderboard',
  *       200:
  *         description: Package stats returned
  */
-contributionsApp.get('/top-packages',
+contributionsApp.get(
+	'/top-packages',
 	withCache(() => 'contribution-top-packages', 1800, 'contributions'),
 	async (c) => {
 		const contributions = ServicePool.getContributions(c.env);
 		const topPackages = await contributions.getTopPackages();
 		return c.json(topPackages);
-	});
+	},
+);
 
-// POST /contributions - Create a new contribution
 /**
  * @openapi
  * /contributions:
@@ -1920,7 +2537,6 @@ contributionsApp.get('/top-packages',
  *             type: object
  *             required: [airportIcao, packageName, submittedXml]
  *             properties:
- *               userDisplayName: { type: string }
  *               airportIcao: { type: string }
  *               packageName: { type: string }
  *               submittedXml: { type: string }
@@ -1947,10 +2563,9 @@ contributionsApp.post('/', async (c) => {
 
 	try {
 		const contributions = ServicePool.getContributions(c.env);
-		const payload = await c.req.json() as ContributionSubmissionPayload;
+		const payload = (await c.req.json()) as ContributionSubmissionPayload;
 		const result = await contributions.createContribution({
 			userId: user.vatsim_id,
-			userDisplayName: payload.userDisplayName,
 			airportIcao: payload.airportIcao,
 			packageName: payload.packageName,
 			submittedXml: payload.submittedXml,
@@ -1964,7 +2579,6 @@ contributionsApp.post('/', async (c) => {
 	}
 });
 
-// GET /contributions/user - Get user's contributions
 /**
  * @openapi
  * /contributions/user:
@@ -2013,7 +2627,6 @@ contributionsApp.get('/user', async (c) => {
 	return c.json(result);
 });
 
-// GET /contributions/:id - Get specific contribution
 /**
  * @openapi
  * /contributions/{id}:
@@ -2096,7 +2709,7 @@ contributionsApp.post('/:id/decision', async (c) => {
 	try {
 		const contributionId = c.req.param('id');
 		const contributions = ServicePool.getContributions(c.env);
-		const payload = await c.req.json() as ContributionDecisionPayload;
+		const payload = (await c.req.json()) as ContributionDecisionPayload;
 		const result = await contributions.processDecision(contributionId, user.vatsim_id, {
 			approved: payload.approved,
 			rejectionReason: payload.rejectionReason,
@@ -2109,38 +2722,6 @@ contributionsApp.post('/:id/decision', async (c) => {
 		const status = error instanceof Error && error.message.includes('Not authorized') ? 403 : 400;
 		return c.json({ error: message }, status);
 	}
-});
-
-// GET /contributions/user/display-name - Get user's display name
-/**
- * @openapi
- * /contributions/user/display-name:
- *   get:
- *     summary: Get display name for authenticated user
- *     tags:
- *       - Contributions
- *     security:
- *       - VatsimToken: []
- *     responses:
- *       200:
- *         description: Display name returned
- */
-contributionsApp.get('/user/display-name', async (c) => {
-	const token = c.req.header('X-Vatsim-Token');
-	if (!token) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const vatsimUser = await vatsim.getUser(token);
-	const contributions = ServicePool.getContributions(c.env);
-	const displayName = await contributions.getUserDisplayName(vatsimUser.id);
-
-	if (!displayName) {
-		return c.text('User not found', 404);
-	}
-
-	return c.json({ displayName });
 });
 
 // DELETE /contributions/:id - Delete a contribution (admin only)
@@ -2194,11 +2775,54 @@ contributionsApp.delete('/:id', async (c) => {
 
 app.route('/contributions', contributionsApp);
 
-
-// CDN Endpoints
 const cdnApp = new Hono<{ Bindings: Env }>();
 
-// Special case for direct file downloads
+/**
+ * @openapi
+ * /maps/{icao}/packages/{package}/latest:
+ *   get:
+ *     summary: Get latest approved BARS map XML (raw content) for an airport & package
+ *     tags:
+ *       - Generation
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: package
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: BARS XML document returned inline (application/xml)
+ *       404:
+ *         description: Not found
+ */
+app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), async (c) => {
+	const icao = c.req.param('icao').toUpperCase();
+	const pkg = c.req.param('package');
+	const contributions = ServicePool.getContributions(c.env);
+	const storage = ServicePool.getStorage(c.env);
+
+	const latest = await contributions.getLatestApprovedContributionForAirportPackage(icao, pkg);
+	if (!latest) {
+		return c.text('No approved map found', 404);
+	}
+
+	const safePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
+	const fileKey = `Maps/${icao}_${safePackageName}_bars.xml`;
+
+	const stored = await storage.getFile(fileKey);
+	if (!stored) {
+		return c.text('Map file not found', 404);
+	}
+	if (!stored.headers.get('content-type')) {
+		stored.headers.set('content-type', 'application/xml; charset=utf-8');
+	}
+	return stored;
+});
+
 /**
  * @openapi
  * /cdn/files/{fileKey}:
@@ -2234,12 +2858,10 @@ cdnApp.get('/files/*', async (c) => {
 		return c.text('File not found', 404);
 	}
 
-
 	// Return the file directly with proper headers for caching
 	return fileResponse;
 });
 
-// Handle file management endpoints
 /**
  * @openapi
  * /cdn/upload:
@@ -2300,9 +2922,12 @@ cdnApp.post('/upload', async (c) => {
 		const customKey = formData.get('key')?.toString();
 
 		if (!file || !(file instanceof File)) {
-			return c.json({
-				error: 'File is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'File is required',
+				},
+				400,
+			);
 		}
 
 		// Create file path - use custom key if provided, otherwise generate one
@@ -2324,23 +2949,28 @@ cdnApp.post('/upload', async (c) => {
 		// Stats tracking removed
 
 		// Return success with download URL
-		return c.json({
-			success: true,
-			file: {
-				key: result.key,
-				etag: result.etag,
-				url: new URL(`/cdn/files/${result.key}`, c.req.url).toString(),
+		return c.json(
+			{
+				success: true,
+				file: {
+					key: result.key,
+					etag: result.etag,
+					url: new URL(`/cdn/files/${result.key}`, c.req.url).toString(),
+				},
 			},
-		}, 201);
+			201,
+		);
 	} catch (error) {
 		console.error('File upload error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to upload file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to upload file',
+			},
+			500,
+		);
 	}
 });
 
-// List files
 /**
  * @openapi
  * /cdn/files:
@@ -2404,13 +3034,15 @@ cdnApp.get('/files', async (c) => {
 		return c.json({ files });
 	} catch (error) {
 		console.error('File listing error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to list files',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to list files',
+			},
+			500,
+		);
 	}
 });
 
-// Delete a file
 /**
  * @openapi
  * /cdn/files/{fileKey}:
@@ -2458,9 +3090,12 @@ cdnApp.delete('/files/*', async (c) => {
 		const fileKey = c.req.param('*');
 
 		if (!fileKey) {
-			return c.json({
-				error: 'File not found',
-			}, 404);
+			return c.json(
+				{
+					error: 'File not found',
+				},
+				404,
+			);
 		}
 
 		// Delete the file
@@ -2468,9 +3103,12 @@ cdnApp.delete('/files/*', async (c) => {
 		const deleted = await storage.deleteFile(fileKey);
 
 		if (!deleted) {
-			return c.json({
-				error: 'File not found',
-			}, 404);
+			return c.json(
+				{
+					error: 'File not found',
+				},
+				404,
+			);
 		}
 
 		// Stats tracking removed
@@ -2478,15 +3116,17 @@ cdnApp.delete('/files/*', async (c) => {
 		return c.json({ success: true });
 	} catch (error) {
 		console.error('File deletion error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to delete file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to delete file',
+			},
+			500,
+		);
 	}
 });
 
 app.route('/cdn', cdnApp);
 
-// EuroScope public file listing endpoint
 /**
  * @openapi
  * /euroscope/files/{icao}:
@@ -2510,9 +3150,12 @@ app.get('/euroscope/files/:icao', async (c) => {
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
-		return c.json({
-			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-		}, 400);
+		return c.json(
+			{
+				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+			},
+			400,
+		);
 	}
 
 	try {
@@ -2535,13 +3178,15 @@ app.get('/euroscope/files/:icao', async (c) => {
 		});
 	} catch (error) {
 		console.error('EuroScope public file listing error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to list files',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to list files',
+			},
+			500,
+		);
 	}
 });
 
-// EuroScope file management endpoints
 const euroscopeApp = new Hono<{
 	Bindings: Env;
 	Variables: {
@@ -2550,7 +3195,6 @@ const euroscopeApp = new Hono<{
 	};
 }>();
 
-// Middleware for EuroScope endpoints to authenticate users
 euroscopeApp.use('*', async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -2572,7 +3216,6 @@ euroscopeApp.use('*', async (c, next) => {
 	await next();
 });
 
-// POST /euroscope/upload - Upload files to ICAO-specific folders
 /**
  * @openapi
  * /euroscope/upload:
@@ -2610,30 +3253,42 @@ euroscopeApp.post('/upload', async (c) => {
 		const icao = formData.get('icao')?.toString()?.toUpperCase();
 
 		if (!file || !(file instanceof File)) {
-			return c.json({
-				error: 'File is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'File is required',
+				},
+				400,
+			);
 		}
 
 		if (!icao) {
-			return c.json({
-				error: 'ICAO code is required',
-			}, 400);
+			return c.json(
+				{
+					error: 'ICAO code is required',
+				},
+				400,
+			);
 		}
 
 		// Validate ICAO format (exactly 4 uppercase letters/numbers)
 		if (!icao.match(/^[A-Z0-9]{4}$/)) {
-			return c.json({
-				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-			}, 400);
+			return c.json(
+				{
+					error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+				},
+				400,
+			);
 		}
 
 		// Check file size limit (10MB)
 		const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB in bytes
 		if (file.size > MAX_FILE_SIZE) {
-			return c.json({
-				error: 'File size exceeds 10MB limit',
-			}, 400);
+			return c.json(
+				{
+					error: 'File size exceeds 10MB limit',
+				},
+				400,
+			);
 		}
 
 		// Check if user has access to upload files for this ICAO
@@ -2641,9 +3296,12 @@ euroscopeApp.post('/upload', async (c) => {
 		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
 
 		if (!hasAccess) {
-			return c.json({
-				error: 'You do not have permission to upload files for this airport. Please ensure your division has approved access to this ICAO.',
-			}, 403);
+			return c.json(
+				{
+					error: 'You do not have permission to upload files for this airport. Please ensure your division has approved access to this ICAO.',
+				},
+				403,
+			);
 		}
 
 		// Create file path: EuroScope/ICAO/filename
@@ -2655,11 +3313,14 @@ euroscopeApp.post('/upload', async (c) => {
 		const existingFiles = await storage.listFiles(`EuroScope/${icao}/`, 10);
 
 		// Count files that are not the one being replaced
-		const otherFiles = existingFiles.objects.filter(obj => obj.key !== fileKey);
+		const otherFiles = existingFiles.objects.filter((obj) => obj.key !== fileKey);
 		if (otherFiles.length >= 2) {
-			return c.json({
-				error: 'Maximum of 2 files per ICAO code allowed. Please delete an existing file before uploading a new one.',
-			}, 400);
+			return c.json(
+				{
+					error: 'Maximum of 2 files per ICAO code allowed. Please delete an existing file before uploading a new one.',
+				},
+				400,
+			);
 		}
 
 		// Extract file data
@@ -2673,27 +3334,31 @@ euroscopeApp.post('/upload', async (c) => {
 			size: file.size.toString(),
 		});
 
-
 		// Return success with download URL
-		return c.json({
-			success: true,
-			file: {
-				key: result.key,
-				icao: icao,
-				fileName: fileName,
-				size: file.size,
-				url: new URL(`https://dev-cdn.stopbars.com/${result.key}`, c.req.url).toString(),
+		return c.json(
+			{
+				success: true,
+				file: {
+					key: result.key,
+					icao: icao,
+					fileName: fileName,
+					size: file.size,
+					url: new URL(`https://dev-cdn.stopbars.com/${result.key}`, c.req.url).toString(),
+				},
 			},
-		}, 201);
+			201,
+		);
 	} catch (error) {
 		console.error('EuroScope file upload error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to upload file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to upload file',
+			},
+			500,
+		);
 	}
 });
 
-// DELETE /euroscope/files/:icao/:filename - Delete a specific file
 /**
  * @openapi
  * /euroscope/files/{icao}/{filename}:
@@ -2725,9 +3390,12 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
-		return c.json({
-			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-		}, 400);
+		return c.json(
+			{
+				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+			},
+			400,
+		);
 	}
 
 	try {
@@ -2736,9 +3404,12 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
 
 		if (!hasAccess) {
-			return c.json({
-				error: 'You do not have permission to delete files for this airport. Please ensure your division has approved access to this ICAO.',
-			}, 403);
+			return c.json(
+				{
+					error: 'You do not have permission to delete files for this airport. Please ensure your division has approved access to this ICAO.',
+				},
+				403,
+			);
 		}
 
 		// Construct the file key
@@ -2749,9 +3420,12 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		const deleted = await storage.deleteFile(fileKey);
 
 		if (!deleted) {
-			return c.json({
-				error: 'File not found',
-			}, 404);
+			return c.json(
+				{
+					error: 'File not found',
+				},
+				404,
+			);
 		}
 
 		return c.json({
@@ -2760,13 +3434,15 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		});
 	} catch (error) {
 		console.error('EuroScope file deletion error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to delete file',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to delete file',
+			},
+			500,
+		);
 	}
 });
 
-// GET /euroscope/:icao/editable - Check if user has permission to edit files for an airport
 /**
  * @openapi
  * /euroscope/{icao}/editable:
@@ -2792,9 +3468,12 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
-		return c.json({
-			error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
-		}, 400);
+		return c.json(
+			{
+				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
+			},
+			400,
+		);
 	}
 
 	try {
@@ -2810,12 +3489,326 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 		});
 	} catch (error) {
 		console.error('EuroScope access check error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to check airport access',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to check airport access',
+			},
+			500,
+		);
 	}
 });
 app.route('/euroscope', euroscopeApp);
+
+/**
+ * @openapi
+ * /releases:
+ *   get:
+ *     summary: List all product releases (optionally filtered)
+ *     tags:
+ *       - Installer
+ *     parameters:
+ *       - in: query
+ *         name: product
+ *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET] }
+ *     responses:
+ *       200:
+ *         description: Releases listed
+ */
+app.get(
+	'/releases',
+	withCache(CacheKeys.fromUrl, 300, 'installer'), // cache 5m
+	async (c) => {
+		const product = c.req.query('product') as InstallerProduct | undefined;
+		const releasesService = ServicePool.getReleases(c.env);
+		const releases = await releasesService.listReleases(product);
+		return c.json({ releases });
+	}
+);
+
+/**
+ * @openapi
+ * /releases/latest:
+ *   get:
+ *     summary: Get latest release for a product
+ *     tags:
+ *       - Installer
+ *     parameters:
+ *       - in: query
+ *         name: product
+ *         required: true
+ *         schema: { type: string, enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET] }
+ *     responses:
+ *       200:
+ *         description: Latest release returned
+ *       404:
+ *         description: Not found
+ */
+app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), async (c) => {
+	const product = c.req.query('product') as InstallerProduct | undefined;
+	if (!product) return c.text('product required', 400);
+	const releasesService = ServicePool.getReleases(c.env);
+	const latest = await releasesService.getLatest(product);
+	if (!latest) return c.text('Not found', 404);
+	const downloadUrl = product === 'SimConnect.NET'
+		? `https://www.nuget.org/packages/SimConnect.NET/${latest.version}`
+		: new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
+	const imageUrl = latest.image_url ? new URL(latest.image_url, c.req.url).toString() : undefined;
+	const { image_url: _omitImage, ...rest } = latest as any;
+	return c.json({ ...rest, downloadUrl, imageUrl });
+});
+
+/**
+ * @openapi
+ * /releases/upload:
+ *   post:
+ *     x-hidden: true
+ *     summary: Create a new product release (lead developer only)
+ *     tags:
+ *       - Installer
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file, product, version]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *               product:
+ *                 type: string
+ *                 enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET]
+ *               version:
+ *                 type: string
+ *               changelog:
+ *                 type: string
+ *               image:
+ *                 type: string
+ *                 format: binary
+ *                 description: Optional promotional image (PNG/JPEG, max 5MB)
+ *     x-notes:
+ *       - Product "Installer" requires an .exe file upload.
+ *       - Product "SimConnect.NET" does not require a file upload (metadata + changelog only; version links to NuGet).
+ *     responses:
+ *       201:
+ *         description: Release created
+ *       403:
+ *         description: Forbidden
+ */
+app.post('/releases/upload', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUserPromise = vatsim.getUser(vatsimToken);
+
+	let formData: FormData;
+	try {
+		formData = await c.req.formData();
+	} catch {
+		return c.json({ error: 'Invalid form-data' }, 400);
+	}
+
+	const file = formData.get('file');
+	const product = formData.get('product')?.toString() as InstallerProduct | undefined;
+	const version = formData.get('version')?.toString();
+	const changelog = formData.get('changelog')?.toString();
+	const image = formData.get('image');
+	let vatsimUser;
+	try {
+		vatsimUser = await vatsimUserPromise;
+	} catch (e) {
+		return c.text('Failed to validate user', 401);
+	}
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) return c.text('Forbidden', 403);
+
+	if (!product || !version) return c.json({ error: 'product & version required' }, 400);
+
+	const isSimConnect = product === 'SimConnect.NET';
+	const isInstallerExe = product === 'Installer';
+
+	if (!isSimConnect) {
+		// For all products except SimConnect.NET a file is required
+		if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
+		const MAX = 90 * 1024 * 1024;
+		if (file.size > MAX) return c.json({ error: 'File too large (90MB max)' }, 400);
+		if (isInstallerExe) {
+			// Enforce .exe extension for Installer product
+			const lower = file.name.toLowerCase();
+			if (!lower.endsWith('.exe')) return c.json({ error: 'Installer product must be a .exe file' }, 400);
+		}
+	}
+
+	if (isSimConnect && file && file instanceof File) {
+		return c.json({ error: 'SimConnect.NET releases do not accept file uploads' }, 400);
+	}
+	try {
+		const storage = ServicePool.getStorage(c.env);
+		let fileKey: string;
+		let bytes: ArrayBuffer | undefined;
+		if (!isSimConnect) {
+			// File upload path for normal products
+			const uploadFile = file as File; // already validated
+			fileKey = `releases/${product}/${version}/${uploadFile.name}`;
+			bytes = await uploadFile.arrayBuffer();
+		} else {
+			// Sentinel key for external NuGet package (no bytes)
+			fileKey = `releases/${product}/${version}/EXTERNAL`;
+		}
+		let imageBytesPromise: Promise<ArrayBuffer> | undefined;
+		if (image && image instanceof File) {
+			imageBytesPromise = image.arrayBuffer();
+		}
+
+		let sha256 = 'external';
+		if (bytes) {
+			const digest = await crypto.subtle.digest('SHA-256', bytes);
+			sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+		}
+
+		// Validate image (after its bytes read started) before uploads
+		let imageUrl: string | undefined;
+		let imageUploadPromise: Promise<any> | undefined;
+		let imageKey: string | undefined;
+		if (image && image instanceof File) {
+			const ALLOWED = ['image/png', 'image/jpeg'];
+			const MAX_IMAGE = 5 * 1024 * 1024; // 5MB
+			if (!ALLOWED.includes(image.type)) return c.json({ error: 'Invalid image type (png or jpeg only)' }, 400);
+			if (image.size > MAX_IMAGE) return c.json({ error: 'Image too large (5MB max)' }, 400);
+			const imageExt = image.type === 'image/png' ? 'png' : 'jpg';
+			imageKey = `releases/${product}/${version}/promo.${imageExt}`;
+			// Wait for image bytes only when needed (likely already resolved by now)
+			const imgBytes = await imageBytesPromise!;
+			imageUploadPromise = storage.uploadFile(imageKey, imgBytes, image.type || 'image/png', {
+				uploadedBy: user.vatsim_id,
+				product,
+				version,
+			});
+			imageUrl = `https://dev-cdn.stopbars.com/${imageKey}`;
+		}
+		if (!isSimConnect) {
+			const uploadFile = file as File;
+			const fileUploadPromise = storage.uploadFile(fileKey, bytes!, uploadFile.type || 'application/octet-stream', {
+				uploadedBy: user.vatsim_id,
+				product,
+				version,
+				size: uploadFile.size.toString(),
+				sha256
+			});
+			await Promise.all([fileUploadPromise, imageUploadPromise].filter(Boolean));
+		} else {
+			// Only image upload (if any) for external product
+			if (imageUploadPromise) await imageUploadPromise;
+		}
+		const releasesService = ServicePool.getReleases(c.env);
+		const release = await releasesService.createRelease({
+			product,
+			version,
+			fileKey,
+			fileSize: bytes ? (file as File).size : 0,
+			fileHash: sha256,
+			changelog,
+			imageUrl
+		});
+		const downloadUrl = isSimConnect ? `https://www.nuget.org/packages/SimConnect.NET/${version}` : `https://dev-cdn.stopbars.com/${fileKey}`;
+		return c.json({ success: true, release, downloadUrl, imageUrl }, 201);
+	} catch (err) {
+		console.error('Release upload error', err);
+		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);
+	}
+});
+
+/**
+ * @openapi
+ * /releases/{id}/changelog:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update changelog content for a release
+ *     description: Update only the changelog text of an existing release record.
+ *     tags:
+ *       - Installer
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [changelog]
+ *             properties:
+ *               changelog:
+ *                 type: string
+ *                 maxLength: 20000
+ *     responses:
+ *       200:
+ *         description: Changelog updated
+ *       400:
+ *         description: Validation error
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Release not found
+ */
+app.put('/releases/:id/changelog', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const idRaw = c.req.param('id');
+	const id = parseInt(idRaw, 10);
+	if (Number.isNaN(id) || id <= 0) return c.text('Invalid id', 400);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const releasesService = ServicePool.getReleases(c.env);
+
+	try {
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
+		if (!user) return c.text('User not found', 404);
+		// Allow Lead Developer or Product Manager
+		const canEdit = (await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER)) || (await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER));
+		if (!canEdit) return c.text('Forbidden', 403);
+
+		let body: any;
+		try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+		const changelog = typeof body?.changelog === 'string' ? body.changelog.trim() : '';
+		if (!changelog) return c.json({ error: 'changelog required' }, 400);
+		if (changelog.length > 20000) return c.json({ error: 'changelog too long (max 20000 chars)' }, 400);
+
+		// Ensure release exists first (so we differentiate 404 vs silent update)
+		// Reusing listReleases would be inefficient; perform direct lookup.
+		const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+		try {
+			const existing = await dbContext.db.executeRead<any>('SELECT * FROM installer_releases WHERE id = ?', [id]);
+			if (!existing.results[0]) return dbContext.textResponse('Release not found', { status: 404 });
+		} finally {
+			// close early; release update uses its own session service
+			// (ReleaseService internally manages its session.)
+		}
+
+		const updated = await releasesService.updateChangelog(id, changelog);
+		if (!updated) return c.text('Release not found', 404);
+		return c.json({ success: true, release: updated });
+	} catch (err) {
+		console.error('Changelog update error', err);
+		return c.json({ error: err instanceof Error ? err.message : 'update failed' }, 500);
+	}
+});
 
 /**
  * @openapi
@@ -2868,7 +3861,7 @@ app.post('/purge-cache', async (c) => {
 	}
 
 	try {
-		const { key, namespace } = await c.req.json() as { key: string; namespace?: string };
+		const { key, namespace } = (await c.req.json()) as { key: string; namespace?: string };
 
 		if (!key) {
 			return c.json({ error: 'Cache key is required' }, 400);
@@ -2883,16 +3876,17 @@ app.post('/purge-cache', async (c) => {
 			success: true,
 			message: `Cache key "${key}" purged successfully`,
 		});
-
 	} catch (error) {
 		console.error('Cache purge error:', error);
-		return c.json({
-			error: error instanceof Error ? error.message : 'Failed to purge cache',
-		}, 500);
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : 'Failed to purge cache',
+			},
+			500,
+		);
 	}
 });
 
-// Contributors endpoint
 /**
  * @openapi
  * /contributors:
@@ -2904,7 +3898,8 @@ app.post('/purge-cache', async (c) => {
  *       200:
  *         description: Contributors returned
  */
-app.get('/contributors',
+app.get(
+	'/contributors',
 	withCache(() => 'github-contributors', 3600, 'github'), // Cache for 1 hour
 	async (c) => {
 		try {
@@ -2913,13 +3908,216 @@ app.get('/contributors',
 			return c.json(contributorsData);
 		} catch (error) {
 			console.error('Contributors endpoint error:', error);
-			return c.json({
-				error: 'Failed to fetch contributors data',
-				message: error instanceof Error ? error.message : 'Unknown error'
-			}, 500);
+			return c.json(
+				{
+					error: 'Failed to fetch contributors data',
+					message: error instanceof Error ? error.message : 'Unknown error',
+				},
+				500,
+			);
 		}
-	}
+	},
 );
+
+// FAQs public endpoint
+/**
+ * @openapi
+ * /faqs:
+ *   get:
+ *     summary: List public FAQs
+ *     tags:
+ *       - FAQ
+ *     responses:
+ *       200:
+ *         description: FAQs returned
+ */
+app.get(
+	'/faqs',
+	withCache(() => 'faqs-public', 900, 'faq'),
+	async (c) => {
+		const faqService = ServicePool.getFAQs(c.env);
+		const data = await faqService.list();
+		return c.json(data);
+	},
+);
+
+// Staff FAQ management endpoints
+const faqStaffApp = new Hono<{ Bindings: Env; Variables: { user?: any } }>();
+
+faqStaffApp.use('*', async (c, next) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	// Require product manager or higher
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
+	c.set('user', user);
+	await next();
+});
+
+/**
+ * @openapi
+ * /staff/faqs:
+ *   post:
+ *     x-hidden: true
+ *     summary: Create FAQ
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [question, answer, order_position]
+ *             properties:
+ *               question: { type: string }
+ *               answer: { type: string }
+ *               order_position: { type: integer }
+ *     responses:
+ *       201:
+ *         description: Created
+ */
+faqStaffApp.post('/', async (c) => {
+	let body: any;
+	try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+	const { question, answer } = body;
+	let order_position = Number(body.order_position);
+	if (!question || !answer || !Number.isInteger(order_position)) {
+		return c.json({ error: 'question, answer, order_position required' }, 400);
+	}
+	if (order_position < 0) order_position = 0;
+	const faqService = ServicePool.getFAQs(c.env);
+	const created = await faqService.create({ question, answer, order_position });
+	// Purge public cache
+	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	return c.json(created, 201);
+});
+
+/**
+ * @openapi
+ * /staff/faqs/{id}:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update FAQ
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               question: { type: string }
+ *               answer: { type: string }
+ *               order_position: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Updated
+ *       404:
+ *         description: Not found
+ */
+faqStaffApp.put('/:id', async (c) => {
+	const id = c.req.param('id');
+	let body: any; try { body = await c.req.json(); } catch { body = {}; }
+	const faqService = ServicePool.getFAQs(c.env);
+	const updated = await faqService.update(id, {
+		question: body.question,
+		answer: body.answer,
+		order_position: Number.isInteger(body.order_position) ? body.order_position : undefined,
+	});
+	if (!updated) return c.text('Not found', 404);
+	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	return c.json(updated);
+});
+
+/**
+ * @openapi
+ * /staff/faqs/{id}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Delete FAQ
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion result
+ */
+faqStaffApp.delete('/:id', async (c) => {
+	const id = c.req.param('id');
+	const faqService = ServicePool.getFAQs(c.env);
+	const success = await faqService.delete(id);
+	if (success) { try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { } }
+	return c.json({ success });
+});
+
+/**
+ * @openapi
+ * /staff/faqs/reorder:
+ *   post:
+ *     x-hidden: true
+ *     summary: Bulk reorder FAQs
+ *     tags:
+ *       - Staff
+ *       - FAQ
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [updates]
+ *             properties:
+ *               updates:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [id, order_position]
+ *                   properties:
+ *                     id: { type: string }
+ *                     order_position: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Reordered
+ */
+faqStaffApp.post('/reorder', async (c) => {
+	let body: any; try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+	if (!Array.isArray(body.updates)) return c.json({ error: 'updates array required' }, 400);
+	const updates = body.updates.filter((u: any) => typeof u.id === 'string' && Number.isInteger(u.order_position));
+	const faqService = ServicePool.getFAQs(c.env);
+	await faqService.reorder(updates);
+	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	return c.json({ success: true });
+});
+
+app.route('/staff/faqs', faqStaffApp);
 
 // Health endpoint
 /**
@@ -2940,84 +4138,84 @@ app.get('/contributors',
  *       503:
  *         description: One or more services degraded
  */
-app.get('/health',
-	withCache(CacheKeys.fromUrl, 60, 'health'),
-	async (c) => {
-		const requestedService = c.req.query('service');
-		const validServices = ['database', 'storage', 'vatsim', 'auth'];
+app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
+	const requestedService = c.req.query('service');
+	const validServices = ['database', 'storage', 'vatsim', 'auth'];
 
-		if (requestedService && !validServices.includes(requestedService)) {
-			return c.json({
+	if (requestedService && !validServices.includes(requestedService)) {
+		return c.json(
+			{
 				error: 'Invalid service',
 				validServices: validServices,
-			}, 400);
+			},
+			400,
+		);
+	}
+
+	const healthChecks: Record<string, string> = {};
+	const servicesToCheck = requestedService ? [requestedService] : validServices;
+
+	for (const service of servicesToCheck) {
+		healthChecks[service] = 'ok';
+	}
+
+	try {
+		if (servicesToCheck.includes('database')) {
+			try {
+				await c.env.DB.prepare('SELECT 1').first();
+			} catch (error) {
+				healthChecks.database = 'outage';
+			}
 		}
 
-		const healthChecks: Record<string, string> = {};
-		const servicesToCheck = requestedService ? [requestedService] : validServices;
-
-		for (const service of servicesToCheck) {
-			healthChecks[service] = 'ok';
+		if (servicesToCheck.includes('storage')) {
+			try {
+				const storage = ServicePool.getStorage(c.env);
+				await storage.listFiles(undefined, 1);
+			} catch (error) {
+				healthChecks.storage = 'outage';
+			}
 		}
 
-		try {
-			if (servicesToCheck.includes('database')) {
-				try {
-					await c.env.DB.prepare('SELECT 1').first();
-				} catch (error) {
-					healthChecks.database = 'outage';
+		if (servicesToCheck.includes('vatsim')) {
+			try {
+				const response = await fetch('https://auth.vatsim.net/api/user', {
+					method: 'GET',
+					headers: {
+						Accept: 'application/json',
+						'User-Agent': 'BARS-Health-Check/1.0',
+					},
+					signal: AbortSignal.timeout(5000),
+				});
+
+				if (!response.ok && response.status !== 401) {
+					throw new Error(`VATSIM API returned ${response.status}`);
 				}
+			} catch (error) {
+				console.error('VATSIM health check failed:', error);
+				healthChecks.vatsim = 'outage';
 			}
-
-			if (servicesToCheck.includes('storage')) {
-				try {
-					const storage = ServicePool.getStorage(c.env);
-					await storage.listFiles(undefined, 1);
-				} catch (error) {
-					healthChecks.storage = 'outage';
-				}
-			}
-
-			if (servicesToCheck.includes('vatsim')) {
-				try {
-					const response = await fetch('https://auth.vatsim.net/api/user', {
-						method: 'GET',
-						headers: {
-							'Accept': 'application/json',
-							'User-Agent': 'BARS-Health-Check/1.0'
-						},
-						signal: AbortSignal.timeout(5000)
-					});
-
-					if (!response.ok && response.status !== 401) {
-						throw new Error(`VATSIM API returned ${response.status}`);
-					}
-				} catch (error) {
-					console.error('VATSIM health check failed:', error);
-					healthChecks.vatsim = 'outage';
-				}
-			}
-
-			if (servicesToCheck.includes('auth')) {
-				try {
-					const auth = ServicePool.getAuth(c.env);
-					await auth.getUserByVatsimId('1658308');
-				} catch (error) {
-					healthChecks.auth = 'outage';
-				}
-			}
-
-			// Stats service removed
-
-		} catch (error) {
-			console.error('Health check error:', error);
 		}
 
-		const hasOutages = Object.values(healthChecks).some(status => status === 'outage');
-		const statusCode = hasOutages ? 503 : 200;
+		if (servicesToCheck.includes('auth')) {
+			try {
+				const auth = ServicePool.getAuth(c.env);
+				await auth.getUserByVatsimId('1658308');
+			} catch (error) {
+				healthChecks.auth = 'outage';
+			}
+		}
 
-		return c.json(healthChecks, statusCode);
-	});
+		// Stats service removed
+	} catch (error) {
+		console.error('Health check error:', error);
+	}
+
+	const hasOutages = Object.values(healthChecks).some((status) => status === 'outage');
+	const statusCode = hasOutages ? 503 : 200;
+
+	return c.json(healthChecks, statusCode);
+});
 
 // Serve OpenAPI spec
 /**

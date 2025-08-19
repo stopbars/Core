@@ -7,6 +7,8 @@ export interface AuthResponse {
 export interface VatsimUser {
 	id: string;
 	email: string;
+	first_name?: string;
+	last_name?: string;
 }
 
 export interface UserRecord {
@@ -14,6 +16,9 @@ export interface UserRecord {
 	vatsim_id: string;
 	api_key: string;
 	email: string;
+	full_name?: string | null;
+	display_mode?: number; // 0=First,1=First LastInitial,2=CID
+	display_name?: string | null; // cached display name
 	created_at: string;
 	last_login: string;
 	vatsimToken: string;
@@ -27,7 +32,6 @@ export interface VatsimUserResponse {
 		};
 	};
 }
-
 
 import { Role } from './services/roles';
 
@@ -95,8 +99,11 @@ export interface Packet {
 	| 'ERROR'
 	| 'HEARTBEAT'
 	| 'HEARTBEAT_ACK'
-	| 'CLOSE';
-	airport?: string; data?: {
+	| 'CLOSE'
+	| 'GET_STATE'
+	| 'STATE_SNAPSHOT';
+	airport?: string;
+	data?: {
 		objectId?: string;
 		state?: boolean;
 		patch?: Record<string, any>; // New field for patch-based updates
@@ -107,6 +114,7 @@ export interface Packet {
 		message?: string; // For error messages
 		connectionType?: ClientType; // Add connection type to data
 		offline?: boolean; // Flag to indicate if state is offline (no controllers)
+		requestedAt?: number; // For STATE_SNAPSHOT - when request was made
 	};
 	timestamp?: number; // Optional since server will set it
 }
@@ -142,7 +150,7 @@ export type PointData = Omit<Point, 'id' | 'airportId' | 'createdAt' | 'updatedA
 
 // Transaction containing multiple updates to points data
 export type PointChangeset = {
-	create?: PointData[],
+	create?: PointData[];
 	modify?: Record<string, Partial<PointData>>; // Keyed by ID
 	delete?: string[]; // IDs
 };

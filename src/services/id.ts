@@ -17,10 +17,7 @@ export class IDService {
 		while (true) {
 			const uniqueId = nanoid();
 			const barsId = `${this.BARS_ID_PREFIX}_${uniqueId}`;
-			const result = await this.dbSession.executeRead<{ id: string }>(
-				'SELECT id FROM points WHERE id = ?',
-				[barsId]
-			);
+			const result = await this.dbSession.executeRead<{ id: string }>('SELECT id FROM points WHERE id = ?', [barsId]);
 			if (!result.results[0]) {
 				return barsId;
 			}

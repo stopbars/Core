@@ -30,19 +30,17 @@ export class UserService {
 			const [usersResult, countResult] = await Promise.all([
 				this.dbSession.executeRead<any>(
 					`
-			SELECT u.id, u.vatsim_id, u.email, u.created_at, u.last_login,
-			CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
-			s.role
-			FROM users u
-			LEFT JOIN staff s ON u.id = s.user_id
-			ORDER BY u.created_at DESC
-			LIMIT ? OFFSET ?
-		  `,
-					[limit, offset]
+				SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.created_at, u.last_login,
+				CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
+				s.role
+				FROM users u
+				LEFT JOIN staff s ON u.id = s.user_id
+				ORDER BY u.created_at DESC
+				LIMIT ? OFFSET ?
+			  `,
+					[limit, offset],
 				),
-				this.dbSession.executeRead<{ count: number }>(
-					'SELECT COUNT(*) as count FROM users'
-				),
+				this.dbSession.executeRead<{ count: number }>('SELECT COUNT(*) as count FROM users'),
 			]);
 			if (!usersResult || !countResult) {
 				throw new Error('Failed to fetch users');
@@ -67,7 +65,7 @@ export class UserService {
 		try {
 			const result = await this.dbSession.executeRead<any>(
 				`
-		  SELECT u.id, u.vatsim_id, u.email, u.created_at, u.last_login,
+		  SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.created_at, u.last_login,
 		  CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
 		  s.role
 		  FROM users u
@@ -76,7 +74,7 @@ export class UserService {
 		  ORDER BY u.created_at DESC
 		  LIMIT 50
 		`,
-				[`%${query}%`, `%${query}%`]
+				[`%${query}%`, `%${query}%`],
 			);
 			if (!result) {
 				throw new Error('Failed to search users');
@@ -97,10 +95,9 @@ export class UserService {
 
 		try {
 			// Get the user to delete
-			const userToDeleteResult = await this.dbSession.executeRead<{ vatsim_id: string }>(
-				'SELECT vatsim_id FROM users WHERE id = ?',
-				[userId]
-			);
+			const userToDeleteResult = await this.dbSession.executeRead<{ vatsim_id: string }>('SELECT vatsim_id FROM users WHERE id = ?', [
+				userId,
+			]);
 			const userToDelete = userToDeleteResult.results[0];
 			if (!userToDelete) {
 				throw new Error('User not found');
@@ -110,7 +107,9 @@ export class UserService {
 			if (!deleted) {
 				throw new Error('Failed to delete user');
 			}
-			try { this.posthog?.track('Admin Deleted User', { userId, requestingUserId }); } catch { }
+			try {
+				this.posthog?.track('Admin Deleted User', { userId, requestingUserId });
+			} catch {}
 			return true;
 		} catch (error) {
 			throw new Error('Failed to delete user');
@@ -127,17 +126,16 @@ export class UserService {
 
 		try {
 			// Get the user by VATSIM ID
-			const userResult = await this.dbSession.executeRead<{ id: number }>(
-				'SELECT id FROM users WHERE vatsim_id = ?',
-				[vatsimId]
-			);
+			const userResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [vatsimId]);
 			const user = userResult.results[0];
 			if (!user) {
 				throw new Error('User not found');
 			}
 			// Use the auth service to regenerate the API key
 			const newApiKey = await this.auth.regenerateApiKey(user.id);
-			try { this.posthog?.track('Admin Regenerated User API Key', { vatsimId, requestingUserId }); } catch { }
+			try {
+				this.posthog?.track('Admin Regenerated User API Key', { vatsimId, requestingUserId });
+			} catch {}
 			return newApiKey;
 		} catch (error) {
 			console.error('Error refreshing user API token:', error);

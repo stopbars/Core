@@ -273,9 +273,7 @@ export class Connection {
 				}
 
 				// Ensure existing state is an object for merging
-				const baseState = (typeof existingObject.state === 'object' && existingObject.state !== null)
-					? existingObject.state
-					: {};
+				const baseState = typeof existingObject.state === 'object' && existingObject.state !== null ? existingObject.state : {};
 
 				// Apply patch using recursive merge with size limit
 				newState = recursivelyMergeObjects(baseState, packet.data.patch);
@@ -392,9 +390,11 @@ export class Connection {
 					const isPilot = this.vatsim.isPilot(status);
 					const isObserver = this.vatsim.isObserver(status);
 
-					if ((socketInfo.type === 'controller' && !isController) ||
+					if (
+						(socketInfo.type === 'controller' && !isController) ||
 						(socketInfo.type === 'pilot' && !isPilot) ||
-						(socketInfo.type === 'observer' && !isObserver)) {
+						(socketInfo.type === 'observer' && !isObserver)
+					) {
 						console.log(`User ${socketInfo.controllerId} role changed on VATSIM, closing connection`);
 						socket.send(
 							JSON.stringify({
@@ -514,11 +514,7 @@ export class Connection {
 			return new Response('User not connected to VATSIM', { status: 403 });
 		}
 		// Auto-determine client type based on VATSIM status
-		const clientType = this.vatsim.isController(status)
-			? 'controller'
-			: this.vatsim.isObserver(status)
-				? 'observer'
-				: 'pilot';
+		const clientType = this.vatsim.isController(status) ? 'controller' : this.vatsim.isObserver(status) ? 'observer' : 'pilot';
 
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
@@ -561,17 +557,13 @@ export class Connection {
 			);
 		} // Determine if there's an active state with controllers
 		const now = Date.now();
-		// Only consider controllers for determining if state is active
 		const hasActiveControllers = state.controllers.size > 0;
-		const hasRecentUpdates = now - state.lastUpdate <= this.TWO_MINUTES;
-		const hasActiveState = hasActiveControllers && hasRecentUpdates;
+		const hasActiveState = hasActiveControllers;
 
 		let stateObjects;
 		let isOffline = false;
 
 		if (clientType === 'controller' || hasActiveState) {
-			// Controllers always get the current state
-			// Pilots get active state only if controllers are online and have recent updates
 			stateObjects = Array.from(state.objects.values());
 			isOffline = false;
 		} else {
@@ -647,6 +639,41 @@ export class Connection {
 						);
 						break;
 
+					case 'GET_STATE': {
+						// Provide current state snapshot (controllers + pilots can request; observers too)
+						const airport = packet.airport || socketInfo.airport;
+						const state = this.airportStates.get(airport);
+						let offline = false;
+						let objects: AirportObject[] = [];
+
+						// Determine if controllers currently connected for this airport
+						const hasControllers = Array.from(this.sockets.values()).some(
+							(c) => c.airport === airport && c.type === 'controller',
+						);
+
+						if (state && hasControllers) {
+							// If any controller currently connected, treat state as online regardless of recency
+							objects = Array.from(state.objects.values());
+						} else {
+							offline = true;
+							objects = await this.getOfflineStateFromPoints(airport);
+						}
+
+						const snapshot: Packet = {
+							type: 'STATE_SNAPSHOT',
+							airport,
+							data: {
+								objects,
+								sharedState: this.getSharedStateSnapshot(airport),
+								offline,
+								requestedAt: packet.timestamp || now,
+							},
+							timestamp: Date.now(),
+						};
+						server.send(JSON.stringify(snapshot));
+						break;
+					}
+
 					case 'STATE_UPDATE':
 						if (clientType === 'pilot') {
 							throw new Error('Pilots cannot send state updates');
@@ -665,7 +692,9 @@ export class Connection {
 							await this.broadcast(broadcastPacket, server);
 							await this.trackMessage(clientType);
 						} catch (updateError) {
-							throw new Error(`State update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+							throw new Error(
+								`State update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
+							);
 						}
 						break;
 
@@ -688,7 +717,9 @@ export class Connection {
 						try {
 							this.handleSharedStateUpdate(packet, user.vatsim_id, socketInfo.airport);
 						} catch (updateError) {
-							throw new Error(`Shared state update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+							throw new Error(
+								`Shared state update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
+							);
 						}
 						break;
 
@@ -834,7 +865,7 @@ export class Connection {
 						controllers: [] as string[],
 						pilots: [] as string[],
 						controllerSet: new Set<string>(),
-						pilotSet: new Set<string>()
+						pilotSet: new Set<string>(),
 					},
 				);
 			const state = this.airportStates.get(airport);
@@ -845,25 +876,13 @@ export class Connection {
 			const connectedControllers = connectedClients.controllers.length > 0;
 
 			if (state && connectedControllers) {
-				const now = Date.now();
-				// Check if there's a recent state from controllers
-				const hasRecentState = now - state.lastUpdate <= this.TWO_MINUTES;
-
-				if (hasRecentState) {
-					// Return active state with actual objects
-					objects = Array.from(state.objects.values())
-						.filter((obj) => obj.state)
-						.map((obj) => ({
-							id: obj.id,
-							state: obj.state,
-							controllerId: obj.controllerId,
-							timestamp: obj.timestamp,
-						}));
-				} else {
-					// Recent controllers but no recent state, use offline
-					isOffline = true;
-					objects = await this.getOfflineStateFromPoints(airport);
-				}
+				// Return active state with all objects regardless of recency since controllers are connected
+				objects = Array.from(state.objects.values()).map((obj) => ({
+					id: obj.id,
+					state: obj.state,
+					controllerId: obj.controllerId,
+					timestamp: obj.timestamp,
+				}));
 			} else {
 				// No controllers connected or no state exists, mark as offline
 				isOffline = true;
@@ -959,7 +978,7 @@ export class Connection {
 			airport: airport,
 			data: {
 				sharedStatePatch: patch,
-				controllerId: controllerId
+				controllerId: controllerId,
 			},
 			timestamp: Date.now(),
 		};
@@ -974,7 +993,9 @@ export class Connection {
 						try {
 							socket.send(JSON.stringify(packet));
 						} catch (error) {
-							console.error(`Failed to send packet over WebSocket: ${error instanceof Error ? error.message : String(error)}`);
+							console.error(
+								`Failed to send packet over WebSocket: ${error instanceof Error ? error.message : String(error)}`,
+							);
 						} finally {
 							resolve();
 						}
@@ -1011,7 +1032,9 @@ export class Connection {
 			'INITIAL_STATE',
 			'CONTROLLER_CONNECT',
 			'CONTROLLER_DISCONNECT',
-			'ERROR'
+			'ERROR',
+			'GET_STATE',
+			'STATE_SNAPSHOT',
 		];
 
 		if (!validTypes.includes(packet.type)) {

@@ -4,7 +4,7 @@ export class VatsimService {
 	constructor(
 		private clientId: string,
 		private clientSecret: string,
-	) { }
+	) {}
 
 	async getToken(code: string): Promise<AuthResponse> {
 		const res = await fetch('https://auth.vatsim.net/oauth/token', {
@@ -39,6 +39,8 @@ export class VatsimService {
 		return {
 			id: userData.data.cid,
 			email: userData.data.personal.email,
+			first_name: (userData as any)?.data?.personal?.name_first || undefined,
+			last_name: (userData as any)?.data?.personal?.name_last || undefined,
 		};
 	}
 	async getUserStatus(userId: string): Promise<{ cid: string; callsign: string; type: string } | null> {

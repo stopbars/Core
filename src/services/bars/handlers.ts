@@ -76,75 +76,60 @@ export class StopbarHandler extends BarsTypeHandler {
 		if (points.length < 2) return [];
 		const lightPoints = generateEquidistantPoints(points, STOPBAR_SPACING);
 
-		const headingAdjustment = this.getHeadingAdjustment(dbRecord.orientation) + 90;
+		// First derive along-line headings without any adjustment
+		const alongHeadings = this.addHeadingToPoints(lightPoints, 0);
 
-		if (lightPoints.length >= 2) {
-			const initialHeading = calculateHeading(lightPoints[0], lightPoints[1]);
-			const needsReversal = initialHeading > 180 && initialHeading < 360;
+		// Orientation mapping requirement (perpendicular to line):
+		//  We compute perpendicular headings (seg - 90) and (seg + 90).
+		//  Flipped per latest feedback:
+		//  left  -> choose perpendicular in north/east half (<180)
+		//  right -> choose perpendicular in south/west half (>=180)
+		//  both  -> deterministic choice (south/west half) so stable output.
+		const orientation = dbRecord.orientation || 'both';
 
-			if (needsReversal) {
-				const extraAdjustment = 180;
-				const lightsWithHeading = this.addHeadingToPoints(lightPoints, headingAdjustment + extraAdjustment);
-
-				const lightsWithProperties = lightsWithHeading.map(
-					(light): BarsLightPoint => ({
-						...light,
-						properties: {
-							type: 'stopbar',
-							color: dbRecord.color || 'red',
-							orientation: dbRecord.orientation,
-							elevated: false,
-							ihp: dbRecord.ihp,
-						},
-					}),
-				);
-
-				// Generate IHP lights if needed
-				let allLights = [...lightsWithProperties];
-
-				if (dbRecord.ihp) {
-					const ihpLights = this.generateIHPLights(lightPoints, lightsWithHeading, headingAdjustment + extraAdjustment, dbRecord);
-					allLights = [...allLights, ...ihpLights];
-				}
-
-				// Handle elevated lights if needed
-				if (dbRecord.elevated) {
-					const elevatedLights = this.generateElevatedLights(lightPoints, lightsWithHeading, headingAdjustment + extraAdjustment);
-					allLights = [...allLights, ...elevatedLights];
-				}
-
-				return allLights;
+		const lightsWithHeading: BarsLightPoint[] = alongHeadings.map((p) => {
+			const seg = ((p.heading % 360) + 360) % 360; // along-line heading
+			const perpA = (seg + 90) % 360; // right side relative to direction of drawing
+			const perpB = (seg + 270) % 360; // left side (seg - 90)
+			// Determine which candidate is north/east (<180) vs south/west (>=180)
+			const candidateNorthEast = perpA < 180 ? perpA : perpB < 180 ? perpB : perpA; // one <180 if possible
+			const candidateSouthWest = perpA >= 180 ? perpA : perpB >= 180 ? perpB : perpA; // one >=180 if possible
+			let chosen: number;
+			if (orientation === 'right') {
+				chosen = candidateSouthWest; // flipped
+			} else if (orientation === 'left') {
+				chosen = candidateNorthEast; // flipped
+			} else {
+				// both -> deterministic pick south/west
+				chosen = candidateSouthWest;
 			}
-		}
+			return { ...p, heading: chosen };
+		});
 
-		// If no reversal needed, proceed with normal processing
-		const lightsWithHeading = this.addHeadingToPoints(lightPoints, headingAdjustment);
+		// Add properties to base stopbar lights
+		const lightsWithProperties: BarsLightPoint[] = lightsWithHeading.map((light): BarsLightPoint => ({
+			...light,
+			properties: {
+				type: 'stopbar',
+				color: dbRecord.color || 'red',
+				orientation: dbRecord.orientation,
+				elevated: false,
+				ihp: dbRecord.ihp,
+			},
+		}));
 
-		// Add properties to all lights
-		const lightsWithProperties = lightsWithHeading.map(
-			(light): BarsLightPoint => ({
-				...light,
-				properties: {
-					type: 'stopbar',
-					color: dbRecord.color || 'red',
-					orientation: dbRecord.orientation,
-					elevated: false,
-					ihp: dbRecord.ihp,
-				},
-			}),
-		);
+		let allLights: BarsLightPoint[] = [...lightsWithProperties];
 
-		// Generate IHP lights if needed
-		let allLights = [...lightsWithProperties];
-
+		// IHP lights (inherit chosen heading at center)
 		if (dbRecord.ihp) {
-			const ihpLights = this.generateIHPLights(lightPoints, lightsWithHeading, headingAdjustment, dbRecord);
+			const ihpLights = this.generateIHPLights(lightPoints, lightsWithHeading, 0, dbRecord);
 			allLights = [...allLights, ...ihpLights];
 		}
 
-		// Handle elevated lights if needed
-		if (dbRecord.elevated) {
-			const elevatedLights = this.generateElevatedLights(lightPoints, lightsWithHeading, headingAdjustment);
+		// Elevated lights (need baseline line direction). Compute baseline from first segment.
+		if (dbRecord.elevated && lightPoints.length >= 2) {
+			const baseLineHeading = calculateHeading(lightPoints[0], lightPoints[1]);
+			const elevatedLights = this.generateElevatedLights(lightPoints, lightsWithHeading, baseLineHeading);
 			allLights = [...allLights, ...elevatedLights];
 		}
 
@@ -225,7 +210,7 @@ export class StopbarHandler extends BarsTypeHandler {
 	/**
 	 * Generate elevated lights at the ends of a stopbar
 	 */
-	private generateElevatedLights(points: GeoPoint[], lightsWithHeading: BarsLightPoint[], headingAdjustment: number): BarsLightPoint[] {
+	private generateElevatedLights(points: GeoPoint[], lightsWithHeading: BarsLightPoint[], baseLineHeading: number): BarsLightPoint[] {
 		if (points.length < 2 || lightsWithHeading.length < 2) return [];
 
 		const elevatedLights: BarsLightPoint[] = [];
@@ -234,9 +219,7 @@ export class StopbarHandler extends BarsTypeHandler {
 		const firstLight = lightsWithHeading[0];
 		const lastLight = lightsWithHeading[lightsWithHeading.length - 1];
 
-		// Get the direction of the stopbar line
-		// We need to adjust by -90 because the heading is perpendicular to the stopbar
-		const baseLineHeading = (firstLight.heading - 90) % 360;
+		// baseLineHeading provided (direction along the stopbar line)
 
 		// Step 1: Calculate the extension points - placing them exactly 1 meter beyond each end of the stopbar
 		// First point - elevated light placed exactly 1 meter BEFORE the first light (extending the line)
@@ -254,23 +237,23 @@ export class StopbarHandler extends BarsTypeHandler {
 		);
 
 		// Step 2: Move the lights inward by the defined inward offset (0.3 meters)
-		// We move perpendicular to the stopbar line
+		// Now place them on the OPPOSITE side of the stopbar (flip from previous -90 to +90)
 		const startInwardPoint = calculateDestinationPoint(
 			startElevatedPoint,
 			ELEVATED_LIGHT_INWARD_OFFSET,
-			(baseLineHeading - 90) % 360, // 90 degrees right of stopbar direction
+			(baseLineHeading + 90) % 360, // opposite side perpendicular
 		);
 
 		const endInwardPoint = calculateDestinationPoint(
 			endElevatedPoint,
 			ELEVATED_LIGHT_INWARD_OFFSET,
-			(baseLineHeading - 90) % 360, // 90 degrees right of stopbar direction
-		); // Step 3: Calculate the inward headings to make the lights point toward the center of the stopbar
-		// For the first elevated light at the start of the stopbar: angle inward by the inward angle
-		const firstElevatedHeading = (baseLineHeading + ELEVATED_LIGHT_INWARD_ANGLE) % 360;
+			(baseLineHeading + 90) % 360, // opposite side perpendicular
+		);
 
-		// For the last elevated light at the end of the stopbar: angle inward by the inward angle (opposite direction)
-		const lastElevatedHeading = (baseLineHeading + 180 - ELEVATED_LIGHT_INWARD_ANGLE) % 360;
+		// Step 3: Flip headings 180° so elevated lights face the correct (opposite) way after side switch
+		// Original inward headings: base+angle and base+180-angle. We add 180 to both to flip them.
+		const firstElevatedHeading = (baseLineHeading + ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
+		const lastElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
 
 		// Add the elevated lights with correct positions and inward headings
 		elevatedLights.push({
