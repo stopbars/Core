@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "openapi": "3.0.4",
   "info": {
     "title": "BARS Core API",
@@ -2933,3 +2934,2579 @@
     }
   }
 }
+=======
+	"openapi": "3.0.4",
+	"info": {
+		"title": "BARS Core API",
+		"version": "2.0.0",
+		"description": "API documentation for BARS Core",
+		"contact": {
+			"name": "BARS Support",
+			"email": "support@stopbars.com",
+			"url": "https://stopbars.com/support"
+		}
+	},
+	"externalDocs": {
+		"description": "Find more info here",
+		"url": "https://docs.stopbars.com"
+	},
+	"servers": [
+		{
+			"url": "https://v2.stopbars.com",
+			"description": "Production"
+		},
+		{
+			"url": "http://localhost:8787",
+			"description": "Local development (wrangler dev)"
+		}
+	],
+	"tags": [
+		{
+			"name": "RealTime",
+			"description": "WebSocket connection and real-time state interaction endpoints."
+		},
+		{
+			"name": "State",
+			"description": "Endpoints for retrieving current system or airport lighting/network state."
+		},
+		{
+			"name": "Auth",
+			"description": "Authentication, account management, and API key lifecycle."
+		},
+		{
+			"name": "Airports",
+			"description": "Lookup and metadata endpoints for airports."
+		},
+		{
+			"name": "Divisions",
+			"description": "Division management, membership, and associated airport access."
+		},
+		{
+			"name": "Points",
+			"description": "Creation and management of lighting/navigation point data."
+		},
+		{
+			"name": "Generation",
+			"description": "Utilities for generating light support / BARS XML artifacts."
+		},
+		{
+			"name": "NOTAM",
+			"description": "Global NOTAM retrieval and (staff) updates."
+		},
+		{
+			"name": "Contributions",
+			"description": "Community lighting package submission, review, and leaderboard."
+		},
+		{
+			"name": "Staff",
+			"description": "Restricted staff-only operational and moderation endpoints (hidden from public docs)."
+		},
+		{
+			"name": "CDN",
+			"description": "File storage, upload, listing, and deletion via CDN-backed storage."
+		},
+		{
+			"name": "FAQ",
+			"description": "Frequently Asked Questions (FAQ) management and retrieval."
+		},
+		{
+			"name": "EuroScope",
+			"description": "EuroScope sector file upload, listing, and permission checks by ICAO."
+		},
+		{
+			"name": "Cache",
+			"description": "Administrative cache management operations."
+		},
+		{
+			"name": "GitHub",
+			"description": "Repository contributor information."
+		},
+		{
+			"name": "System",
+			"description": "System health and OpenAPI specification discovery."
+		}
+	],
+	"paths": {
+		"/contact": {
+			"post": {
+				"summary": "Submit a contact form",
+				"tags": ["Contact"],
+				"description": "Public endpoint to submit a contact/support message. Limited to 1 submission per 24 hours per IP.",
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["email", "topic", "message"],
+								"properties": {
+									"email": {
+										"type": "string",
+										"format": "email"
+									},
+									"topic": {
+										"type": "string"
+									},
+									"message": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Message stored"
+					},
+					"400": {
+						"description": "Validation error"
+					},
+					"429": {
+						"description": "Rate limited (already submitted within 24h)"
+					}
+				}
+			},
+			"get": {
+				"summary": "List submitted contact messages",
+				"x-hidden": true,
+				"tags": ["Contact", "Staff"],
+				"description": "Returns all contact messages (newest first). Requires Product Manager or higher.",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Messages returned"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/contact/{id}/status": {
+			"patch": {
+				"summary": "Update contact message status",
+				"x-hidden": true,
+				"tags": ["Contact", "Staff"],
+				"description": "Set status to pending, handling, or handled. Requires Product Manager or higher.",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["status"],
+								"properties": {
+									"status": {
+										"type": "string",
+										"enum": ["pending", "handling", "handled"]
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Updated message returned"
+					},
+					"400": {
+						"description": "Invalid status"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Message not found"
+					}
+				}
+			}
+		},
+		"/contact/{id}": {
+			"delete": {
+				"summary": "Delete a contact message",
+				"x-hidden": true,
+				"tags": ["Contact", "Staff"],
+				"description": "Permanently deletes a contact message. Requires Product Manager or higher.",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Deleted"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			}
+		},
+		"/connect": {
+			"get": {
+				"summary": "Establish a WebSocket for an airport",
+				"tags": ["RealTime"],
+				"description": "Performs a WebSocket upgrade to stream real-time airport state. Requires:\n- GET with `Upgrade: websocket`\n- `airport` (ICAO, 4 chars) & `key` (API key) query params\nThe API key is forwarded as a Bearer token to the airport's Durable Object for auth.\n",
+				"parameters": [
+					{
+						"in": "query",
+						"name": "airport",
+						"required": true,
+						"description": "Airport ICAO (4 alphanumeric characters)",
+						"schema": {
+							"type": "string",
+							"minLength": 4,
+							"maxLength": 4,
+							"pattern": "^[A-Z0-9]{4}$"
+						}
+					},
+					{
+						"in": "query",
+						"name": "key",
+						"required": true,
+						"description": "User API key",
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"101": {
+						"description": "WebSocket upgrade accepted"
+					},
+					"400": {
+						"description": "Missing/invalid params or not a WebSocket upgrade"
+					},
+					"401": {
+						"description": "API key rejected"
+					}
+				}
+			}
+		},
+		"/state": {
+			"get": {
+				"summary": "Get current lighting/network state",
+				"tags": ["State"],
+				"description": "Retrieves real-time state for a specific airport or all active airports.",
+				"parameters": [
+					{
+						"in": "query",
+						"name": "airport",
+						"required": true,
+						"description": "ICAO code of airport or 'all' for every active airport",
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "State information returned"
+					},
+					"400": {
+						"description": "Missing or invalid airport parameter"
+					}
+				}
+			}
+		},
+		"/auth/vatsim/callback": {
+			"get": {
+				"summary": "VATSIM OAuth callback",
+				"tags": ["Auth"],
+				"description": "Exchanges authorization code for a VATSIM token and redirects to frontend with token.",
+				"parameters": [
+					{
+						"in": "query",
+						"name": "code",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"302": {
+						"description": "Redirect to application with token or error"
+					},
+					"400": {
+						"description": "Missing code parameter"
+					}
+				}
+			}
+		},
+		"/auth/account": {
+			"get": {
+				"summary": "Get authenticated account information",
+				"tags": ["Auth"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Account found"
+					},
+					"401": {
+						"description": "Missing or invalid token"
+					},
+					"404": {
+						"description": "User not found"
+					}
+				}
+			}
+		},
+		"/auth/display-mode": {
+			"put": {
+				"summary": "Update preferred display name mode",
+				"tags": ["Auth"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["mode"],
+								"properties": {
+									"mode": {
+										"type": "integer",
+										"enum": [0, 1, 2],
+										"description": "0=First,1=First LastInitial,2=CID"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Updated"
+					}
+				}
+			}
+		},
+		"/auth/regenerate-api-key": {
+			"post": {
+				"summary": "Regenerate API key",
+				"tags": ["Auth"],
+				"description": "Generates a new API key for the authenticated user (24h cooldown).",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Key regenerated"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"404": {
+						"description": "User not found"
+					},
+					"429": {
+						"description": "Rate limited (cooldown not elapsed)"
+					}
+				}
+			}
+		},
+		"/auth/delete": {
+			"delete": {
+				"summary": "Delete current user account",
+				"tags": ["Auth"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Account deleted"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"404": {
+						"description": "User not found"
+					}
+				}
+			}
+		},
+		"/auth/is-staff": {
+			"get": {
+				"x-hidden": true,
+				"summary": "Check staff status",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"ApiKeyAuth": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Staff status returned"
+					},
+					"401": {
+						"description": "Unauthorized"
+					}
+				}
+			}
+		},
+		"/airports": {
+			"get": {
+				"summary": "Get airport data",
+				"tags": ["Airports"],
+				"description": "Fetch airport(s) by ICAO(s) or by continent.",
+				"parameters": [
+					{
+						"in": "query",
+						"name": "icao",
+						"required": false,
+						"description": "Single ICAO or comma-separated list",
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "query",
+						"name": "continent",
+						"required": false,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Airport data returned"
+					},
+					"400": {
+						"description": "Invalid parameters"
+					},
+					"404": {
+						"description": "Airport not found"
+					}
+				}
+			}
+		},
+		"/airports/nearest": {
+			"get": {
+				"summary": "Find nearest airport",
+				"tags": ["Airports"],
+				"description": "Returns the nearest airport to a given latitude/longitude. Results are cached in 5NM buckets for high performance.",
+				"parameters": [
+					{
+						"in": "query",
+						"name": "lat",
+						"required": true,
+						"description": "Latitude in decimal degrees (-90 to 90)",
+						"schema": {
+							"type": "number"
+						}
+					},
+					{
+						"in": "query",
+						"name": "lon",
+						"required": true,
+						"description": "Longitude in decimal degrees (-180 to 180)",
+						"schema": {
+							"type": "number"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Nearest airport returned"
+					},
+					"400": {
+						"description": "Invalid coordinates"
+					},
+					"404": {
+						"description": "No airport found"
+					}
+				}
+			}
+		},
+		"/divisions": {
+			"get": {
+				"summary": "List all divisions",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Divisions returned"
+					},
+					"401": {
+						"description": "Unauthorized"
+					}
+				}
+			},
+			"post": {
+				"x-hidden": true,
+				"summary": "Create a new division",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["name", "headVatsimId"],
+								"properties": {
+									"name": {
+										"type": "string"
+									},
+									"headVatsimId": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Division created"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/divisions/{id}": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update division name",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["name"],
+								"properties": {
+									"name": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Division updated"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Division not found"
+					}
+				}
+			},
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete a division",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Division deleted"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Division not found"
+					}
+				}
+			},
+			"get": {
+				"summary": "Get division details",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Division returned"
+					},
+					"404": {
+						"description": "Division not found"
+					}
+				}
+			}
+		},
+		"/divisions/user": {
+			"get": {
+				"summary": "Get divisions for current user",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "User divisions returned"
+					}
+				}
+			}
+		},
+		"/divisions/{id}/members": {
+			"get": {
+				"summary": "List division members",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Members listed"
+					},
+					"404": {
+						"description": "Division not found"
+					}
+				}
+			},
+			"post": {
+				"x-hidden": true,
+				"summary": "Add member to division",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["vatsimId", "role"],
+								"properties": {
+									"vatsimId": {
+										"type": "string"
+									},
+									"role": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Member added"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/divisions/{id}/members/{vatsimId}": {
+			"delete": {
+				"x-hidden": true,
+				"summary": "Remove member from division",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					},
+					{
+						"in": "path",
+						"name": "vatsimId",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Member removed"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/divisions/{id}/airports": {
+			"get": {
+				"summary": "List division airports",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Airports listed"
+					},
+					"404": {
+						"description": "Division not found"
+					}
+				}
+			},
+			"post": {
+				"x-hidden": true,
+				"summary": "Request airport addition to division",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["icao"],
+								"properties": {
+									"icao": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Airport request created"
+					},
+					"404": {
+						"description": "Division not found"
+					}
+				}
+			}
+		},
+		"/divisions/{id}/airports/{airportId}/approve": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Approve or reject airport request",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					},
+					{
+						"in": "path",
+						"name": "airportId",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["approved"],
+								"properties": {
+									"approved": {
+										"type": "boolean"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Airport approval processed"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/airports/{icao}/points": {
+			"get": {
+				"summary": "List lighting/navigation points for airport",
+				"tags": ["Points"],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string",
+							"minLength": 4,
+							"maxLength": 4
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Points returned"
+					},
+					"400": {
+						"description": "Invalid ICAO"
+					}
+				}
+			},
+			"post": {
+				"x-hidden": true,
+				"summary": "Create a single point",
+				"tags": ["Points"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"$ref": "#/components/schemas/PointData"
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Point created"
+					},
+					"401": {
+						"description": "Unauthorized"
+					}
+				}
+			}
+		},
+		"/airports/{icao}/points/batch": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Apply a batch point changeset",
+				"tags": ["Points"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"$ref": "#/components/schemas/PointChangeset"
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Changeset applied"
+					}
+				}
+			}
+		},
+		"/airports/{icao}/points/{id}": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update a point",
+				"tags": ["Points"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object"
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Point updated"
+					}
+				}
+			},
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete a point",
+				"tags": ["Points"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Deleted"
+					}
+				}
+			}
+		},
+		"/points/{id}": {
+			"get": {
+				"summary": "Get a single point by ID",
+				"tags": ["Points"],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Point found"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			}
+		},
+		"/points": {
+			"get": {
+				"summary": "Get multiple points by IDs",
+				"tags": ["Points"],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "ids",
+						"required": true,
+						"description": "Comma-separated list of point IDs (max 100)",
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Points returned"
+					},
+					"400": {
+						"description": "Validation error"
+					}
+				}
+			}
+		},
+		"/supports/generate": {
+			"post": {
+				"summary": "Generate Light Supports and BARS XML",
+				"tags": ["Generation"],
+				"description": "Upload raw XML and generate both light supports XML and processed BARS XML.",
+				"requestBody": {
+					"required": true,
+					"content": {
+						"multipart/form-data": {
+							"schema": {
+								"type": "object",
+								"required": ["xmlFile", "icao"],
+								"properties": {
+									"xmlFile": {
+										"type": "string",
+										"format": "binary"
+									},
+									"icao": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Generated XML returned"
+					},
+					"400": {
+						"description": "Validation error"
+					}
+				}
+			}
+		},
+		"/notam": {
+			"get": {
+				"summary": "Get global NOTAM",
+				"tags": ["NOTAM"],
+				"responses": {
+					"200": {
+						"description": "Current NOTAM returned"
+					}
+				}
+			},
+			"put": {
+				"x-hidden": true,
+				"summary": "Update global NOTAM",
+				"tags": ["NOTAM"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["content"],
+								"properties": {
+									"content": {
+										"type": "string"
+									},
+									"type": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "NOTAM updated"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/staff/users": {
+			"get": {
+				"x-hidden": true,
+				"summary": "List users (staff only)",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Users returned"
+					},
+					"401": {
+						"description": "Unauthorized"
+					}
+				}
+			}
+		},
+		"/staff/users/search": {
+			"get": {
+				"x-hidden": true,
+				"summary": "Search users (staff only)",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "q",
+						"required": true,
+						"schema": {
+							"type": "string",
+							"minLength": 3
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Search results returned"
+					},
+					"400": {
+						"description": "Invalid query"
+					}
+				}
+			}
+		},
+		"/staff/users/refresh-api-token": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Refresh a user's API token (staff only)",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["vatsimId"],
+								"properties": {
+									"vatsimId": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Token refreshed"
+					}
+				}
+			}
+		},
+		"/staff/users/{id}": {
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete a user (staff only)",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "User deletion result"
+					}
+				}
+			}
+		},
+		"/staff/manage": {
+			"get": {
+				"x-hidden": true,
+				"summary": "List staff members",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Staff listed"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			},
+			"post": {
+				"x-hidden": true,
+				"summary": "Add or update a staff member",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["vatsimId", "role"],
+								"properties": {
+									"vatsimId": {
+										"type": "string"
+									},
+									"role": {
+										"type": "string",
+										"enum": ["LEAD_DEVELOPER", "PRODUCT_MANAGER"]
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Staff added/updated"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/staff/manage/{vatsimId}": {
+			"delete": {
+				"x-hidden": true,
+				"summary": "Remove staff member",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "vatsimId",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Staff removed"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/contributions": {
+			"get": {
+				"summary": "List contributions",
+				"tags": ["Contributions"],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "status",
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "query",
+						"name": "airport",
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "query",
+						"name": "user",
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Contributions listed"
+					}
+				}
+			},
+			"post": {
+				"summary": "Submit a new contribution",
+				"tags": ["Contributions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["airportIcao", "packageName", "submittedXml"],
+								"properties": {
+									"airportIcao": {
+										"type": "string"
+									},
+									"packageName": {
+										"type": "string"
+									},
+									"submittedXml": {
+										"type": "string"
+									},
+									"notes": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Contribution created"
+					}
+				}
+			}
+		},
+		"/contributions/leaderboard": {
+			"get": {
+				"summary": "Get top contributors",
+				"tags": ["Contributions"],
+				"responses": {
+					"200": {
+						"description": "Leaderboard returned"
+					}
+				}
+			}
+		},
+		"/contributions/top-packages": {
+			"get": {
+				"summary": "Get most used packages",
+				"tags": ["Contributions"],
+				"responses": {
+					"200": {
+						"description": "Package stats returned"
+					}
+				}
+			}
+		},
+		"/contributions/user": {
+			"get": {
+				"summary": "Get current user's contributions",
+				"tags": ["Contributions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "status",
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Contributions returned"
+					}
+				}
+			}
+		},
+		"/contributions/{id}": {
+			"get": {
+				"summary": "Get a specific contribution",
+				"tags": ["Contributions"],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Contribution returned"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			},
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete a contribution",
+				"tags": ["Contributions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Deletion result"
+					}
+				}
+			}
+		},
+		"/contributions/{id}/decision": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Approve or reject a contribution",
+				"tags": ["Contributions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["approved"],
+								"properties": {
+									"approved": {
+										"type": "boolean"
+									},
+									"rejectionReason": {
+										"type": "string"
+									},
+									"newPackageName": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Decision processed"
+					},
+					"403": {
+						"description": "Not authorized"
+					}
+				}
+			}
+		},
+		"/maps/{icao}/packages/{package}/latest": {
+			"get": {
+				"summary": "Get latest approved BARS map XML (raw content) for an airport & package",
+				"tags": ["Generation"],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "path",
+						"name": "package",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "BARS XML document returned inline (application/xml)"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			}
+		},
+		"/cdn/files/{fileKey}": {
+			"get": {
+				"summary": "Download a file from CDN",
+				"tags": ["CDN"],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "fileKey",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "File stream"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			},
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete a file (staff only)",
+				"tags": ["CDN"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "fileKey",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Deletion result"
+					}
+				}
+			}
+		},
+		"/cdn/upload": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Upload a file to CDN (staff only)",
+				"tags": ["CDN"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"multipart/form-data": {
+							"schema": {
+								"type": "object",
+								"required": ["file"],
+								"properties": {
+									"file": {
+										"type": "string",
+										"format": "binary"
+									},
+									"path": {
+										"type": "string"
+									},
+									"key": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "File uploaded"
+					}
+				}
+			}
+		},
+		"/cdn/files": {
+			"get": {
+				"x-hidden": true,
+				"summary": "List CDN files (staff only)",
+				"tags": ["CDN"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "prefix",
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Files listed"
+					}
+				}
+			}
+		},
+		"/euroscope/files/{icao}": {
+			"get": {
+				"summary": "List public EuroScope files for an airport",
+				"tags": ["EuroScope"],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Files listed"
+					},
+					"400": {
+						"description": "Invalid ICAO"
+					}
+				}
+			}
+		},
+		"/euroscope/upload": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Upload EuroScope file for an airport",
+				"tags": ["EuroScope"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"multipart/form-data": {
+							"schema": {
+								"type": "object",
+								"required": ["file", "icao"],
+								"properties": {
+									"file": {
+										"type": "string",
+										"format": "binary"
+									},
+									"icao": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "File uploaded"
+					}
+				}
+			}
+		},
+		"/euroscope/files/{icao}/{filename}": {
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete EuroScope file",
+				"tags": ["EuroScope"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"in": "path",
+						"name": "filename",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Deletion result"
+					}
+				}
+			}
+		},
+		"/euroscope/{icao}/editable": {
+			"get": {
+				"x-hidden": true,
+				"summary": "Check if EuroScope files are editable by user",
+				"tags": ["EuroScope"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Permission status returned"
+					}
+				}
+			}
+		},
+		"/releases": {
+			"get": {
+				"summary": "List all product releases (optionally filtered)",
+				"tags": ["Installer"],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "product",
+						"schema": {
+							"type": "string",
+							"enum": ["Pilot-Client", "vatSys-Plugin", "EuroScope-Plugin", "Installer", "SimConnect.NET"]
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Releases listed"
+					}
+				}
+			}
+		},
+		"/releases/latest": {
+			"get": {
+				"summary": "Get latest release for a product",
+				"tags": ["Installer"],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "product",
+						"required": true,
+						"schema": {
+							"type": "string",
+							"enum": ["Pilot-Client", "vatSys-Plugin", "EuroScope-Plugin", "Installer", "SimConnect.NET"]
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Latest release returned"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			}
+		},
+		"/releases/upload": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Create a new product release (lead developer only)",
+				"tags": ["Installer"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"multipart/form-data": {
+							"schema": {
+								"type": "object",
+								"required": ["file", "product", "version"],
+								"properties": {
+									"file": {
+										"type": "string",
+										"format": "binary"
+									},
+									"product": {
+										"type": "string",
+										"enum": ["Pilot-Client", "vatSys-Plugin", "EuroScope-Plugin", "Installer", "SimConnect.NET"]
+									},
+									"version": {
+										"type": "string"
+									},
+									"changelog": {
+										"type": "string"
+									},
+									"image": {
+										"type": "string",
+										"format": "binary",
+										"description": "Optional promotional image (PNG/JPEG, max 5MB)"
+									}
+								}
+							}
+						}
+					}
+				},
+				"x-notes": [
+					"Product \"Installer\" requires an .exe file upload.",
+					"Product \"SimConnect.NET\" does not require a file upload (metadata + changelog only; version links to NuGet)."
+				],
+				"responses": {
+					"201": {
+						"description": "Release created"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/releases/{id}/changelog": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update changelog content for a release",
+				"description": "Update only the changelog text of an existing release record.",
+				"tags": ["Installer"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["changelog"],
+								"properties": {
+									"changelog": {
+										"type": "string",
+										"maxLength": 20000
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Changelog updated"
+					},
+					"400": {
+						"description": "Validation error"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Release not found"
+					}
+				}
+			}
+		},
+		"/purge-cache": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Purge a cache key (lead developer only)",
+				"tags": ["Staff", "Cache"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["key"],
+								"properties": {
+									"key": {
+										"type": "string"
+									},
+									"namespace": {
+										"type": "string"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Cache purged"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/contributors": {
+			"get": {
+				"summary": "List GitHub contributors",
+				"tags": ["GitHub"],
+				"responses": {
+					"200": {
+						"description": "Contributors returned"
+					}
+				}
+			}
+		},
+		"/faqs": {
+			"get": {
+				"summary": "List public FAQs",
+				"tags": ["FAQ"],
+				"responses": {
+					"200": {
+						"description": "FAQs returned"
+					}
+				}
+			}
+		},
+		"/staff/faqs": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Create FAQ",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["question", "answer", "order_position"],
+								"properties": {
+									"question": {
+										"type": "string"
+									},
+									"answer": {
+										"type": "string"
+									},
+									"order_position": {
+										"type": "integer"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"201": {
+						"description": "Created"
+					}
+				}
+			}
+		},
+		"/staff/faqs/{id}": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update FAQ",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"question": {
+										"type": "string"
+									},
+									"answer": {
+										"type": "string"
+									},
+									"order_position": {
+										"type": "integer"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Updated"
+					},
+					"404": {
+						"description": "Not found"
+					}
+				}
+			},
+			"delete": {
+				"x-hidden": true,
+				"summary": "Delete FAQ",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Deletion result"
+					}
+				}
+			}
+		},
+		"/staff/faqs/reorder": {
+			"post": {
+				"x-hidden": true,
+				"summary": "Bulk reorder FAQs",
+				"tags": ["Staff", "FAQ"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["updates"],
+								"properties": {
+									"updates": {
+										"type": "array",
+										"items": {
+											"type": "object",
+											"required": ["id", "order_position"],
+											"properties": {
+												"id": {
+													"type": "string"
+												},
+												"order_position": {
+													"type": "integer"
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Reordered"
+					}
+				}
+			}
+		},
+		"/health": {
+			"get": {
+				"summary": "System/service health check",
+				"tags": ["System"],
+				"parameters": [
+					{
+						"in": "query",
+						"name": "service",
+						"required": false,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "All services healthy"
+					},
+					"503": {
+						"description": "One or more services degraded"
+					}
+				}
+			}
+		},
+		"/openapi.json": {
+			"get": {
+				"summary": "Get OpenAPI specification",
+				"tags": ["System"],
+				"description": "Returns the current OpenAPI 3.0 document for the BARS Core API.",
+				"responses": {
+					"200": {
+						"description": "OpenAPI document",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object"
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	},
+	"components": {
+		"securitySchemes": {
+			"VatsimToken": {
+				"type": "apiKey",
+				"in": "header",
+				"name": "X-Vatsim-Token",
+				"description": "VATSIM authentication token obtained via OAuth callback."
+			},
+			"ApiKeyAuth": {
+				"type": "http",
+				"scheme": "bearer",
+				"bearerFormat": "API Key",
+				"description": "User API key passed as Bearer token in Authorization header."
+			}
+		},
+		"schemas": {
+			"Coordinates": {
+				"type": "object",
+				"required": ["lat", "lng"],
+				"properties": {
+					"lat": {
+						"type": "number",
+						"description": "Latitude in decimal degrees."
+					},
+					"lng": {
+						"type": "number",
+						"description": "Longitude in decimal degrees."
+					}
+				}
+			},
+			"PointData": {
+				"type": "object",
+				"required": ["type", "name", "coordinates"],
+				"properties": {
+					"type": {
+						"type": "string",
+						"enum": ["stopbar", "lead_on", "taxiway", "stand"],
+						"description": "Point category."
+					},
+					"name": {
+						"type": "string",
+						"description": "Human readable point name / identifier."
+					},
+					"coordinates": {
+						"$ref": "#/components/schemas/Coordinates"
+					},
+					"directionality": {
+						"type": "string",
+						"enum": ["bi-directional", "uni-directional"]
+					},
+					"orientation": {
+						"type": "string",
+						"enum": ["left", "right"]
+					},
+					"color": {
+						"type": "string",
+						"enum": ["yellow", "green", "green-yellow", "green-orange", "green-blue"]
+					},
+					"elevated": {
+						"type": "boolean"
+					},
+					"ihp": {
+						"type": "boolean",
+						"description": "In pavement (false) vs elevated (true) for some systems."
+					}
+				},
+				"description": "Point creation object. Server assigns id, airportId, created/updated timestamps & createdBy."
+			},
+			"Point": {
+				"allOf": [
+					{
+						"$ref": "#/components/schemas/PointData"
+					},
+					{
+						"type": "object",
+						"required": ["id", "airportId", "createdAt", "updatedAt", "createdBy"],
+						"properties": {
+							"id": {
+								"type": "string"
+							},
+							"airportId": {
+								"type": "string"
+							},
+							"createdAt": {
+								"type": "string",
+								"format": "date-time"
+							},
+							"updatedAt": {
+								"type": "string",
+								"format": "date-time"
+							},
+							"createdBy": {
+								"type": "string",
+								"description": "VATSIM ID of creator"
+							}
+						},
+						"description": "Persisted point including server-managed fields."
+					}
+				]
+			},
+			"PointDataPartial": {
+				"type": "object",
+				"description": "Partial PointData used for updates. All properties optional.",
+				"properties": {
+					"type": {
+						"type": "string",
+						"enum": ["stopbar", "lead_on", "taxiway", "stand"]
+					},
+					"name": {
+						"type": "string"
+					},
+					"coordinates": {
+						"type": "object",
+						"properties": {
+							"lat": {
+								"type": "number"
+							},
+							"lng": {
+								"type": "number"
+							}
+						}
+					},
+					"directionality": {
+						"type": "string",
+						"enum": ["bi-directional", "uni-directional"]
+					},
+					"orientation": {
+						"type": "string",
+						"enum": ["left", "right"]
+					},
+					"color": {
+						"type": "string",
+						"enum": ["yellow", "green", "green-yellow", "green-orange", "green-blue"]
+					},
+					"elevated": {
+						"type": "boolean"
+					},
+					"ihp": {
+						"type": "boolean"
+					}
+				}
+			},
+			"PointChangeset": {
+				"type": "object",
+				"description": "Transactional batch of point operations. Operations are applied atomically where possible.",
+				"properties": {
+					"create": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/PointData"
+						},
+						"description": "List of new points to create."
+					},
+					"modify": {
+						"type": "object",
+						"additionalProperties": {
+							"$ref": "#/components/schemas/PointDataPartial"
+						},
+						"description": "Map of point ID -> partial point data to update."
+					},
+					"delete": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "List of point IDs to delete."
+					}
+				}
+			},
+			"ErrorResponse": {
+				"type": "object",
+				"properties": {
+					"error": {
+						"type": "string"
+					},
+					"message": {
+						"type": "string"
+					},
+					"code": {
+						"type": "string",
+						"description": "Optional machine-readable error code"
+					}
+				},
+				"required": ["error"],
+				"description": "Standard error envelope."
+			}
+		}
+	}
+}
+>>>>>>> 514abf2f6b268eee323582fe2d1f249c2d649b95
