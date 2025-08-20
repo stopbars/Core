@@ -17,6 +17,7 @@ import { PostHogService } from './posthog';
 import { FAQService } from './faqs';
 import { ReleaseService } from './releases';
 import { ContactService } from './contact';
+import { DownloadsService } from './downloads';
 
 export const ServicePool = (() => {
 	let vatsim: VatsimService;
@@ -37,6 +38,7 @@ export const ServicePool = (() => {
 	let faqs: FAQService;
 	let releases: ReleaseService;
 	let contact: ContactService;
+	let downloads: DownloadsService;
 
 	return {
 		getVatsim(env: Env) {
@@ -152,6 +154,12 @@ export const ServicePool = (() => {
 				contact = new ContactService(env.DB);
 			}
 			return contact;
+		},
+		getDownloads(env: Env) {
+			if (!downloads) {
+				downloads = new DownloadsService(env.DB);
+			}
+			return downloads;
 		},
 	};
 })();

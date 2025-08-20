@@ -2326,6 +2326,76 @@
         }
       }
     },
+    "/download": {
+      "post": {
+        "summary": "Record a product download",
+        "tags": [
+          "Installer"
+        ],
+        "description": "Increments the download counter for the latest release of the given product. A given IP is only counted once per product+version within a rolling 24 hour window. After 24h the same IP can increment again.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pilot-Client",
+                "vatSys-Plugin",
+                "EuroScope-Plugin",
+                "Installer",
+                "SimConnect.NET"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Download recorded (or already counted for this IP)"
+          },
+          "400": {
+            "description": "Missing product or invalid product"
+          },
+          "404": {
+            "description": "Latest release not found when version omitted"
+          }
+        }
+      }
+    },
+    "/downloads/stats": {
+      "get": {
+        "summary": "Get download statistics for a product",
+        "tags": [
+          "Installer"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pilot-Client",
+                "vatSys-Plugin",
+                "EuroScope-Plugin",
+                "Installer",
+                "SimConnect.NET"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stats returned"
+          },
+          "400": {
+            "description": "Missing/invalid product"
+          }
+        }
+      }
+    },
     "/purge-cache": {
       "post": {
         "x-hidden": true,

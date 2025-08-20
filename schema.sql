@@ -202,3 +202,26 @@ CREATE TABLE IF NOT EXISTS contact_messages (
 CREATE INDEX IF NOT EXISTS idx_contact_messages_created_at ON contact_messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_contact_messages_ip_created ON contact_messages(ip_address, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_contact_messages_status ON contact_messages(status);
+
+CREATE TABLE IF NOT EXISTS downloads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product TEXT NOT NULL,
+    version TEXT NOT NULL,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(product, version)
+);
+CREATE INDEX IF NOT EXISTS idx_downloads_product ON downloads(product);
+CREATE INDEX IF NOT EXISTS idx_downloads_product_version ON downloads(product, version);
+
+CREATE TABLE IF NOT EXISTS download_ip_hits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product TEXT NOT NULL,
+    version TEXT NOT NULL,
+    ip_hash TEXT NOT NULL,
+    last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(product, version, ip_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_download_ip_hits_product_version ON download_ip_hits(product, version);
+CREATE INDEX IF NOT EXISTS idx_download_ip_hits_last_seen ON download_ip_hits(last_seen);

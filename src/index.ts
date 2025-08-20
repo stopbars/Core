@@ -3812,6 +3812,77 @@ app.put('/releases/:id/changelog', async (c) => {
 
 /**
  * @openapi
+ * /download:
+ *   post:
+ *     summary: Record a product download
+ *     tags:
+ *       - Installer
+ *     description: >-
+ *       Increments the download counter for the latest release of the given product. A given IP is only counted
+ *       once per product+version within a rolling 24 hour window. After 24h the same IP can increment again.
+ *     parameters:
+ *       - in: query
+ *         name: product
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET]
+ *     responses:
+ *       200:
+ *         description: Download recorded (or already counted for this IP)
+ *       400:
+ *         description: Missing product or invalid product
+ *       404:
+ *         description: Latest release not found when version omitted
+ */
+app.post('/download', async (c) => {
+	const product = c.req.query('product') as InstallerProduct | undefined;
+	if (!product) return c.json({ error: 'product required' }, 400);
+	const VALID: InstallerProduct[] = ['Pilot-Client', 'vatSys-Plugin', 'EuroScope-Plugin', 'Installer', 'SimConnect.NET'];
+	if (!VALID.includes(product)) return c.json({ error: 'invalid product' }, 400);
+	const releases = ServicePool.getReleases(c.env);
+	const latest = await releases.getLatest(product);
+	if (!latest) return c.json({ error: 'No release found for product' }, 404);
+	const version = latest.version;
+	const ip = c.get('clientIp') || '0.0.0.0';
+	const downloads = ServicePool.getDownloads(c.env);
+	const { versionCount, productTotal } = await downloads.recordDownload(product, version, ip);
+	const stats = await downloads.getStats(product);
+	return c.json({ product, version, versionCount, productTotal, versions: stats.versions });
+});
+
+/**
+ * @openapi
+ * /downloads/stats:
+ *   get:
+ *     summary: Get download statistics for a product
+ *     tags:
+ *       - Installer
+ *     parameters:
+ *       - in: query
+ *         name: product
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET]
+ *     responses:
+ *       200:
+ *         description: Stats returned
+ *       400:
+ *         description: Missing/invalid product
+ */
+app.get('/downloads/stats', withCache(CacheKeys.fromUrl, 300, 'installer'), async (c) => {
+	const product = c.req.query('product') as InstallerProduct | undefined;
+	if (!product) return c.json({ error: 'product required' }, 400);
+	const VALID: InstallerProduct[] = ['Pilot-Client', 'vatSys-Plugin', 'EuroScope-Plugin', 'Installer', 'SimConnect.NET'];
+	if (!VALID.includes(product)) return c.json({ error: 'invalid product' }, 400);
+	const downloads = ServicePool.getDownloads(c.env);
+	const stats = await downloads.getStats(product);
+	return c.json(stats);
+});
+
+/**
+ * @openapi
  * /purge-cache:
  *   post:
  *     x-hidden: true
