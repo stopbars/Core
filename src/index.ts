@@ -3853,6 +3853,151 @@ app.post('/download', async (c) => {
 
 /**
  * @openapi
+ * /staff/bars-packages/upload:
+ *   post:
+ *     x-hidden: true
+ *     summary: Upload BARS installer packages (models/removals)
+ *     description: >-
+ *       Staff-only endpoint to upload the two MSFS data packages used by the installer. Accepts a multipart form
+ *       with a single file and a `type` field designating which package is being uploaded. The file is stored in R2
+ *       under a fixed key and previous version overwritten. SHA-256 is computed server-side and stored in metadata.
+ *     tags:
+ *       - Staff
+ *       - Data
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file, type]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *               type:
+ *                 type: string
+ *                 enum: [models, models-2020, removals]
+ *     responses:
+ *       201:
+ *         description: Package uploaded successfully
+ *       400:
+ *         description: Validation error
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+app.post('/staff/bars-packages/upload', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	let vatsimUser;
+	try { vatsimUser = await vatsim.getUser(vatsimToken); } catch { return c.text('Unauthorized', 401); }
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+
+	let form: FormData;
+	try { form = await c.req.formData(); } catch { return c.json({ error: 'Invalid form-data' }, 400); }
+	const file = form.get('file');
+	const type = form.get('type')?.toString();
+	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
+	if (!type || !['models', 'models-2020', 'removals'].includes(type)) return c.json({ error: 'invalid type' }, 400);
+	// Enforce .zip
+	const lowerName = file.name.toLowerCase();
+	if (!lowerName.endsWith('.zip')) return c.json({ error: 'file must be a .zip archive' }, 400);
+	const MAX = 100 * 1024 * 1024; // 100MB
+	if (file.size > MAX) return c.json({ error: 'File too large (100MB max)' }, 400);
+
+	try {
+		const bytes = await file.arrayBuffer();
+		// SHA-256 hash
+		const digest = await crypto.subtle.digest('SHA-256', bytes);
+		const sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+		const storage = ServicePool.getStorage(c.env);
+		let key: string;
+		if (type === 'models') key = 'packages/bars-models-2024.zip';
+		else if (type === 'models-2020') key = 'packages/bars-models-2020.zip';
+		else key = 'packages/bars-removals.zip';
+		const uploadRes = await storage.uploadFile(key, bytes, 'application/zip', {
+			uploadedBy: user.vatsim_id,
+			type,
+			size: file.size.toString(),
+			sha256
+		});
+		const url = new URL(`https://dev-cdn.stopbars.com/${uploadRes.key}`, c.req.url).toString();
+		return c.json({
+			success: true,
+			package: {
+				type,
+				key: uploadRes.key,
+				size: file.size,
+				sha256,
+				etag: uploadRes.etag,
+				url
+			}
+		}, 201);
+	} catch (err) {
+		console.error('BARS package upload error', err);
+		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);
+	}
+});
+
+/**
+ * @openapi
+ * /bars-packages:
+ *   get:
+ *     summary: List current BARS data packages
+ *     description: Public metadata for installer MSFS data packages (models & removals). Returns size, hash and timestamps.
+ *     tags:
+ *       - Data
+ *     responses:
+ *       200:
+ *         description: Package metadata returned
+ */
+app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) => {
+	try {
+		const storage = ServicePool.getStorage(c.env);
+		const KEYS = [
+			'packages/bars-models-2024.zip',
+			'packages/bars-models-2020.zip',
+			'packages/bars-removals.zip'
+		];
+		const bucket = (storage as any).bucket as R2Bucket;
+		const results = await Promise.all(KEYS.map(async key => {
+			try {
+				const obj = await bucket.head(key);
+				if (!obj) return null;
+				let type: string;
+				if (key.endsWith('bars-models-2024.zip')) type = 'models';
+				else if (key.endsWith('bars-models-2020.zip')) type = 'models-2020';
+				else type = 'removals';
+				return {
+					key,
+					size: obj.size,
+					etag: obj.etag,
+					uploaded: obj.uploaded.toISOString(),
+					sha256: obj.customMetadata?.sha256 || null,
+					type,
+					url: new URL(`https://dev-cdn.stopbars.com/${key}`, c.req.url).toString(),
+				};
+			} catch { return null; }
+		}));
+		return c.json({ packages: results.filter(Boolean) });
+	} catch (err) {
+		console.error('BARS package list error', err);
+		return c.json({ error: 'Failed to list packages' }, 500);
+	}
+});
+
+/**
+ * @openapi
  * /downloads/stats:
  *   get:
  *     summary: Get download statistics for a product

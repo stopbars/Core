@@ -2363,6 +2363,78 @@
         }
       }
     },
+    "/staff/bars-packages/upload": {
+      "post": {
+        "x-hidden": true,
+        "summary": "Upload BARS installer packages (models/removals)",
+        "description": "Staff-only endpoint to upload the two MSFS data packages used by the installer. Accepts a multipart form with a single file and a `type` field designating which package is being uploaded. The file is stored in R2 under a fixed key and previous version overwritten. SHA-256 is computed server-side and stored in metadata.",
+        "tags": [
+          "Staff",
+          "Data"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file",
+                  "type"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "models",
+                      "models-2020",
+                      "removals"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Package uploaded successfully"
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/bars-packages": {
+      "get": {
+        "summary": "List current BARS data packages",
+        "description": "Public metadata for installer MSFS data packages (models & removals). Returns size, hash and timestamps.",
+        "tags": [
+          "Data"
+        ],
+        "responses": {
+          "200": {
+            "description": "Package metadata returned"
+          }
+        }
+      }
+    },
     "/downloads/stats": {
       "get": {
         "summary": "Get download statistics for a product",
