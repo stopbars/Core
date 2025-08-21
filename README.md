@@ -5,7 +5,7 @@
 	<h1 align="center"><b>stopbars/Core</b></h1>
 	<p align="center">
     <br />
-		Core is the foundational backend infrastructure powering all BARS services, providing comprehensive APIs for VATSIM authentication, real-time WebSocket connections for airport lighting state, airport data & point management, community contributions, division 						management, advanced staff operations, file storage, release management, content management, and system health monitoring.
+		Core is the foundational backend infrastructure powering all BARS services, providing comprehensive APIs for VATSIM authentication, real-time WebSocket connections for airport lighting state, airport data & point management, community contributions, division 			management, advanced staff operations, file storage, release management, content management, and system health monitoring.
     <br />
     <br />
     <a href="https://stopbars.com"><strong>stopbars.com »</strong></a>
