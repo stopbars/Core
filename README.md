@@ -1,33 +1,41 @@
-<img width="180" height="180" align="left" style="float: left; margin: 0 20px 0 0;" alt="BARS Logo" src="https://avatars.githubusercontent.com/u/214760188?s=200&u=9cbb686fd7b3aa1517ecb66825da5aa0e974954e&v=4" />
+<p align="center">
+  <p align="center">
+   <img width="150" height="150" src="https://stopbars.com/favicon.png" alt="Logo">
+  </p>
+	<h1 align="center"><b>stopbars/Core</b></h1>
+	<p align="center">
+    <br />
+		Core is the foundational backend infrastructure powering all BARS services, providing comprehensive APIs for VATSIM authentication, real-time WebSocket connections for airport lighting state, airport data & point management, community contributions, division 			management, advanced staff operations, file storage, release management, content management, and system health monitoring.
+    <br />
+    <br />
+    <a href="https://stopbars.com"><strong>stopbars.com »</strong></a>
+    <br />
+  </p>
+</p>
 
-<br>
-
-**stopbars/Core**
-
-[![Github Issues](https://img.shields.io/github/issues/stopbars/Core)](https://github.com/stopbars/Core/issues)
-[![Deploy Core](https://github.com/stopbars/Core/actions/workflows/deploy.yml/badge.svg)](https://github.com/stopbars/Core/actions/workflows/deploy.yml)
-![GitHub License](https://img.shields.io/github/license/stopbars/Core)
-[![Discord](https://img.shields.io/discord/1323993176318414889.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://stopbars.com/discord)
-
-Core is the foundational backend infrastructure that powers BARS. This service provides comprehensive APIs, backend systems, and real-time capabilities for all BARS services & applications across the product suite.
-
-<br>
+<p align="center">
+  <br />
+  <a href="https://stopbars.com/discord" target="_blank" rel="noopener noreferrer">
+	<img src="https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white" alt="Discord">
+  </a>
+  <a href="https://opencollective.com/stopbars">
+    <img src="https://img.shields.io/static/v1?label=&message=Open%20Collective&color=297EF2&logo=opencollective&logoColor=white" />
+  </a>
+  <a href="https://www.gnu.org/licenses/agpl-3.0">
+    <img src="https://img.shields.io/static/v1?label=Licence&message=AGPL%20v3&color=000" />
+  </a>
+	<a href="https://github.com/stopbars/Core/actions/workflows/deploy.yml">
+  	<img src="https://github.com/stopbars/Core/actions/workflows/deploy.yml/badge.svg" alt="Deploy Core">
+	</a>
+  <br />
+</p>
 
 ## Contributing
 
-We encourage and appreciate contributions from the community! To get started, please review our [CONTRIBUTING.md](CONTRIBUTING.md) guide, which covers the following:
+We encourage and appreciate contributions from the community! To get started, please review our [CONTRIBUTING.md](CONTRIBUTING.md) guide, which covers how to set up your development environment, code style guidelines and best practices, instructions for submitting pull requests, and testing and verification procedures.
 
-- How to set up your development environment
-- Code style guidelines and best practices
-- Instructions for submitting pull requests
-- Testing and verification procedures
-
-Your contributions directly support the ongoing development and improvement of BARS. By getting involved, you help us build a more robust, and feature-rich product that benefits the entire flight sim community.
-
-## Bug Reports and Feature Requests
-
-If you find a bug or have a feature suggestion, please submit an issue [on our GitHub repository](https://github.com/stopbars/Core/issues/new). Please follow and fill in the issue template to the best of your ability to help us address your feedback efficiently.
+Your contributions directly support the ongoing development and improvement of BARS. By getting involved, you help us build a more robust, and feature-rich product that benefits the entire flight sim community. All contributors are acknowledged on our [credits page](https://stopbars.com/credits).
 
 ## Disclaimer
 
-BARS is an **independent third-party** software project. **We are not affiliated** with, endorsed by, or connected to VATSIM, vatSys, Microsoft Flight Simulator, or any other simulation, controller client supported by our software.
+BARS is an **independent third-party** software project. **We are not affiliated** with, **endorsed by**, or **connected to** VATSIM, vatSys, EuroScope, Microsoft Flight Simulator, or any other simulation, controller client supported by our software.

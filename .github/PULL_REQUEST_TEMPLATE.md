@@ -1,9 +1,7 @@
 ## Summary
-
 <!-- Provide a brief description of what this PR does -->
 
 ## Changes Made
-
 <!-- List the main changes in this pull request -->
 
 -
@@ -11,7 +9,6 @@
 -
 
 ## Additional Information
-
 <!-- Any other relevant information, screenshots, or context -->
 
 ## Author Information
