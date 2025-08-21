@@ -124,6 +124,17 @@ app.use(
 	}),
 );
 
+app.get('/favicon.ico', (c) => {
+	const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axhLZ4AAAAASUVORK5CYII='; // 1x1 transparent PNG
+	const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+	return new Response(bytes, {
+		headers: {
+			'Content-Type': 'image/png',
+			'Cache-Control': 'public, max-age=604800, immutable',
+		},
+	});
+});
+
 // Extract client IP (best-effort) and attach to context
 app.use('*', async (c, next) => {
 	const cf = c.req.header('CF-Connecting-IP');
