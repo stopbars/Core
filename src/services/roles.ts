@@ -86,7 +86,10 @@ export class RoleService {
 		const existing = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
 		const current = existing.results[0];
 		if (!current) return; // not staff
-		if ((current.role as StaffRole) === StaffRole.LEAD_DEVELOPER && (changingToRole == null || changingToRole !== StaffRole.LEAD_DEVELOPER)) {
+		if (
+			(current.role as StaffRole) === StaffRole.LEAD_DEVELOPER &&
+			(changingToRole == null || changingToRole !== StaffRole.LEAD_DEVELOPER)
+		) {
 			const count = await this.getRoleCount(StaffRole.LEAD_DEVELOPER);
 			if (count <= 1) throw new Error('Cannot modify or remove the last remaining lead developer');
 		}
@@ -118,14 +121,28 @@ export class RoleService {
 		return !!result.success;
 	}
 
-	async listStaff(): Promise<Array<{ user_id: number; role: StaffRole; created_at: string; vatsim_id: string; full_name: string | null }>> {
-		const res = await this.dbSession.executeRead<{ user_id: number; role: string; created_at: string; vatsim_id: string; full_name: string | null }>(
+	async listStaff(): Promise<
+		Array<{ user_id: number; role: StaffRole; created_at: string; vatsim_id: string; full_name: string | null }>
+	> {
+		const res = await this.dbSession.executeRead<{
+			user_id: number;
+			role: string;
+			created_at: string;
+			vatsim_id: string;
+			full_name: string | null;
+		}>(
 			`SELECT s.user_id, s.role, s.created_at, u.vatsim_id, u.full_name
 			 FROM staff s
 			 JOIN users u ON u.id = s.user_id
 			 ORDER BY s.created_at DESC`,
 			[],
 		);
-		return res.results.map((r) => ({ user_id: r.user_id, role: r.role as StaffRole, created_at: r.created_at, vatsim_id: r.vatsim_id, full_name: r.full_name }));
+		return res.results.map((r) => ({
+			user_id: r.user_id,
+			role: r.role as StaffRole,
+			created_at: r.created_at,
+			vatsim_id: r.vatsim_id,
+			full_name: r.full_name,
+		}));
 	}
 }

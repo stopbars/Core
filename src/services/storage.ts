@@ -107,6 +107,18 @@ export class StorageService {
 	}
 
 	/**
+	 * Returns only metadata (HEAD) for a single object key, or null if not found
+	 */
+	async headFile(key: string): Promise<R2Object | null> {
+		try {
+			const obj = await this.bucket.head(this.normalizeKey(key));
+			return obj ?? null;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
 	 * Deletes a file from R2 storage
 	 * @param key The object key
 	 * @returns True if deleted, false if not found
@@ -117,7 +129,7 @@ export class StorageService {
 		try {
 			await this.bucket.delete(normalizedKey);
 			return true;
-		} catch (error) {
+		} catch {
 			return false;
 		}
 	}

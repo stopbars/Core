@@ -29,6 +29,8 @@ export interface VatsimUserResponse {
 		cid: string;
 		personal: {
 			email: string;
+			name_first?: string;
+			name_last?: string;
 		};
 	};
 }
@@ -77,7 +79,7 @@ export interface ControllerState {
 
 export interface AirportObject {
 	id: string; // BARS Global ID
-	state: boolean | Record<string, any>;
+	state: boolean | Record<string, unknown>;
 	controllerId?: string; // ID of controller who last modified
 	timestamp: number;
 }
@@ -91,24 +93,24 @@ export interface AirportState {
 
 export interface Packet {
 	type:
-	| 'STATE_UPDATE'
-	| 'INITIAL_STATE'
-	| 'CONTROLLER_CONNECT'
-	| 'CONTROLLER_DISCONNECT'
-	| 'SHARED_STATE_UPDATE'
-	| 'ERROR'
-	| 'HEARTBEAT'
-	| 'HEARTBEAT_ACK'
-	| 'CLOSE'
-	| 'GET_STATE'
-	| 'STATE_SNAPSHOT';
+		| 'STATE_UPDATE'
+		| 'INITIAL_STATE'
+		| 'CONTROLLER_CONNECT'
+		| 'CONTROLLER_DISCONNECT'
+		| 'SHARED_STATE_UPDATE'
+		| 'ERROR'
+		| 'HEARTBEAT'
+		| 'HEARTBEAT_ACK'
+		| 'CLOSE'
+		| 'GET_STATE'
+		| 'STATE_SNAPSHOT';
 	airport?: string;
 	data?: {
 		objectId?: string;
 		state?: boolean;
-		patch?: Record<string, any>; // New field for patch-based updates
-		sharedStatePatch?: Record<string, any>; // New field for shared state patches
-		sharedState?: Record<string, any>; // Full shared state (for initial state)
+		patch?: Record<string, unknown>; // New field for patch-based updates
+		sharedStatePatch?: Record<string, unknown>; // New field for shared state patches
+		sharedState?: Record<string, unknown>; // Full shared state (for initial state)
 		objects?: AirportObject[];
 		controllerId?: string;
 		message?: string; // For error messages

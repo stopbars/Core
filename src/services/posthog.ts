@@ -1,13 +1,12 @@
 // Lightweight PostHog wrapper: fire-and-forget event capture with automatic { product: 'Core' }.
 // Uses Cloudflare's global waitUntil import (Aug 2025 feature) when available so events aren't dropped.
 
-// @ts-ignore Cloudflare runtime module provided during build/deploy
 import { waitUntil as cfWaitUntil } from 'cloudflare:workers';
 
 interface PostHogCapturePayload {
 	api_key: string;
 	event: string;
-	properties: Record<string, any>;
+	properties: Record<string, unknown>;
 	timestamp?: string; // ISO 8601
 	$process_person_profile?: boolean;
 }
@@ -37,8 +36,8 @@ export class PostHogService {
 	];
 
 	constructor(env: Env) {
-		this.apiKey = (env as any).POSTHOG_API_KEY;
-		this.host = (env as any).POSTHOG_HOST || 'https://eu.i.posthog.com';
+		this.apiKey = (env as unknown as { POSTHOG_API_KEY?: string }).POSTHOG_API_KEY;
+		this.host = (env as unknown as { POSTHOG_HOST?: string }).POSTHOG_HOST || 'https://eu.i.posthog.com';
 		this.enabled = !!this.apiKey;
 	}
 
@@ -66,7 +65,7 @@ export class PostHogService {
 		}
 	}
 
-	private async sanitizeProperties(props: Record<string, any>): Promise<Record<string, any>> {
+	private async sanitizeProperties(props: Record<string, unknown>): Promise<Record<string, unknown>> {
 		const entries = await Promise.all(
 			Object.entries(props).map(async ([k, v]) => {
 				if (v == null) return [k, v];
@@ -79,9 +78,14 @@ export class PostHogService {
 		return Object.fromEntries(entries);
 	}
 
-	track(event: string, properties: Record<string, any> = {}, distinctId = 'anonymous', options: TrackOptions = {}): void | Promise<void> {
+	track(
+		event: string,
+		properties: Record<string, unknown> = {},
+		distinctId = 'anonymous',
+		options: TrackOptions = {},
+	): void | Promise<void> {
 		if (!this.enabled) return;
-		const mergedProps: Record<string, any> = {
+		const mergedProps: Record<string, unknown> = {
 			...properties,
 		};
 		if (!options.omitProduct) {
@@ -131,7 +135,7 @@ export class PostHogService {
 				});
 		if (options.inline) return doFetch();
 		try {
-			if (typeof cfWaitUntil === 'function') {
+			if (typeof (cfWaitUntil as unknown) === 'function') {
 				cfWaitUntil(doFetch());
 				return;
 			}
@@ -139,7 +143,7 @@ export class PostHogService {
 			/* ignore */
 		}
 		try {
-			(globalThis as any).waitUntil?.(doFetch());
+			(globalThis as unknown as { waitUntil?: (p: Promise<unknown>) => void }).waitUntil?.(doFetch());
 		} catch {
 			/* ignore */
 		}

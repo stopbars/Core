@@ -107,8 +107,10 @@ export class AuthService {
 			],
 		);
 
-		if (!result.results[0]) throw new Error('Failed to create user');
-		return result.results[0] as UserRecord;
+		const rows = result.results as unknown as UserRecord[] | null;
+		const created = rows && rows[0];
+		if (!created) throw new Error('Failed to create user');
+		return created as UserRecord;
 	}
 
 	async deleteUserAccount(vatsimId: string): Promise<boolean> {
@@ -126,7 +128,9 @@ export class AuthService {
 		if (deleted) {
 			try {
 				this.posthog?.track('User Deleted', { vatsimId });
-			} catch {}
+			} catch (e) {
+				console.warn('Posthog track failed (User Deleted)', e);
+			}
 		}
 		return deleted;
 	}
@@ -227,14 +231,17 @@ export class AuthService {
 			userId,
 		]);
 
-		if (!result.results[0]) {
+		const rows = result.results as unknown as Array<{ api_key: string }> | null;
+		if (!rows || !rows[0]) {
 			throw new Error('Failed to update API key');
 		}
 
-		const apiKey = (result.results[0] as { api_key: string }).api_key;
+		const apiKey = rows[0].api_key;
 		try {
 			this.posthog?.track('User API Key Regenerated', { userId });
-		} catch {}
+		} catch (e) {
+			console.warn('Posthog track failed (API Key Regenerated)', e);
+		}
 		return apiKey;
 	}
 }

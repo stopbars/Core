@@ -6,6 +6,22 @@ import { PostHogService } from './posthog';
 
 import { DatabaseSessionService, PreparedStatement } from './database-session';
 
+type PointRow = {
+	id: string;
+	airport_id: string;
+	type: Point['type'];
+	name: string;
+	coordinates: string;
+	directionality: Point['directionality'] | null;
+	orientation: Point['orientation'] | null;
+	color: Point['color'] | null;
+	elevated: number | boolean | null;
+	ihp: number | boolean | null;
+	created_at: string;
+	updated_at: string;
+	created_by: string;
+};
+
 export class PointsService {
 	private dbSession: DatabaseSessionService;
 
@@ -144,7 +160,9 @@ export class PointsService {
 
 		try {
 			this.posthog?.track('Point Created', { airportId, userId, type: point.type });
-		} catch {}
+		} catch (e) {
+			console.warn('Posthog track failed (Point Created)', e);
+		}
 		return newPoint;
 	}
 	async updatePoint(pointId: string, userId: string, updates: Partial<PointData>): Promise<Point> {
@@ -166,10 +184,16 @@ export class PointsService {
 
 		// Define allowed fields for updates
 		const allowedFields = ['type', 'name', 'coordinates', 'directionality', 'orientation', 'color', 'elevated', 'ihp'];
-		const processedUpdates: Record<string, any> = {};
+		const processedUpdates: Record<string, string | number | boolean | null> = {};
 		Object.entries(updates).forEach(([key, value]) => {
 			if (allowedFields.includes(key)) {
-				processedUpdates[key] = key === 'coordinates' ? JSON.stringify(value) : value;
+				if (key === 'coordinates') {
+					processedUpdates[key] = JSON.stringify(value as Point['coordinates']);
+				} else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+					processedUpdates[key] = value;
+				} else if (value == null) {
+					processedUpdates[key] = null;
+				}
 			}
 		});
 		if (Object.keys(processedUpdates).length === 0) {
@@ -207,7 +231,9 @@ export class PointsService {
 				userId,
 				fields: Object.keys(processedUpdates),
 			});
-		} catch {}
+		} catch (e) {
+			console.warn('Posthog track failed (Point Updated)', e);
+		}
 		return finalPoint;
 	}
 
@@ -228,7 +254,9 @@ export class PointsService {
 		await this.dbSession.executeWrite('DELETE FROM points WHERE id = ?', [pointId]);
 		try {
 			this.posthog?.track('Point Deleted', { pointId, airportId: point.airportId, userId });
-		} catch {}
+		} catch (e) {
+			console.warn('Posthog track failed (Point Deleted)', e);
+		}
 	}
 
 	async applyChangeset(airportId: string, userId: string, changeset: PointChangeset): Promise<Point[]> {
@@ -240,10 +268,12 @@ export class PointsService {
 		const selects = Object.keys(changeset.modify ?? {}).map((id) => this.stmtSelect.bindAll({ id, airportId }));
 		const modifiedPoints = (await this.dbSession.executeBatch(selects))
 			.map((result) => {
-				if (!result.results || result.results.length === 0) {
+				const rows = result.results as unknown as PointRow[] | null;
+				const first = rows && rows[0];
+				if (!first) {
 					throw new Error('Point targeted by modify operation does not exist');
 				}
-				return this.mapPointFromDb(result.results[0]) as PointData;
+				return this.mapPointFromDb(first) as PointData;
 			})
 			.map((basis, i) => ({
 				...basis,
@@ -301,19 +331,22 @@ export class PointsService {
 				modified: modifiedPoints.length,
 				deleted: (changeset.delete ?? []).length,
 			});
-		} catch {}
+		} catch (e) {
+			console.warn('Posthog track failed (Points Changeset Applied)', e);
+		}
 		return createdPoints;
 	}
 
 	async getPoint(pointId: string): Promise<Point | null> {
-		const result = await this.dbSession.executeRead<any>('SELECT * FROM points WHERE id = ?', [pointId]);
-		if (!result.results[0]) return null;
-		return this.mapPointFromDb(result.results[0]);
+		const result = await this.dbSession.executeRead<PointRow>('SELECT * FROM points WHERE id = ?', [pointId]);
+		const row = result.results[0];
+		if (!row) return null;
+		return this.mapPointFromDb(row);
 	}
 
 	async getAirportPoints(airportId: string): Promise<Point[]> {
-		const results = await this.dbSession.executeRead<any>('SELECT * FROM points WHERE airport_id = ?', [airportId]);
-		return results.results.map(this.mapPointFromDb);
+		const results = await this.dbSession.executeRead<PointRow>('SELECT * FROM points WHERE airport_id = ?', [airportId]);
+		return results.results.map((r) => this.mapPointFromDb(r));
 	}
 
 	private validatePoint(point: PointData) {
@@ -393,18 +426,18 @@ export class PointsService {
 		}
 	}
 
-	private mapPointFromDb(dbPoint: any): Point {
+	private mapPointFromDb(dbPoint: PointRow): Point {
 		return {
 			id: dbPoint.id,
 			airportId: dbPoint.airport_id,
 			type: dbPoint.type,
 			name: dbPoint.name,
 			coordinates: JSON.parse(dbPoint.coordinates),
-			directionality: dbPoint.directionality,
-			orientation: dbPoint.orientation,
-			color: dbPoint.color,
-			elevated: dbPoint.elevated || false,
-			ihp: dbPoint.ihp || false,
+			directionality: dbPoint.directionality ?? undefined,
+			orientation: dbPoint.orientation ?? undefined,
+			color: dbPoint.color ?? undefined,
+			elevated: dbPoint.elevated === 1 || dbPoint.elevated === true,
+			ihp: dbPoint.ihp === 1 || dbPoint.ihp === true,
 			createdAt: dbPoint.created_at,
 			updatedAt: dbPoint.updated_at,
 			createdBy: dbPoint.created_by,

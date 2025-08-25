@@ -23,7 +23,7 @@ export class NotamService {
 				content: result.results[0].content as string,
 				type: (result.results[0].type as string) || 'warning',
 			};
-		} catch (error) {
+		} catch {
 			return null;
 		}
 	}
@@ -43,7 +43,7 @@ export class NotamService {
 				['global', content, type, userId],
 			);
 			return true;
-		} catch (error) {
+		} catch {
 			return false;
 		}
 	}

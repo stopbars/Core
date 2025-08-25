@@ -29,7 +29,7 @@ export class CacheService {
 
 		try {
 			return await cachedResponse.json();
-		} catch (e) {
+		} catch {
 			return null;
 		}
 	}
@@ -78,7 +78,7 @@ export class CacheService {
  * @param namespace - Cache namespace
  */
 export function withCache(cacheKeyFn: (req: Request) => string, ttl: number = 60, namespace: string = 'default') {
-	return async (c: any, next: () => Promise<void>) => {
+	return async (c: import('hono').Context<{ Bindings: Env }>, next: () => Promise<void>) => {
 		// Skip caching for non-GET requests
 		if (c.req.method !== 'GET') {
 			return next();
@@ -113,9 +113,9 @@ export function withCache(cacheKeyFn: (req: Request) => string, ttl: number = 60
 					// Cache the data
 					await cacheService.set(cacheKey, data, { ttl, namespace });
 				}
-			} catch (e) {
+			} catch {
 				// Silently fail if we can't cache
-				console.error('Failed to cache response:', e);
+				// console.error('Failed to cache response:', e);
 			}
 		}
 	};

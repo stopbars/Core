@@ -25,13 +25,13 @@ export interface DatabaseMeta {
 	size_after?: number;
 }
 
-export interface DatabaseResult<T = any> {
+export interface DatabaseResult<T = unknown> {
 	results: T[];
 	success: boolean;
 	meta?: DatabaseMeta;
 }
 
-export interface DatabaseResponse<T = any> {
+export interface DatabaseResponse<T = unknown> {
 	results?: T | null;
 	success: boolean;
 	meta?: DatabaseMeta;
@@ -104,7 +104,11 @@ export class DatabaseSessionService {
 	 * Execute a prepared statement with session awareness
 	 * Automatically starts a session if none exists
 	 */
-	public async execute<T = any>(query: string, params: any[] = [], options: SessionOptions = {}): Promise<DatabaseResponse<T>> {
+	public async execute<T = unknown>(
+		query: string,
+		params: DatabaseSerializable[] = [],
+		options: SessionOptions = {},
+	): Promise<DatabaseResponse<T>> {
 		// Start session if not already started
 		if (!this.session) {
 			this.startSession(options);
@@ -138,7 +142,11 @@ export class DatabaseSessionService {
 	/**
 	 * Execute a query that returns all results
 	 */
-	public async executeAll<T = any>(query: string, params: any[] = [], options: SessionOptions = {}): Promise<DatabaseResult<T>> {
+	public async executeAll<T = unknown>(
+		query: string,
+		params: DatabaseSerializable[] = [],
+		options: SessionOptions = {},
+	): Promise<DatabaseResult<T>> {
 		// Start session if not already started
 		if (!this.session) {
 			this.startSession(options);
@@ -173,7 +181,7 @@ export class DatabaseSessionService {
 	 * Execute a query that modifies data (INSERT, UPDATE, DELETE)
 	 * Always uses primary database for consistency
 	 */
-	public async executeWrite(query: string, params: any[] = []): Promise<DatabaseResponse<any>> {
+	public async executeWrite(query: string, params: DatabaseSerializable[] = []): Promise<DatabaseResponse<unknown>> {
 		// Force primary mode for write operations
 		if (!this.session) {
 			this.startSession({ mode: 'first-primary' });
@@ -212,11 +220,11 @@ export class DatabaseSessionService {
 		statements: Array<
 			| {
 					query: string;
-					params?: any[];
+					params?: DatabaseSerializable[];
 			  }
 			| D1PreparedStatement
 		>,
-	): Promise<DatabaseResponse<any>[]> {
+	): Promise<DatabaseResponse<unknown>[]> {
 		if (statements.length === 0) return [];
 
 		// Force primary mode for batch operations
@@ -251,7 +259,11 @@ export class DatabaseSessionService {
 	 * Execute a read-only query optimized for performance
 	 * Uses unconstrained mode for best performance
 	 */
-	public async executeRead<T = any>(query: string, params: any[] = [], bookmark?: string): Promise<DatabaseResult<T>> {
+	public async executeRead<T = unknown>(
+		query: string,
+		params: DatabaseSerializable[] = [],
+		bookmark?: string,
+	): Promise<DatabaseResult<T>> {
 		// Use unconstrained mode for reads unless bookmark is provided
 		const sessionOptions: SessionOptions = bookmark ? { bookmark } : { mode: 'first-unconstrained' };
 
@@ -262,7 +274,7 @@ export class DatabaseSessionService {
 	 * Execute a query that requires the latest data
 	 * Uses primary mode to ensure fresh data
 	 */
-	public async executeLatest<T = any>(query: string, params: any[] = []): Promise<DatabaseResult<T>> {
+	public async executeLatest<T = unknown>(query: string, params: DatabaseSerializable[] = []): Promise<DatabaseResult<T>> {
 		return this.executeAll<T>(query, params, { mode: 'first-primary' });
 	}
 
@@ -299,7 +311,7 @@ export class DatabaseSessionService {
 	/**
 	 * Static helper for simple read operations
 	 */
-	public static async simpleRead<T>(db: D1Database, query: string, params: any[] = []): Promise<DatabaseResult<T>> {
+	public static async simpleRead<T>(db: D1Database, query: string, params: DatabaseSerializable[] = []): Promise<DatabaseResult<T>> {
 		const session = new DatabaseSessionService(db);
 		try {
 			return await session.executeRead<T>(query, params);
@@ -311,7 +323,11 @@ export class DatabaseSessionService {
 	/**
 	 * Static helper for simple write operations
 	 */
-	public static async simpleWrite(db: D1Database, query: string, params: any[] = []): Promise<DatabaseResponse<any>> {
+	public static async simpleWrite(
+		db: D1Database,
+		query: string,
+		params: DatabaseSerializable[] = [],
+	): Promise<DatabaseResponse<unknown>> {
 		const session = new DatabaseSessionService(db);
 		try {
 			return await session.executeWrite(query, params);

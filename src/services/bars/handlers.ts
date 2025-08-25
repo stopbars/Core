@@ -107,16 +107,18 @@ export class StopbarHandler extends BarsTypeHandler {
 		});
 
 		// Add properties to base stopbar lights
-		const lightsWithProperties: BarsLightPoint[] = lightsWithHeading.map((light): BarsLightPoint => ({
-			...light,
-			properties: {
-				type: 'stopbar',
-				color: dbRecord.color || 'red',
-				orientation: dbRecord.orientation,
-				elevated: false,
-				ihp: dbRecord.ihp,
-			},
-		}));
+		const lightsWithProperties: BarsLightPoint[] = lightsWithHeading.map(
+			(light): BarsLightPoint => ({
+				...light,
+				properties: {
+					type: 'stopbar',
+					color: dbRecord.color || 'red',
+					orientation: dbRecord.orientation,
+					elevated: false,
+					ihp: dbRecord.ihp,
+				},
+			}),
+		);
 
 		let allLights: BarsLightPoint[] = [...lightsWithProperties];
 
@@ -549,7 +551,7 @@ export function deduplicateTaxiwayPoints(objects: ProcessedBarsObject[]): Proces
 		let foundExistingGroup = false;
 
 		// Check if this point belongs to an existing group
-		for (const [key, group] of mergedPointsMap.entries()) {
+		for (const [, group] of mergedPointsMap.entries()) {
 			const distance = calculateDistance({ lat: point.lat, lon: point.lon }, { lat: group.point.lat, lon: group.point.lon });
 
 			if (distance <= POINT_MERGE_THRESHOLD) {

@@ -34,12 +34,27 @@ export class AirportService {
 		const uppercaseIcao = icao.toUpperCase();
 
 		// First try to get from database using read-optimized query
-		const airportResult = await this.dbSession.executeRead<any>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
+		const airportResult = await this.dbSession.executeRead<{
+			icao: string;
+			latitude: number | null;
+			longitude: number | null;
+			name: string;
+			continent: string;
+		}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
 		const airportFromDb = airportResult.results[0];
 
 		if (airportFromDb) {
 			// Get runways for this airport
-			const runwaysResult = await this.dbSession.executeRead<any>('SELECT * FROM runways WHERE airport_icao = ?', [uppercaseIcao]);
+			const runwaysResult = await this.dbSession.executeRead<{
+				length_ft: string;
+				width_ft: string;
+				le_ident: string;
+				le_latitude_deg: string;
+				le_longitude_deg: string;
+				he_ident: string;
+				he_latitude_deg: string;
+				he_longitude_deg: string;
+			}>('SELECT * FROM runways WHERE airport_icao = ?', [uppercaseIcao]);
 
 			return { ...airportFromDb, runways: runwaysResult.results };
 		}
@@ -62,8 +77,8 @@ export class AirportService {
 			// Save airport to database using write-optimized operation
 			await this.dbSession.executeWrite('INSERT INTO airports (icao, latitude, longitude, name, continent) VALUES (?, ?, ?, ?, ?)', [
 				airport.icao,
-				airport.latitude,
-				airport.longitude,
+				airport.latitude ?? null,
+				airport.longitude ?? null,
 				airport.name,
 				airport.continent,
 			]);
@@ -94,9 +109,16 @@ export class AirportService {
 				await this.dbSession.executeBatch(runwayStatements);
 
 				// Fetch the saved runways to return with the airport
-				const runwaysResult = await this.dbSession.executeRead<any>('SELECT * FROM runways WHERE airport_icao = ?', [
-					uppercaseIcao,
-				]);
+				const runwaysResult = await this.dbSession.executeRead<{
+					length_ft: string;
+					width_ft: string;
+					le_ident: string;
+					le_latitude_deg: string;
+					le_longitude_deg: string;
+					he_ident: string;
+					he_latitude_deg: string;
+					he_longitude_deg: string;
+				}>('SELECT * FROM runways WHERE airport_icao = ?', [uppercaseIcao]);
 
 				return { ...airport, runways: runwaysResult.results };
 			}
@@ -106,12 +128,16 @@ export class AirportService {
 					icao: uppercaseIcao,
 					hasRunways: !!airportData.runways?.length,
 				});
-			} catch {}
+			} catch (e) {
+				console.warn('Posthog track failed (Airport Fetched From External API)', e);
+			}
 			return airport;
-		} catch (error) {
+		} catch {
 			try {
 				this.posthog?.track('Airport External Fetch Failed', { icao: uppercaseIcao });
-			} catch {}
+			} catch (e) {
+				console.warn('Posthog track failed (Airport External Fetch Failed)', e);
+			}
 			return null;
 		}
 	}
@@ -137,9 +163,13 @@ export class AirportService {
 	}
 
 	async getAirportsByContinent(continent: string) {
-		const result = await this.dbSession.executeRead<any>('SELECT * FROM airports WHERE continent = ? ORDER BY icao', [
-			continent.toUpperCase(),
-		]);
+		const result = await this.dbSession.executeRead<{
+			icao: string;
+			latitude: number | null;
+			longitude: number | null;
+			name: string;
+			continent: string;
+		}>('SELECT * FROM airports WHERE continent = ? ORDER BY icao', [continent.toUpperCase()]);
 		return { results: result.results };
 	}
 
@@ -164,7 +194,14 @@ export class AirportService {
 		// Pre-compute cos^2(lat) to weight longitudinal delta for planar approx distance ordering
 		const cosLat = Math.cos((lat * Math.PI) / 180);
 		const cosLatSq = cosLat * cosLat;
-		const approx = await this.dbSession.executeRead<any>(
+		const approx = await this.dbSession.executeRead<{
+			icao: string;
+			latitude: number;
+			longitude: number;
+			name: string;
+			continent: string;
+			distance_score: number;
+		}>(
 			`SELECT icao, latitude, longitude, name, continent,
 				((latitude - ?) * (latitude - ?) + ((longitude - ?) * (longitude - ?) * ?)) AS distance_score
 			 FROM airports
@@ -183,7 +220,9 @@ export class AirportService {
 
 		try {
 			this.posthog?.track('Nearest Airport Lookup', { icao: row.icao });
-		} catch {}
+		} catch (e) {
+			console.warn('Posthog track failed (Nearest Airport Lookup)', e);
+		}
 
 		return {
 			icao: row.icao,

@@ -1,4 +1,4 @@
-import { DatabaseSessionService, SessionOptions } from './database-session';
+import { DatabaseSessionService, SessionOptions, type DatabaseSerializable } from './database-session';
 
 /**
  * Bookmark management for HTTP requests
@@ -26,7 +26,7 @@ export class BookmarkManager {
 	/**
 	 * Create a new Response with bookmark header set
 	 */
-	public static responseWithBookmark(body: any, bookmark: string | null, init: ResponseInit = {}): Response {
+	public static responseWithBookmark(body: unknown, bookmark: string | null, init: ResponseInit = {}): Response {
 		const headers = new Headers(init.headers);
 		if (bookmark) {
 			headers.set(BookmarkManager.BOOKMARK_HEADER, bookmark);
@@ -84,7 +84,7 @@ export class RequestDatabaseContext {
 	/**
 	 * Create a JSON response with bookmark header
 	 */
-	public jsonResponse(data: any, init: ResponseInit = {}): Response {
+	public jsonResponse<T>(data: T, init: ResponseInit = {}): Response {
 		const bookmark = this.sessionService.getBookmark();
 
 		const headers = new Headers(init.headers);
@@ -142,14 +142,14 @@ export class DatabaseContextFactory {
 	/**
 	 * Quick read operation for simple queries
 	 */
-	public static async quickRead<T>(db: D1Database, query: string, params: any[] = []) {
+	public static async quickRead<T>(db: D1Database, query: string, params: DatabaseSerializable[] = []) {
 		return DatabaseSessionService.simpleRead<T>(db, query, params);
 	}
 
 	/**
 	 * Quick write operation for simple queries
 	 */
-	public static async quickWrite(db: D1Database, query: string, params: any[] = []) {
+	public static async quickWrite(db: D1Database, query: string, params: DatabaseSerializable[] = []) {
 		return DatabaseSessionService.simpleWrite(db, query, params);
 	}
 }

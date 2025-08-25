@@ -274,7 +274,6 @@ export class SupportService {
 
 			// Add light supports
 			let supportCount = 1;
-			let totalSupports = 0;
 			let exclusionRectangles = ''; // Store exclusion rectangles separately
 
 			// Helper function to calculate exclusion rectangle coordinates
@@ -320,7 +319,7 @@ export class SupportService {
 					supportCount++;
 				});
 
-				totalSupports += supports.length;
+				// Count intentionally unused for now; metrics removed
 			}
 
 			// Close airport tag

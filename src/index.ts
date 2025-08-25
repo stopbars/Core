@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import openapiSpec from '../openapi.json';
 import { cors } from 'hono/cors';
-import { PointChangeset, PointData } from './types';
+import { PointChangeset, PointData, VatsimUser, UserRecord } from './types';
 import { VatsimService } from './services/vatsim';
 import { AuthService } from './services/auth';
 import { StaffRole } from './services/roles';
@@ -12,7 +12,7 @@ import { DatabaseContextFactory } from './services/database-context';
 import { withCache, CacheKeys, CacheService } from './services/cache';
 import { ServicePool } from './services/service-pool';
 import { sanitizeContributionXml } from './services/xml-sanitizer';
-import { getLightsByObject } from './services/lights-cache';
+import { getLightsByObject, type RadarLight } from './services/lights-cache';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
 interface CreateDivisionPayload {
@@ -49,10 +49,7 @@ interface ContributionDecisionPayload {
 export class BARS {
 	private connection: Connection;
 
-	constructor(
-		state: DurableObjectState,
-		env: Env,
-	) {
+	constructor(state: DurableObjectState, env: Env) {
 		const vatsim = new VatsimService(env.VATSIM_CLIENT_ID, env.VATSIM_CLIENT_SECRET);
 		const auth = new AuthService(env.DB, vatsim);
 		this.connection = new Connection(env, auth, vatsim, state);
@@ -66,11 +63,11 @@ export class BARS {
 const app = new Hono<{
 	Bindings: Env;
 	Variables: {
-		vatsimUser?: any;
-		user?: any;
-		auth?: any;
-		vatsim?: any;
-		userService?: any;
+		vatsimUser?: VatsimUser;
+		user?: UserRecord;
+		auth?: AuthService;
+		vatsim?: VatsimService;
+		userService?: UserService;
 		clientIp?: string;
 	};
 }>();
@@ -84,7 +81,7 @@ app.use('*', async (c, next) => {
 		if (c.req.method === 'OPTIONS') return;
 		if (path === '/favicon.ico') return;
 		if (path.includes('/health')) return;
-		const ignoreRaw = (c.env as any).ANALYTICS_IGNORE as string | undefined;
+		const ignoreRaw = (c.env as { ANALYTICS_IGNORE?: string }).ANALYTICS_IGNORE;
 		if (ignoreRaw) {
 			const ignores = ignoreRaw
 				.split(',')
@@ -111,7 +108,6 @@ app.use('*', async (c, next) => {
 			'anonymous',
 		);
 	} catch (err) {
-		// eslint-disable-next-line no-console
 		console.warn('[Analytics] failed', err instanceof Error ? err.message : err);
 	}
 });
@@ -189,15 +185,16 @@ app.use('*', async (c, next) => {
 app.post('/contact', async (c) => {
 	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 	try {
-		let body: any;
+		let body: unknown;
 		try {
 			body = await c.req.json();
 		} catch {
 			return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 });
 		}
-		const email = typeof body.email === 'string' ? body.email.trim() : '';
-		const topic = typeof body.topic === 'string' ? body.topic.trim() : '';
-		const message = typeof body.message === 'string' ? body.message.trim() : '';
+		const b = (body ?? {}) as Record<string, unknown>;
+		const email = typeof b.email === 'string' ? b.email.trim() : '';
+		const topic = typeof b.topic === 'string' ? b.topic.trim() : '';
+		const message = typeof b.message === 'string' ? b.message.trim() : '';
 		const ip = c.get('clientIp') || '0.0.0.0';
 
 		const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -317,10 +314,14 @@ app.patch('/contact/:id/status', async (c) => {
 	const id = c.req.param('id');
 	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 	try {
-		let body: any;
-		try { body = await c.req.json(); } catch { return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 }); }
-		const status = body?.status;
-		if (!['pending', 'handling', 'handled'].includes(status)) {
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 });
+		}
+		const status = (body as Record<string, unknown>)?.status;
+		if (status !== 'pending' && status !== 'handling' && status !== 'handled') {
 			return dbContext.jsonResponse({ error: 'Invalid status' }, { status: 400 });
 		}
 		const vatsim = ServicePool.getVatsim(c.env);
@@ -517,16 +518,20 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				/* ignore cleanup throttling errors */
 			}
 
-			const activeObjectsResult = await dbContext.db.executeRead<any>(
+			interface ActiveObjectRow {
+				id: string;
+				name: string;
+			}
+			const activeObjectsResult = await dbContext.db.executeRead<ActiveObjectRow>(
 				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')",
 			);
 
 			const allStates = await Promise.all(
-				activeObjectsResult.results.map(async (obj: any) => {
+				activeObjectsResult.results.map(async (obj: ActiveObjectRow) => {
 					const id = c.env.BARS.idFromString(obj.id);
 					const durableObj = c.env.BARS.get(id);
 
-					const [airportIcao, controllerCount, pilotCount] = obj.name.split('/');
+					const [airportIcao] = obj.name.split('/');
 
 					const stateRequest = new Request(`https://internal/state?airport=${airportIcao}`, {
 						method: 'GET',
@@ -538,28 +543,30 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 					try {
 						const [response, lightsByObject] = await Promise.all([
 							durableObj.fetch(stateRequest),
-							isVatsimRadar ? getLightsByObject(c.env, airportIcao) : Promise.resolve({} as Record<string, any>),
+							isVatsimRadar ? getLightsByObject(c.env, airportIcao) : Promise.resolve({} as Record<string, RadarLight[]>),
 						]);
-						const state = (await response.json()) as {
+						type DOObject = { id: string; state: unknown; timestamp: number };
+						type DOState = {
 							airport: string;
 							controllers: string[];
 							pilots: string[];
-							objects: any[];
+							objects: DOObject[];
 							offline?: boolean;
 						};
+						const state = (await response.json()) as DOState;
 
 						if (isVatsimRadar) {
 							const allowedIds = new Set(Object.keys(lightsByObject));
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: any) => allowedIds.has(o.id))
-									.map((o: any) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as any)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -586,9 +593,9 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 								pilots: Array.isArray(state.pilots) ? state.pilots.length : 0,
 							},
 						};
-					} catch (e) {
+					} catch {
 						// If a DO fails to respond, skip this entry
-						return null as any;
+						return null as null;
 					}
 				}),
 			);
@@ -596,12 +603,12 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 			// Return response with bookmark for consistency
 			if (isVatsimRadar) {
 				// Include all successfully fetched states (both online and offline), without the offline flag
-				return dbContext.jsonResponse({ states: allStates.filter((s: any) => s) });
+				return dbContext.jsonResponse({ states: allStates.filter((s) => Boolean(s)) });
 			}
 
 			return dbContext.jsonResponse({
 				// Only include airports that are currently online (offline=false) and successfully fetched
-				states: allStates.filter((s: any) => s && s.offline === false),
+				states: allStates.filter((s) => Boolean(s && (s as { offline?: boolean }).offline === false)),
 			});
 		} else {
 			const id = c.env.BARS.idFromName(airport);
@@ -630,24 +637,25 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 			// Transform response for VATSIM Radar variant (filter to XML objects and attach lights)
 			try {
 				const resp = await obj.fetch(stateRequest);
+				type DOObject = { id: string; state: unknown; timestamp: number };
 				const state = (await resp.json()) as {
 					airport: string;
 					controllers: string[];
 					pilots: string[];
-					objects: any[];
+					objects: DOObject[];
 					offline?: boolean;
 				};
 				const lightsByObject = await getLightsByObject(c.env, state.airport);
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-						.filter((o: any) => allowedIds.has(o.id))
-						.map((o: any) => ({
-							id: o.id,
-							state: o.state,
-							timestamp: o.timestamp,
-							lights: (lightsByObject as any)[o.id] || [],
-						}))
+							.filter((o: DOObject) => allowedIds.has(o.id))
+							.map((o: DOObject) => ({
+								id: o.id,
+								state: o.state,
+								timestamp: o.timestamp,
+								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+							}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -663,7 +671,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 						},
 					],
 				});
-			} catch (e) {
+			} catch {
 				return dbContext.jsonResponse({ error: 'Failed to fetch state' }, { status: 500 });
 			}
 		}
@@ -801,14 +809,13 @@ app.put('/auth/display-mode', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) return c.text('Unauthorized', 401);
 
-	let body: any;
+	let body: unknown;
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: 'Invalid JSON body' }, 400);
 	}
-
-	const rawMode = body?.mode;
+	const rawMode = (body as Record<string, unknown>)?.mode as unknown;
 	const mode = Number(rawMode);
 	if (!Number.isInteger(mode) || ![0, 1, 2].includes(mode)) {
 		return c.json({ error: 'Invalid mode', message: 'mode must be integer 0,1,2' }, 400);
@@ -959,7 +966,7 @@ app.delete('/auth/delete', async (c) => {
 			return c.text('User not found', 404);
 		}
 		return c.body(null, 204);
-	} catch (error) {
+	} catch {
 		return c.text('Failed to delete account', 500);
 	}
 });
@@ -1064,7 +1071,7 @@ app.get(
 			}
 
 			return c.json(data);
-		} catch (error) {
+		} catch {
 			return c.json({ error: 'Failed to fetch airport data' }, 500);
 		}
 	},
@@ -1131,7 +1138,7 @@ app.get(
 			const nearest = await airports.getNearestAirport(lat, lon);
 			if (!nearest) return c.text('No airport found', 404);
 			return c.json(nearest);
-		} catch (err) {
+		} catch {
 			return c.json({ error: 'Failed to find nearest airport' }, 500);
 		}
 	},
@@ -1140,10 +1147,10 @@ app.get(
 const divisionsApp = new Hono<{
 	Bindings: Env;
 	Variables: {
-		vatsimUser?: any;
-		user?: any;
-		auth?: any;
-		vatsim?: any;
+		vatsimUser?: VatsimUser;
+		user?: UserRecord;
+		auth?: AuthService;
+		vatsim?: VatsimService;
 	};
 }>();
 
@@ -1220,7 +1227,7 @@ divisionsApp.get('/', async (c) => {
  *         description: Forbidden
  */
 divisionsApp.post('/', async (c) => {
-	const user = c.get('user');
+	const user = c.get('user')!;
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 
@@ -1268,7 +1275,7 @@ divisionsApp.post('/', async (c) => {
  *         description: Division not found
  */
 divisionsApp.put('/:id', async (c) => {
-	const user = c.get('user');
+	const user = c.get('user')!;
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 	const id = parseInt(c.req.param('id'));
@@ -1310,7 +1317,7 @@ divisionsApp.put('/:id', async (c) => {
  *         description: Division not found
  */
 divisionsApp.delete('/:id', async (c) => {
-	const user = c.get('user');
+	const user = c.get('user')!;
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 	const id = parseInt(c.req.param('id'));
@@ -1339,7 +1346,7 @@ divisionsApp.delete('/:id', async (c) => {
  *         description: User divisions returned
  */
 divisionsApp.get('/user', withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'), async (c) => {
-	const vatsimUser = c.get('vatsimUser');
+	const vatsimUser = c.get('vatsimUser')!;
 	const divisions = ServicePool.getDivisions(c.env);
 
 	const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
@@ -1447,7 +1454,7 @@ divisionsApp.get('/:id/members', async (c) => {
  */
 divisionsApp.post('/:id/members', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
-	const vatsimUser = c.get('vatsimUser');
+	const vatsimUser = c.get('vatsimUser')!;
 	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
@@ -1494,7 +1501,7 @@ divisionsApp.post('/:id/members', async (c) => {
 divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const targetVatsimId = c.req.param('vatsimId');
-	const vatsimUser = c.get('vatsimUser');
+	const vatsimUser = c.get('vatsimUser')!;
 	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
@@ -1584,7 +1591,7 @@ divisionsApp.get('/:id/airports', withCache(CacheKeys.fromParams('id'), 600, 'di
  */
 divisionsApp.post('/:id/airports', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
-	const vatsimUser = c.get('vatsimUser');
+	const vatsimUser = c.get('vatsimUser')!;
 	const divisions = ServicePool.getDivisions(c.env);
 
 	// Verify division exists
@@ -1637,8 +1644,8 @@ divisionsApp.post('/:id/airports', async (c) => {
 divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const airportId = parseInt(c.req.param('airportId'));
-	const user = c.get('user');
-	const vatsimUser = c.get('vatsimUser');
+	const user = c.get('user')!;
+	const vatsimUser = c.get('vatsimUser')!;
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 
@@ -2214,8 +2221,8 @@ app.put('/notam', async (c) => {
 const staffUsersApp = new Hono<{
 	Bindings: Env;
 	Variables: {
-		user?: any;
-		userService?: any;
+		user?: UserRecord;
+		userService?: UserService;
 		clientIp?: string;
 	};
 }>();
@@ -2260,8 +2267,8 @@ staffUsersApp.use('*', async (c, next) => {
  */
 staffUsersApp.get('/', async (c) => {
 	try {
-		const user = c.get('user');
-		const userService = c.get('userService');
+		const user = c.get('user')!;
+		const userService = c.get('userService')!;
 
 		const page = 1; // Default to page 1 for user contributions
 		const limit = Number.MAX_SAFE_INTEGER; // Default to max limit for user contributions
@@ -2271,7 +2278,8 @@ staffUsersApp.get('/', async (c) => {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
 		const status = error instanceof Error && error.message.includes('Unauthorized') ? 403 : 500;
-		return c.json({ error: message }, status);
+		c.status(status as 403 | 500);
+		return c.json({ error: message });
 	}
 });
 
@@ -2308,15 +2316,16 @@ staffUsersApp.get('/search', async (c) => {
 			);
 		}
 
-		const user = c.get('user');
-		const userService = c.get('userService');
+		const user = c.get('user')!;
+		const userService = c.get('userService')!;
 
 		const results = await userService.searchUsers(query, user.id);
 		return c.json({ users: results });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
 		const status = error instanceof Error && error.message.includes('Unauthorized') ? 403 : 500;
-		return c.json({ error: message }, status);
+		c.status(status as 403 | 500);
+		return c.json({ error: message });
 	}
 });
 
@@ -2357,8 +2366,8 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
 			);
 		}
 
-		const user = c.get('user');
-		const userService = c.get('userService');
+		const user = c.get('user')!;
+		const userService = c.get('userService')!;
 
 		await userService.refreshUserApiToken(vatsimId, user.id);
 
@@ -2379,7 +2388,8 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
 			}
 		}
 
-		return c.json({ error: message }, status as any);
+		c.status(status as 403 | 404 | 500);
+		return c.json({ error: message });
 	}
 });
 
@@ -2406,15 +2416,16 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
 staffUsersApp.delete('/:id', async (c) => {
 	try {
 		const userId = parseInt(c.req.param('id'));
-		const user = c.get('user');
-		const userService = c.get('userService');
+		const user = c.get('user')!;
+		const userService = c.get('userService')!;
 
 		const success = await userService.deleteUser(userId, user.id);
 		return c.json({ success });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
 		const status = error instanceof Error && error.message.includes('Unauthorized') ? 403 : 500;
-		return c.json({ error: message }, status);
+		c.status(status as 403 | 500);
+		return c.json({ error: message });
 	}
 });
 
@@ -2477,8 +2488,15 @@ staffManageApp.get('/', async (c) => {
 staffManageApp.post('/', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) return c.text('Unauthorized', 401);
-	let body: any; try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
-	const { vatsimId, role } = body || {};
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON' }, 400);
+	}
+	const b = (body ?? {}) as Record<string, unknown>;
+	const vatsimId = typeof b.vatsimId === 'string' ? b.vatsimId : '';
+	const role = typeof b.role === 'string' ? b.role : '';
 	if (!vatsimId || !role || !(role in StaffRole)) return c.json({ error: 'vatsimId and valid role required' }, 400);
 	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
@@ -3298,8 +3316,8 @@ app.get('/euroscope/files/:icao', async (c) => {
 const euroscopeApp = new Hono<{
 	Bindings: Env;
 	Variables: {
-		vatsimUser?: any;
-		user?: any;
+		vatsimUser?: VatsimUser;
+		user?: UserRecord;
 	};
 }>();
 
@@ -3352,7 +3370,7 @@ euroscopeApp.use('*', async (c, next) => {
  *         description: File uploaded
  */
 euroscopeApp.post('/upload', async (c) => {
-	const vatsimUser = c.get('vatsimUser');
+	const vatsimUser = c.get('vatsimUser')!;
 
 	try {
 		const formData = await c.req.formData();
@@ -3492,7 +3510,7 @@ euroscopeApp.post('/upload', async (c) => {
 euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const filename = c.req.param('filename');
-	const vatsimUser = c.get('vatsimUser');
+	const vatsimUser = c.get('vatsimUser')!;
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
@@ -3570,7 +3588,7 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
  */
 euroscopeApp.get('/:icao/editable', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
-	const vatsimUser = c.get('vatsimUser');
+	const vatsimUser = c.get('vatsimUser')!;
 
 	// Validate ICAO format
 	if (!icao.match(/^[A-Z0-9]{4}$/)) {
@@ -3628,7 +3646,7 @@ app.get(
 		const releasesService = ServicePool.getReleases(c.env);
 		const releases = await releasesService.listReleases(product);
 		return c.json({ releases });
-	}
+	},
 );
 
 /**
@@ -3655,11 +3673,13 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
 	const releasesService = ServicePool.getReleases(c.env);
 	const latest = await releasesService.getLatest(product);
 	if (!latest) return c.text('Not found', 404);
-	const downloadUrl = product === 'SimConnect.NET'
-		? `https://www.nuget.org/packages/SimConnect.NET/${latest.version}`
-		: new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
+	const downloadUrl =
+		product === 'SimConnect.NET'
+			? `https://www.nuget.org/packages/SimConnect.NET/${latest.version}`
+			: new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
 	const imageUrl = latest.image_url ? new URL(latest.image_url, c.req.url).toString() : undefined;
-	const { image_url: _omitImage, ...rest } = latest as any;
+	const { image_url: _imageUrlOmitted, ...rest } = latest;
+	void _imageUrlOmitted;
 	return c.json({ ...rest, downloadUrl, imageUrl });
 });
 
@@ -3727,7 +3747,7 @@ app.post('/releases/upload', async (c) => {
 	let vatsimUser;
 	try {
 		vatsimUser = await vatsimUserPromise;
-	} catch (e) {
+	} catch {
 		return c.text('Failed to validate user', 401);
 	}
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -3776,12 +3796,14 @@ app.post('/releases/upload', async (c) => {
 		let sha256 = 'external';
 		if (bytes) {
 			const digest = await crypto.subtle.digest('SHA-256', bytes);
-			sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+			sha256 = Array.from(new Uint8Array(digest))
+				.map((b) => b.toString(16).padStart(2, '0'))
+				.join('');
 		}
 
 		// Validate image (after its bytes read started) before uploads
 		let imageUrl: string | undefined;
-		let imageUploadPromise: Promise<any> | undefined;
+		let imageUploadPromise: Promise<{ key: string; etag: string }> | undefined;
 		let imageKey: string | undefined;
 		if (image && image instanceof File) {
 			const ALLOWED = ['image/png', 'image/jpeg'];
@@ -3806,7 +3828,7 @@ app.post('/releases/upload', async (c) => {
 				product,
 				version,
 				size: uploadFile.size.toString(),
-				sha256
+				sha256,
 			});
 			await Promise.all([fileUploadPromise, imageUploadPromise].filter(Boolean));
 		} else {
@@ -3821,9 +3843,11 @@ app.post('/releases/upload', async (c) => {
 			fileSize: bytes ? (file as File).size : 0,
 			fileHash: sha256,
 			changelog,
-			imageUrl
+			imageUrl,
 		});
-		const downloadUrl = isSimConnect ? `https://www.nuget.org/packages/SimConnect.NET/${version}` : `https://dev-cdn.stopbars.com/${fileKey}`;
+		const downloadUrl = isSimConnect
+			? `https://www.nuget.org/packages/SimConnect.NET/${version}`
+			: `https://dev-cdn.stopbars.com/${fileKey}`;
 		return c.json({ success: true, release, downloadUrl, imageUrl }, 201);
 	} catch (err) {
 		console.error('Release upload error', err);
@@ -3887,12 +3911,19 @@ app.put('/releases/:id/changelog', async (c) => {
 		const user = await auth.getUserByVatsimId(vatsimUser.id);
 		if (!user) return c.text('User not found', 404);
 		// Allow Lead Developer or Product Manager
-		const canEdit = (await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER)) || (await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER));
+		const canEdit =
+			(await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER)) ||
+			(await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER));
 		if (!canEdit) return c.text('Forbidden', 403);
 
-		let body: any;
-		try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
-		const changelog = typeof body?.changelog === 'string' ? body.changelog.trim() : '';
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ error: 'Invalid JSON body' }, 400);
+		}
+		const b = (body ?? {}) as Record<string, unknown>;
+		const changelog = typeof b.changelog === 'string' ? b.changelog.trim() : '';
 		if (!changelog) return c.json({ error: 'changelog required' }, 400);
 		if (changelog.length > 20000) return c.json({ error: 'changelog too long (max 20000 chars)' }, 400);
 
@@ -3900,7 +3931,7 @@ app.put('/releases/:id/changelog', async (c) => {
 		// Reusing listReleases would be inefficient; perform direct lookup.
 		const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 		try {
-			const existing = await dbContext.db.executeRead<any>('SELECT * FROM installer_releases WHERE id = ?', [id]);
+			const existing = await dbContext.db.executeRead<{ id: number }>('SELECT id FROM installer_releases WHERE id = ?', [id]);
 			if (!existing.results[0]) return dbContext.textResponse('Release not found', { status: 404 });
 		} finally {
 			// close early; release update uses its own session service
@@ -4003,14 +4034,22 @@ app.post('/staff/bars-packages/upload', async (c) => {
 	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
 	let vatsimUser;
-	try { vatsimUser = await vatsim.getUser(vatsimToken); } catch { return c.text('Unauthorized', 401); }
+	try {
+		vatsimUser = await vatsim.getUser(vatsimToken);
+	} catch {
+		return c.text('Unauthorized', 401);
+	}
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
 	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
 	if (!allowed) return c.text('Forbidden', 403);
 
 	let form: FormData;
-	try { form = await c.req.formData(); } catch { return c.json({ error: 'Invalid form-data' }, 400); }
+	try {
+		form = await c.req.formData();
+	} catch {
+		return c.json({ error: 'Invalid form-data' }, 400);
+	}
 	const file = form.get('file');
 	const type = form.get('type')?.toString();
 	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
@@ -4025,7 +4064,9 @@ app.post('/staff/bars-packages/upload', async (c) => {
 		const bytes = await file.arrayBuffer();
 		// SHA-256 hash
 		const digest = await crypto.subtle.digest('SHA-256', bytes);
-		const sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+		const sha256 = Array.from(new Uint8Array(digest))
+			.map((b) => b.toString(16).padStart(2, '0'))
+			.join('');
 		const storage = ServicePool.getStorage(c.env);
 		let key: string;
 		if (type === 'models') key = 'packages/bars-models-2024.zip';
@@ -4035,20 +4076,23 @@ app.post('/staff/bars-packages/upload', async (c) => {
 			uploadedBy: user.vatsim_id,
 			type,
 			size: file.size.toString(),
-			sha256
+			sha256,
 		});
 		const url = new URL(`https://dev-cdn.stopbars.com/${uploadRes.key}`, c.req.url).toString();
-		return c.json({
-			success: true,
-			package: {
-				type,
-				key: uploadRes.key,
-				size: file.size,
-				sha256,
-				etag: uploadRes.etag,
-				url
-			}
-		}, 201);
+		return c.json(
+			{
+				success: true,
+				package: {
+					type,
+					key: uploadRes.key,
+					size: file.size,
+					sha256,
+					etag: uploadRes.etag,
+					url,
+				},
+			},
+			201,
+		);
 	} catch (err) {
 		console.error('BARS package upload error', err);
 		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);
@@ -4070,31 +4114,30 @@ app.post('/staff/bars-packages/upload', async (c) => {
 app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) => {
 	try {
 		const storage = ServicePool.getStorage(c.env);
-		const KEYS = [
-			'packages/bars-models-2024.zip',
-			'packages/bars-models-2020.zip',
-			'packages/bars-removals.zip'
-		];
-		const bucket = (storage as any).bucket as R2Bucket;
-		const results = await Promise.all(KEYS.map(async key => {
-			try {
-				const obj = await bucket.head(key);
-				if (!obj) return null;
-				let type: string;
-				if (key.endsWith('bars-models-2024.zip')) type = 'models';
-				else if (key.endsWith('bars-models-2020.zip')) type = 'models-2020';
-				else type = 'removals';
-				return {
-					key,
-					size: obj.size,
-					etag: obj.etag,
-					uploaded: obj.uploaded.toISOString(),
-					sha256: obj.customMetadata?.sha256 || null,
-					type,
-					url: new URL(`https://dev-cdn.stopbars.com/${key}`, c.req.url).toString(),
-				};
-			} catch { return null; }
-		}));
+		const KEYS = ['packages/bars-models-2024.zip', 'packages/bars-models-2020.zip', 'packages/bars-removals.zip'];
+		const results = await Promise.all(
+			KEYS.map(async (key) => {
+				try {
+					const obj = await storage.headFile(key);
+					if (!obj) return null;
+					let type: string;
+					if (key.endsWith('bars-models-2024.zip')) type = 'models';
+					else if (key.endsWith('bars-models-2020.zip')) type = 'models-2020';
+					else type = 'removals';
+					return {
+						key,
+						size: obj.size,
+						etag: obj.etag,
+						uploaded: obj.uploaded.toISOString(),
+						sha256: obj.customMetadata?.sha256 || null,
+						type,
+						url: new URL(`https://dev-cdn.stopbars.com/${key}`, c.req.url).toString(),
+					};
+				} catch {
+					return null;
+				}
+			}),
+		);
 		return c.json({ packages: results.filter(Boolean) });
 	} catch (err) {
 		console.error('BARS package list error', err);
@@ -4225,7 +4268,7 @@ app.get(
 	withCache(() => 'github-contributors', 3600, 'github'), // Cache for 1 hour
 	async (c) => {
 		try {
-			const github = ServicePool.getGitHub(c.env);
+			const github = ServicePool.getGitHub();
 			const contributorsData = await github.getAllContributors();
 			return c.json(contributorsData);
 		} catch (error) {
@@ -4264,7 +4307,7 @@ app.get(
 );
 
 // Staff FAQ management endpoints
-const faqStaffApp = new Hono<{ Bindings: Env; Variables: { user?: any } }>();
+const faqStaffApp = new Hono<{ Bindings: Env; Variables: { user?: UserRecord } }>();
 
 faqStaffApp.use('*', async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -4309,10 +4352,16 @@ faqStaffApp.use('*', async (c, next) => {
  *         description: Created
  */
 faqStaffApp.post('/', async (c) => {
-	let body: any;
-	try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
-	const { question, answer } = body;
-	let order_position = Number(body.order_position);
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON' }, 400);
+	}
+	const b = (body ?? {}) as Record<string, unknown>;
+	const question = typeof b.question === 'string' ? b.question : '';
+	const answer = typeof b.answer === 'string' ? b.answer : '';
+	let order_position = Number((b as { order_position?: unknown }).order_position);
 	if (!question || !answer || !Number.isInteger(order_position)) {
 		return c.json({ error: 'question, answer, order_position required' }, 400);
 	}
@@ -4320,7 +4369,11 @@ faqStaffApp.post('/', async (c) => {
 	const faqService = ServicePool.getFAQs(c.env);
 	const created = await faqService.create({ question, answer, order_position });
 	// Purge public cache
-	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	try {
+		await ServicePool.getCache(c.env).delete('faqs-public', 'faq');
+	} catch {
+		void 0; // ignore cache purge errors
+	}
 	return c.json(created, 201);
 });
 
@@ -4358,15 +4411,27 @@ faqStaffApp.post('/', async (c) => {
  */
 faqStaffApp.put('/:id', async (c) => {
 	const id = c.req.param('id');
-	let body: any; try { body = await c.req.json(); } catch { body = {}; }
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		body = {};
+	}
 	const faqService = ServicePool.getFAQs(c.env);
+	const b = (body ?? {}) as Record<string, unknown>;
 	const updated = await faqService.update(id, {
-		question: body.question,
-		answer: body.answer,
-		order_position: Number.isInteger(body.order_position) ? body.order_position : undefined,
+		question: typeof b.question === 'string' ? b.question : undefined,
+		answer: typeof b.answer === 'string' ? b.answer : undefined,
+		order_position: Number.isInteger((b as { order_position?: unknown }).order_position as number)
+			? (b as { order_position: number }).order_position
+			: undefined,
 	});
 	if (!updated) return c.text('Not found', 404);
-	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	try {
+		await ServicePool.getCache(c.env).delete('faqs-public', 'faq');
+	} catch {
+		void 0; // ignore cache purge errors
+	}
 	return c.json(updated);
 });
 
@@ -4394,7 +4459,13 @@ faqStaffApp.delete('/:id', async (c) => {
 	const id = c.req.param('id');
 	const faqService = ServicePool.getFAQs(c.env);
 	const success = await faqService.delete(id);
-	if (success) { try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { } }
+	if (success) {
+		try {
+			await ServicePool.getCache(c.env).delete('faqs-public', 'faq');
+		} catch {
+			void 0; // ignore cache purge errors
+		}
+	}
 	return c.json({ success });
 });
 
@@ -4430,12 +4501,33 @@ faqStaffApp.delete('/:id', async (c) => {
  *         description: Reordered
  */
 faqStaffApp.post('/reorder', async (c) => {
-	let body: any; try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
-	if (!Array.isArray(body.updates)) return c.json({ error: 'updates array required' }, 400);
-	const updates = body.updates.filter((u: any) => typeof u.id === 'string' && Number.isInteger(u.order_position));
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON' }, 400);
+	}
+	const b = (body ?? {}) as Record<string, unknown>;
+	const updatesRaw = b.updates as unknown;
+	if (!Array.isArray(updatesRaw)) return c.json({ error: 'updates array required' }, 400);
+	type ReorderUpdate = { id: string; order_position: number };
+	const updates: ReorderUpdate[] = (updatesRaw as unknown[])
+		.filter((u): u is ReorderUpdate => {
+			if (!u || typeof u !== 'object') return false;
+			const obj = u as Record<string, unknown>;
+			return typeof obj.id === 'string' && Number.isInteger(obj.order_position as number);
+		})
+		.map((u) => {
+			const obj = u as Record<string, unknown>;
+			return { id: obj.id as string, order_position: obj.order_position as number };
+		});
 	const faqService = ServicePool.getFAQs(c.env);
 	await faqService.reorder(updates);
-	try { await ServicePool.getCache(c.env).delete('faqs-public', 'faq'); } catch { }
+	try {
+		await ServicePool.getCache(c.env).delete('faqs-public', 'faq');
+	} catch {
+		void 0; // ignore cache purge errors
+	}
 	return c.json({ success: true });
 });
 
@@ -4485,7 +4577,7 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 		if (servicesToCheck.includes('database')) {
 			try {
 				await c.env.DB.prepare('SELECT 1').first();
-			} catch (error) {
+			} catch {
 				healthChecks.database = 'outage';
 			}
 		}
@@ -4494,7 +4586,7 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 			try {
 				const storage = ServicePool.getStorage(c.env);
 				await storage.listFiles(undefined, 1);
-			} catch (error) {
+			} catch {
 				healthChecks.storage = 'outage';
 			}
 		}
@@ -4523,14 +4615,14 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 			try {
 				const auth = ServicePool.getAuth(c.env);
 				await auth.getUserByVatsimId('1658308');
-			} catch (error) {
+			} catch {
 				healthChecks.auth = 'outage';
 			}
 		}
 
 		// Stats service removed
-	} catch (error) {
-		console.error('Health check error:', error);
+	} catch {
+		console.error('Health check error');
 	}
 
 	const hasOutages = Object.values(healthChecks).some((status) => status === 'outage');

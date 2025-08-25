@@ -3,7 +3,6 @@ import { AirportService } from './airport';
 import { StorageService } from './storage';
 import { SupportService } from './support';
 import { PolygonService } from './polygons';
-import { ServicePool } from './service-pool';
 import { PostHogService } from './posthog';
 import { sanitizeContributionXml } from './xml-sanitizer';
 
@@ -160,7 +159,9 @@ export class ContributionService {
 				packageName: submission.packageName,
 				userId: submission.userId,
 			});
-		} catch { }
+		} catch (e) {
+			console.warn('Posthog track failed (Contribution Submitted)', e);
+		}
 		return contribution;
 	}
 	async getContribution(id: string): Promise<Contribution | null> {
@@ -186,10 +187,7 @@ export class ContributionService {
 	 * @param airportIcao ICAO code
 	 * @param packageName Package name (case-insensitive)
 	 */
-	async getLatestApprovedContributionForAirportPackage(
-		airportIcao: string,
-		packageName: string,
-	): Promise<Contribution | null> {
+	async getLatestApprovedContributionForAirportPackage(airportIcao: string, packageName: string): Promise<Contribution | null> {
 		const result = await this.dbSession.executeRead<Contribution>(
 			`
 			SELECT 
@@ -345,7 +343,7 @@ export class ContributionService {
 						generatedFrom: `contribution_${id}`,
 					}),
 				]);
-			} catch (error) {
+			} catch {
 				// Don't throw the error, as we still want to update the contribution status
 			}
 		}
@@ -373,7 +371,9 @@ export class ContributionService {
 				decidedBy: userId,
 				rejectionReason: decision.approved ? undefined : decision.rejectionReason || 'No reason provided',
 			});
-		} catch { }
+		} catch (e) {
+			console.warn('Posthog track failed (Contribution Decision)', e);
+		}
 		return updated;
 	}
 	async getContributionStats(): Promise<{
@@ -427,7 +427,9 @@ export class ContributionService {
 		if (result.success) {
 			try {
 				this.posthog?.track('Contribution Deleted', { id, userId });
-			} catch { }
+			} catch (e) {
+				console.warn('Posthog track failed (Contribution Deleted)', e);
+			}
 		}
 		return result.success;
 	}

@@ -5,6 +5,19 @@ import { calculateDistance } from './bars/geoUtils';
 
 import { DatabaseSessionService } from './database-session';
 
+type PointRow = {
+	id: string;
+	type: string;
+	airport_id: string;
+	directionality: string | null;
+	orientation: string | null;
+	color: string | null;
+	elevated: number | boolean | null;
+	ihp: number | boolean | null;
+	name: string;
+	coordinates: string;
+};
+
 export class PolygonService {
 	private airportService: AirportService;
 	private dbSession: DatabaseSessionService;
@@ -63,7 +76,7 @@ export class PolygonService {
 	 */ async getBarsRecordFromDB(id: string): Promise<BarsDBRecord | null> {
 		try {
 			const barsId = id.startsWith('BARS_') ? id : `BARS_${id}`;
-			const result = await this.dbSession.executeRead<any>(
+			const result = await this.dbSession.executeRead<PointRow>(
 				`
 		SELECT id, type, airport_id, directionality, orientation, color, elevated, ihp, name, coordinates
 		FROM points 
@@ -75,14 +88,14 @@ export class PolygonService {
 				return null;
 			}
 			return this.mapBarsRecordFromDb(result.results[0]);
-		} catch (error) {
+		} catch {
 			return null;
 		}
 	}
 	/**
 	 * Maps database result to BarsDBRecord
 	 */
-	private mapBarsRecordFromDb(dbResult: any): BarsDBRecord {
+	private mapBarsRecordFromDb(dbResult: PointRow): BarsDBRecord {
 		// Extract type from database fields - handle both column structures
 		const dbType = dbResult.type || '';
 		const dbDirectionality = dbResult.directionality || '';
@@ -131,12 +144,15 @@ export class PolygonService {
 		return {
 			id: dbResult.id,
 			type,
-			elevated: Boolean(dbResult.elevated),
+			elevated: dbResult.elevated === 1 || dbResult.elevated === true,
 			color,
 			orientation,
 			intensity: 1.0,
-			directionality: dbResult.directionality, // Add directionality from database record
-			ihp: Boolean(dbResult.ihp), // Add IHP (Intermediate Holding Point) flag
+			directionality:
+				dbResult.directionality === 'bi-directional' || dbResult.directionality === 'uni-directional'
+					? dbResult.directionality
+					: undefined, // normalized
+			ihp: dbResult.ihp === 1 || dbResult.ihp === true, // Add IHP flag
 		};
 	}
 
@@ -195,7 +211,9 @@ export class PolygonService {
 			for (const point of obj.points) {
 				// Determine per-light orientation & color (point overrides object)
 				const lightOrientation: 'left' | 'right' | 'both' =
-					(point.properties?.orientation as any) || (obj.properties.orientation as any) || 'both';
+					(point.properties?.orientation as 'left' | 'right' | 'both' | undefined) ||
+					(obj.properties.orientation as 'left' | 'right' | 'both' | undefined) ||
+					'both';
 				const lightColor = (point.properties?.color || obj.properties.color || '').toLowerCase();
 				const isElevatedStopbar = obj.type === 'stopbar' && point.properties?.elevated === true;
 				const lightStateId = this.mapLightStateId(lightOrientation, lightColor, isElevatedStopbar);
@@ -330,9 +348,9 @@ export class PolygonService {
 
 		const needsOrientation = Boolean(
 			props.orientation &&
-			!isElevatedStopbarWithBoth &&
-			((objectType !== 'stand' && props.orientation !== objectProps.orientation) ||
-				(objectType === 'stand' && props.orientation !== 'right')),
+				!isElevatedStopbarWithBoth &&
+				((objectType !== 'stand' && props.orientation !== objectProps.orientation) ||
+					(objectType === 'stand' && props.orientation !== 'right')),
 		);
 
 		// Check if IHP property needs inclusion (differs from object default)
@@ -366,7 +384,7 @@ export class PolygonService {
 					const airportLat = airportData.latitude;
 					const airportLon = airportData.longitude;
 
-					if (airportLat !== undefined && airportLon !== undefined) {
+					if (typeof airportLat === 'number' && typeof airportLon === 'number') {
 						let hasNearbyPoint = false;
 
 						for (const polygon of polygons) {

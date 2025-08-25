@@ -125,7 +125,7 @@ export const ServicePool = (() => {
 			}
 			return storage;
 		},
-		getGitHub(env: Env) {
+		getGitHub() {
 			if (!github) {
 				github = new GitHubService();
 			}
