@@ -318,13 +318,13 @@
         "tags": [
           "State"
         ],
-        "description": "Retrieves real-time state for a specific airport or all active airports.",
+        "description": "Returns state for a single airport or all airports. Use `airport=vatsimradar` for VATSIM Radar format (objects include `lights`; `offline` omitted).",
         "parameters": [
           {
             "in": "query",
             "name": "airport",
             "required": true,
-            "description": "ICAO code of airport or 'all' for every active airport",
+            "description": "ICAO (4 chars) or `all`. Use `vatsimradar` for VATSIM Radar format.",
             "schema": {
               "type": "string"
             }
@@ -332,7 +332,7 @@
         ],
         "responses": {
           "200": {
-            "description": "State information returned"
+            "description": "State returned"
           },
           "400": {
             "description": "Missing or invalid airport parameter"

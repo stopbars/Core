@@ -9,9 +9,10 @@ import { InstallerProduct } from './services/releases';
 import { Connection } from './network/connection';
 import { UserService } from './services/users';
 import { DatabaseContextFactory } from './services/database-context';
-import { withCache, CacheKeys } from './services/cache';
+import { withCache, CacheKeys, CacheService } from './services/cache';
 import { ServicePool } from './services/service-pool';
 import { sanitizeContributionXml } from './services/xml-sanitizer';
+import { getLightsByObject } from './services/lights-cache';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
 interface CreateDivisionPayload {
@@ -49,8 +50,8 @@ export class BARS {
 	private connection: Connection;
 
 	constructor(
-		private state: DurableObjectState,
-		private env: Env,
+		state: DurableObjectState,
+		env: Env,
 	) {
 		const vatsim = new VatsimService(env.VATSIM_CLIENT_ID, env.VATSIM_CLIENT_SECRET);
 		const auth = new AuthService(env.DB, vatsim);
@@ -124,7 +125,7 @@ app.use(
 	}),
 );
 
-app.get('/favicon.ico', (c) => {
+app.get('/favicon.ico', () => {
 	const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axhLZ4AAAAASUVORK5CYII='; // 1x1 transparent PNG
 	const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 	return new Response(bytes, {
@@ -472,23 +473,20 @@ app.get('/connect', async (c) => {
  *     summary: Get current lighting/network state
  *     tags:
  *       - State
- *     description: Retrieves real-time state for a specific airport or all active airports.
- *                   When airport=all, only airports that are currently online (at least one controller connected) are returned.
- *                   Each returned state includes an `offline` boolean indicating whether the airport is in offline fallback mode.
+ *     description: Returns state for a single airport or all airports. Use `airport=vatsimradar` for VATSIM Radar format (objects include `lights`; `offline` omitted).
  *     parameters:
  *       - in: query
  *         name: airport
  *         required: true
- *         description: ICAO code of airport or 'all' for every active airport
- *         schema:
- *           type: string
+ *         description: ICAO (4 chars) or `all`. Use `vatsimradar` for VATSIM Radar format.
+ *         schema: { type: string }
  *     responses:
  *       200:
- *         description: State information returned
+ *         description: State returned
  *       400:
  *         description: Missing or invalid airport parameter
  */
-app.get('/state', async (c) => {
+app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 	const airport = c.req.query('airport');
 	const isVatsimRadar = (airport || '').toLowerCase() === 'vatsimradar';
 	if (!airport) {
@@ -506,7 +504,18 @@ app.get('/state', async (c) => {
 	try {
 		if (airport === 'all' || isVatsimRadar) {
 			// Use session-aware database operations
-			await dbContext.db.executeWrite("DELETE FROM active_objects WHERE last_updated <= datetime('now', '-2 day')");
+			// Throttle cleanup query to at most once per minute using cache guard
+			try {
+				const cache = new CacheService(c.env);
+				const guardKey = 'active-objects-cleanup-guard';
+				const already = await cache.get(guardKey, 'health');
+				if (!already) {
+					await dbContext.db.executeWrite("DELETE FROM active_objects WHERE last_updated <= datetime('now', '-2 day')");
+					await cache.set(guardKey, true, { ttl: 60, namespace: 'health' });
+				}
+			} catch {
+				/* ignore cleanup throttling errors */
+			}
 
 			const activeObjectsResult = await dbContext.db.executeRead<any>(
 				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')",
@@ -527,7 +536,10 @@ app.get('/state', async (c) => {
 					});
 
 					try {
-						const response = await durableObj.fetch(stateRequest);
+						const [response, lightsByObject] = await Promise.all([
+							durableObj.fetch(stateRequest),
+							isVatsimRadar ? getLightsByObject(c.env, airportIcao) : Promise.resolve({} as Record<string, any>),
+						]);
 						const state = (await response.json()) as {
 							airport: string;
 							controllers: string[];
@@ -537,63 +549,6 @@ app.get('/state', async (c) => {
 						};
 
 						if (isVatsimRadar) {
-							// Helper to fetch latest BARS lights XML and parse into object->lights mapping
-							const storage = ServicePool.getStorage(c.env);
-							async function getLatestBarsLightsXml(icao: string): Promise<string | null> {
-								try {
-									const list = await storage.listFiles(`Maps/${icao}_`, 50);
-									if (!list.objects || list.objects.length === 0) return null;
-									let latest = list.objects[0];
-									for (const obj of list.objects) {
-										const objUploaded = (obj as any)?.uploaded as number | undefined;
-										const latestUploaded = (latest as any)?.uploaded as number | undefined;
-										if (objUploaded && latestUploaded && objUploaded > latestUploaded) {
-											latest = obj as any;
-										}
-									}
-									const fileResp = await storage.getFile(latest.key);
-									if (!fileResp) return null;
-									return await fileResp.text();
-								} catch {
-									return null;
-								}
-							}
-							function parseBarsLightsXml(xml: string): Record<string, Array<{ stateId: number | null; position: [number, number]; heading: number }>> {
-								const result: Record<string, Array<{ stateId: number | null; position: [number, number]; heading: number }>> = {};
-								if (!xml) return result;
-
-								const objRegex = /<BarsObject[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/BarsObject>/gi;
-								let objMatch: RegExpExecArray | null;
-								while ((objMatch = objRegex.exec(xml)) !== null) {
-									const id = objMatch[1];
-									const body = objMatch[2];
-									const lights: Array<{ stateId: number | null; position: [number, number]; heading: number }> = [];
-									const lightRegex = /<Light([^>]*)>([\s\S]*?)<\/Light>/gi;
-									let lightMatch: RegExpExecArray | null;
-									while ((lightMatch = lightRegex.exec(body)) !== null) {
-										const attrs = lightMatch[1] || '';
-										const inner = lightMatch[2] || '';
-										const stateIdMatch = attrs.match(/stateId\s*=\s*"(\d+)"/i);
-										const posMatch = inner.match(/<Position>\s*([^<]+)\s*<\/Position>/i);
-										const headingMatch = inner.match(/<Heading>\s*([^<]+)\s*<\/Heading>/i);
-										if (!posMatch || !headingMatch) continue;
-										const [latStr, lonStr] = posMatch[1].split(',').map((s) => s.trim());
-										const lat = parseFloat(latStr);
-										const lon = parseFloat(lonStr);
-										const heading = parseFloat(headingMatch[1]);
-										if (Number.isNaN(lat) || Number.isNaN(lon) || Number.isNaN(heading)) continue;
-										const stateId = stateIdMatch ? parseInt(stateIdMatch[1], 10) : null;
-										lights.push({ stateId, position: [lat, lon], heading });
-									}
-									if (lights.length > 0) {
-										result[id] = lights;
-									}
-								}
-								return result;
-							}
-
-							const lightsXml = await getLatestBarsLightsXml(state.airport);
-							const lightsByObject = lightsXml ? parseBarsLightsXml(lightsXml) : {};
 							const allowedIds = new Set(Object.keys(lightsByObject));
 
 							const objects = Array.isArray(state.objects)
@@ -603,7 +558,7 @@ app.get('/state', async (c) => {
 										id: o.id,
 										state: o.state,
 										timestamp: o.timestamp,
-										lights: lightsByObject[o.id] || [],
+										lights: (lightsByObject as any)[o.id] || [],
 									}))
 								: [];
 
@@ -682,60 +637,7 @@ app.get('/state', async (c) => {
 					objects: any[];
 					offline?: boolean;
 				};
-				const storage = ServicePool.getStorage(c.env);
-				async function getLatestBarsLightsXml(icao: string): Promise<string | null> {
-					try {
-						const list = await storage.listFiles(`Maps/${icao}_`, 50);
-						if (!list.objects || list.objects.length === 0) return null;
-						let latest = list.objects[0];
-						for (const obj of list.objects) {
-							const objUploaded = (obj as any)?.uploaded as number | undefined;
-							const latestUploaded = (latest as any)?.uploaded as number | undefined;
-							if (objUploaded && latestUploaded && objUploaded > latestUploaded) {
-								latest = obj as any;
-							}
-						}
-						const fileResp = await storage.getFile(latest.key);
-						if (!fileResp) return null;
-						return await fileResp.text();
-					} catch {
-						return null;
-					}
-				}
-				function parseBarsLightsXml(xml: string): Record<string, Array<{ stateId: number | null; position: [number, number]; heading: number }>> {
-					const result: Record<string, Array<{ stateId: number | null; position: [number, number]; heading: number }>> = {};
-					if (!xml) return result;
-					const objRegex = /<BarsObject[^>]*id=\"([^\"]+)\"[^>]*>([\s\S]*?)<\/BarsObject>/gi;
-					let objMatch: RegExpExecArray | null;
-					while ((objMatch = objRegex.exec(xml)) !== null) {
-						const id = objMatch[1];
-						const body = objMatch[2];
-						const lights: Array<{ stateId: number | null; position: [number, number]; heading: number }> = [];
-						const lightRegex = /<Light([^>]*)>([\s\S]*?)<\/Light>/gi;
-						let lightMatch: RegExpExecArray | null;
-						while ((lightMatch = lightRegex.exec(body)) !== null) {
-							const attrs = lightMatch[1] || '';
-							const inner = lightMatch[2] || '';
-							const stateIdMatch = attrs.match(/stateId\s*=\s*\"(\d+)\"/i);
-							const posMatch = inner.match(/<Position>\s*([^<]+)\s*<\/Position>/i);
-							const headingMatch = inner.match(/<Heading>\s*([^<]+)\s*<\/Heading>/i);
-							if (!posMatch || !headingMatch) continue;
-							const [latStr, lonStr] = posMatch[1].split(',').map((s) => s.trim());
-							const lat = parseFloat(latStr);
-							const lon = parseFloat(lonStr);
-							const heading = parseFloat(headingMatch[1]);
-							if (Number.isNaN(lat) || Number.isNaN(lon) || Number.isNaN(heading)) continue;
-							const stateId = stateIdMatch ? parseInt(stateIdMatch[1], 10) : null;
-							lights.push({ stateId, position: [lat, lon], heading });
-						}
-						if (lights.length > 0) {
-							result[id] = lights;
-						}
-					}
-					return result;
-				}
-				const lightsXml = await getLatestBarsLightsXml(state.airport);
-				const lightsByObject = lightsXml ? parseBarsLightsXml(lightsXml) : {};
+				const lightsByObject = await getLightsByObject(c.env, state.airport);
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
@@ -744,7 +646,7 @@ app.get('/state', async (c) => {
 							id: o.id,
 							state: o.state,
 							timestamp: o.timestamp,
-							lights: lightsByObject[o.id] || [],
+							lights: (lightsByObject as any)[o.id] || [],
 						}))
 					: [];
 				return dbContext.jsonResponse({
@@ -3450,7 +3352,6 @@ euroscopeApp.use('*', async (c, next) => {
  *         description: File uploaded
  */
 euroscopeApp.post('/upload', async (c) => {
-	const user = c.get('user');
 	const vatsimUser = c.get('vatsimUser');
 
 	try {
@@ -3591,7 +3492,6 @@ euroscopeApp.post('/upload', async (c) => {
 euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const filename = c.req.param('filename');
-	const user = c.get('user');
 	const vatsimUser = c.get('vatsimUser');
 
 	// Validate ICAO format
