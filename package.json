@@ -20,7 +20,7 @@
 		"ts-node": "^10.9.2",
 		"typescript": "^5.9.2",
 		"vitest": "^3.1.4",
-		"wrangler": "^4.31.0"
+		"wrangler": "^4.32.0"
 	},
 	"dependencies": {
 		"geolib": "^3.3.4",
