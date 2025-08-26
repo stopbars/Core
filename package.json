@@ -30,7 +30,7 @@
 	},
 	"dependencies": {
 		"geolib": "^3.3.4",
-		"hono": "^4.9.2",
+		"hono": "^4.9.4",
 		"swagger-jsdoc": "^6.2.8"
 	}
 }
