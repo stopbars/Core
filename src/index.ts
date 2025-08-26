@@ -474,7 +474,7 @@ app.get('/connect', async (c) => {
  *     summary: Get current lighting/network state
  *     tags:
  *       - State
- *     description: Returns state for a single airport or all airports. Use `airport=vatsimradar` for VATSIM Radar format (objects include `lights`; `offline` omitted).
+ *     description: Returns state for a single airport or all airports. Use `airport=vatsimradar` for VATSIM Radar format (objects include `lights`; `offline` omitted; offline airports excluded).
  *     parameters:
  *       - in: query
  *         name: airport
@@ -555,18 +555,25 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 						};
 						const state = (await response.json()) as DOState;
 
+						// Determine online/offline status consistently
+						const controllerCount = Array.isArray(state.controllers) ? state.controllers.length : 0;
+						const isOffline = state.offline ?? (controllerCount > 0 ? false : true);
+
 						if (isVatsimRadar) {
+							// For VATSIM Radar, mirror 'all' behavior by excluding offline airports entirely
+							if (isOffline) return null as null;
+
 							const allowedIds = new Set(Object.keys(lightsByObject));
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-										.filter((o: DOObject) => allowedIds.has(o.id))
-										.map((o: DOObject) => ({
-											id: o.id,
-											state: o.state,
-											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-										}))
+									.filter((o: DOObject) => allowedIds.has(o.id))
+									.map((o: DOObject) => ({
+										id: o.id,
+										state: o.state,
+										timestamp: o.timestamp,
+										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+									}))
 								: [];
 
 							return {
@@ -575,7 +582,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 								pilots: state.pilots,
 								objects,
 								connections: {
-									controllers: Array.isArray(state.controllers) ? state.controllers.length : 0,
+									controllers: controllerCount,
 									pilots: Array.isArray(state.pilots) ? state.pilots.length : 0,
 								},
 							};
@@ -586,10 +593,10 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 							controllers: state.controllers,
 							pilots: state.pilots,
 							objects: state.objects,
-							offline: state.offline ?? (state.controllers?.length ? false : true),
+							offline: isOffline,
 							connections: {
 								// Derive live connection counts from the DO response to avoid stale DB name values
-								controllers: Array.isArray(state.controllers) ? state.controllers.length : 0,
+								controllers: controllerCount,
 								pilots: Array.isArray(state.pilots) ? state.pilots.length : 0,
 							},
 						};
@@ -602,7 +609,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 			// Return response with bookmark for consistency
 			if (isVatsimRadar) {
-				// Include all successfully fetched states (both online and offline), without the offline flag
+				// Only include successfully fetched online states (offline excluded above), omitting any offline flag
 				return dbContext.jsonResponse({ states: allStates.filter((s) => Boolean(s)) });
 			}
 
@@ -649,13 +656,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-							.filter((o: DOObject) => allowedIds.has(o.id))
-							.map((o: DOObject) => ({
-								id: o.id,
-								state: o.state,
-								timestamp: o.timestamp,
-								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-							}))
+						.filter((o: DOObject) => allowedIds.has(o.id))
+						.map((o: DOObject) => ({
+							id: o.id,
+							state: o.state,
+							timestamp: o.timestamp,
+							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+						}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
