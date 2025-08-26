@@ -318,7 +318,7 @@
         "tags": [
           "State"
         ],
-        "description": "Returns state for a single airport or all airports. Use `airport=vatsimradar` for VATSIM Radar format (objects include `lights`; `offline` omitted).",
+        "description": "Returns state for a single airport or all airports. Use `airport=vatsimradar` for VATSIM Radar format (objects include `lights`; `offline` omitted; offline airports excluded).",
         "parameters": [
           {
             "in": "query",
