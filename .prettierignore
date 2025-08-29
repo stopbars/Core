@@ -4,3 +4,4 @@ build
 package-lock.json
 worker-configuration.d.ts
 openapi.json
+CONTRIBUTING.md
