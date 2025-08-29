@@ -16,7 +16,7 @@ export class VatsimService {
 				client_secret: this.clientSecret,
 				code,
 				redirect_uri: 'https://v2.stopbars.com/auth/vatsim/callback',
-				scope: 'email',
+				scope: 'email full_name vatsim_details',
 			}),
 		});
 
@@ -36,11 +36,19 @@ export class VatsimService {
 		}
 
 		const userData = (await res.json()) as VatsimUserResponse;
+		const vatsim = userData.data.vatsim || {};
 		return {
 			id: userData.data.cid,
 			email: userData.data.personal.email,
 			first_name: userData.data.personal.name_first || undefined,
 			last_name: userData.data.personal.name_last || undefined,
+			region: vatsim.region?.id || vatsim.region?.name ? { id: vatsim.region?.id ?? '', name: vatsim.region?.name ?? '' } : null,
+			division:
+				vatsim.division?.id || vatsim.division?.name ? { id: vatsim.division?.id ?? '', name: vatsim.division?.name ?? '' } : null,
+			subdivision:
+				vatsim.subdivision?.id || vatsim.subdivision?.name
+					? { id: vatsim.subdivision?.id ?? '', name: vatsim.subdivision?.name ?? '' }
+					: null,
 		};
 	}
 	async getUserStatus(userId: string): Promise<{ cid: string; callsign: string; type: string } | null> {

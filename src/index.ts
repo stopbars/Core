@@ -567,13 +567,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -656,13 +656,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-						.filter((o: DOObject) => allowedIds.has(o.id))
-						.map((o: DOObject) => ({
-							id: o.id,
-							state: o.state,
-							timestamp: o.timestamp,
-							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-						}))
+							.filter((o: DOObject) => allowedIds.has(o.id))
+							.map((o: DOObject) => ({
+								id: o.id,
+								state: o.state,
+								timestamp: o.timestamp,
+								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+							}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -757,6 +757,15 @@ app.get('/auth/account', async (c) => {
 		if (!user) {
 			return dbContext.textResponse('User not found', { status: 404 });
 		}
+
+		// Ensure division/subdivision/region are synced on login with latest VATSIM data
+		try {
+			await auth.syncUserLocationFields(user.id, vatsimUser);
+			const refreshed = await auth.getUserByVatsimId(vatsimUser.id);
+			if (refreshed) user = refreshed;
+		} catch {
+			/* ignore sync errors */
+		}
 		// Backfill full_name if missing locally but available from VATSIM
 		if ((!user.full_name || user.full_name.trim() === '') && (vatsimUser.first_name || vatsimUser.last_name)) {
 			const newFullName = [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ').trim();
@@ -779,6 +788,13 @@ app.get('/auth/account', async (c) => {
 			full_name: user.full_name || null,
 			display_mode: user.display_mode ?? 0,
 			display_name: user.display_name || auth.computeDisplayName(user, vatsimUser),
+			region: user.region_id || user.region_name ? { id: user.region_id, name: user.region_name } : (vatsimUser.region ?? null),
+			division:
+				user.division_id || user.division_name ? { id: user.division_id, name: user.division_name } : (vatsimUser.division ?? null),
+			subdivision:
+				user.subdivision_id || user.subdivision_name
+					? { id: user.subdivision_id, name: user.subdivision_name }
+					: (vatsimUser.subdivision ?? null),
 			created_at: user.created_at,
 			last_login: user.last_login,
 		});
@@ -2161,6 +2177,41 @@ app.get(
 		});
 	},
 );
+
+/**
+ * @openapi
+ * /stateid/info.json:
+ *   get:
+ *     summary: Static mapping of state IDs to light colors
+ *     tags:
+ *       - State
+ *     description: Returns a lightweight, static list of light state codes and their direction colors.
+ *     responses:
+ *       200:
+ *         description: Mapping returned
+ */
+app.get('/stateid/info.json', withCache(CacheKeys.fromUrl, 31536000, 'data'), (c) => {
+	const states = [
+		{ type: 'Uni-Directional', code: 0, direction2: 'OFF', direction1: 'OFF' },
+		{ type: 'Uni-Directional', code: 1, direction2: 'OFF', direction1: 'Red' },
+		{ type: 'Uni-Directional', code: 2, direction2: 'OFF', direction1: 'Green' },
+		{ type: 'Uni-Directional', code: 3, direction2: 'OFF', direction1: 'Yellow' },
+		{ type: 'Uni-Directional', code: 4, direction2: 'OFF', direction1: 'Blue' },
+		{ type: 'Uni-Directional', code: 5, direction2: 'OFF', direction1: 'Orange' },
+		{ type: 'Uni-Directional', code: 6, direction2: 'OFF', direction1: 'Red' },
+		{ type: 'Uni-Directional', code: 7, direction2: 'OFF', direction1: 'OFF' },
+		{ type: 'Bi-Directional', code: 20, direction2: 'Red', direction1: 'Red' },
+		{ type: 'Bi-Directional', code: 21, direction2: 'Green', direction1: 'Green' },
+		{ type: 'Bi-Directional', code: 22, direction2: 'Yellow', direction1: 'Yellow' },
+		{ type: 'Bi-Directional', code: 23, direction2: 'Blue', direction1: 'Blue' },
+		{ type: 'Bi-Directional', code: 24, direction2: 'Orange', direction1: 'Orange' },
+		{ type: 'Bi-Directional', code: 25, direction2: 'Green', direction1: 'Yellow' },
+		{ type: 'Bi-Directional', code: 26, direction2: 'Green', direction1: 'Blue' },
+		{ type: 'Bi-Directional', code: 27, direction2: 'Green', direction1: 'Orange' },
+	];
+
+	return c.json({ states });
+});
 
 /**
  * @openapi

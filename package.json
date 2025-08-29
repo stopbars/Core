@@ -14,23 +14,22 @@
 		"lint": "eslint . --fix"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.8.65",
 		"@eslint/js": "^9.34.0",
 		"@types/node": "^24.3.0",
 		"@types/swagger-jsdoc": "^6.0.4",
 		"eslint": "^9.34.0",
 		"globals": "^16.3.0",
+		"jiti": "^2.5.1",
 		"prettier": "^3.6.2",
 		"ts-node": "^10.9.2",
 		"typescript": "^5.9.2",
 		"typescript-eslint": "^8.40.0",
-		"vitest": "^3.1.4",
-		"wrangler": "^4.32.0",
-		"jiti": "^2.5.1"
+		"wrangler": "^4.33.1"
 	},
 	"dependencies": {
 		"geolib": "^3.3.4",
 		"hono": "^4.9.4",
+		"nanoid": "^5.1.5",
 		"swagger-jsdoc": "^6.2.8"
 	}
 }

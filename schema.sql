@@ -8,6 +8,12 @@ CREATE TABLE IF NOT EXISTS users (
  full_name TEXT, -- Stored full name from VATSIM (first + last)
  display_mode INTEGER NOT NULL DEFAULT 0,
  display_name TEXT, -- Cached computed display name
+ region_id TEXT,
+ region_name TEXT,
+ division_id TEXT,
+ division_name TEXT,
+ subdivision_id TEXT,
+ subdivision_name TEXT,
  created_at TEXT NOT NULL,
  last_login TEXT NOT NULL
 );

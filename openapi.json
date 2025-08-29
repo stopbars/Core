@@ -1378,6 +1378,20 @@
         }
       }
     },
+    "/stateid/info.json": {
+      "get": {
+        "summary": "Static mapping of state IDs to light colors",
+        "tags": [
+          "State"
+        ],
+        "description": "Returns a lightweight, static list of light state codes and their direction colors.",
+        "responses": {
+          "200": {
+            "description": "Mapping returned"
+          }
+        }
+      }
+    },
     "/staff/users": {
       "get": {
         "x-hidden": true,

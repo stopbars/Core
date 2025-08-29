@@ -9,6 +9,9 @@ export interface VatsimUser {
 	email: string;
 	first_name?: string;
 	last_name?: string;
+	region?: { id: string; name: string } | null;
+	division?: { id: string; name: string } | null;
+	subdivision?: { id: string; name: string } | null;
 }
 
 export interface UserRecord {
@@ -19,6 +22,12 @@ export interface UserRecord {
 	full_name?: string | null;
 	display_mode?: number; // 0=First,1=First LastInitial,2=CID
 	display_name?: string | null; // cached display name
+	region_id?: string | null;
+	region_name?: string | null;
+	division_id?: string | null;
+	division_name?: string | null;
+	subdivision_id?: string | null;
+	subdivision_name?: string | null;
 	created_at: string;
 	last_login: string;
 	vatsimToken: string;
@@ -31,7 +40,16 @@ export interface VatsimUserResponse {
 			email: string;
 			name_first?: string;
 			name_last?: string;
+			name_full?: string;
 		};
+		vatsim?: {
+			region?: { id?: string | null; name?: string | null } | null;
+			division?: { id?: string | null; name?: string | null } | null;
+			subdivision?: { id?: string | null; name?: string | null } | null;
+			rating?: { id?: number; long?: string; short?: string } | null;
+			pilotrating?: { id?: number; long?: string; short?: string } | null;
+		} | null;
+		oauth?: { token_valid?: string } | null;
 	};
 }
 

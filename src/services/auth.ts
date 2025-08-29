@@ -42,7 +42,9 @@ export class AuthService {
 
 		if (existingUser) {
 			await this.updateUserLastLogin(existingUser.id);
-			return { user: existingUser, created: false };
+			await this.syncUserLocationFields(existingUser.id, vatsimUser);
+			const refreshed = await this.getUserByVatsimId(vatsimUser.id);
+			return { user: refreshed || existingUser, created: false };
 		}
 
 		const newUser = await this.createNewUser(vatsimUser);
@@ -93,8 +95,9 @@ export class AuthService {
 			},
 			vatsimUser,
 		);
+		const norm = (s?: string) => (typeof s === 'string' && s.trim().length > 0 ? s.trim() : null);
 		const result = await this.dbSession.executeWrite(
-			'INSERT INTO users (vatsim_id, api_key, email, full_name, display_mode, display_name, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
+			'INSERT INTO users (vatsim_id, api_key, email, full_name, display_mode, display_name, region_id, region_name, division_id, division_name, subdivision_id, subdivision_name, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
 			[
 				vatsimUser.id,
 				apiKey,
@@ -102,6 +105,12 @@ export class AuthService {
 				fullName,
 				displayMode,
 				displayName,
+				norm(vatsimUser.region?.id),
+				norm(vatsimUser.region?.name),
+				norm(vatsimUser.division?.id),
+				norm(vatsimUser.division?.name),
+				norm(vatsimUser.subdivision?.id),
+				norm(vatsimUser.subdivision?.name),
 				new Date().toISOString(),
 				new Date().toISOString(),
 			],
@@ -111,6 +120,31 @@ export class AuthService {
 		const created = rows && rows[0];
 		if (!created) throw new Error('Failed to create user');
 		return created as UserRecord;
+	}
+
+	async syncUserLocationFields(userId: number, vatsimUser: VatsimUser) {
+		// Normalize empty strings to null to avoid wiping existing values
+		const norm = (s?: string) => (typeof s === 'string' && s.trim().length > 0 ? s.trim() : null);
+		const regionId = norm(vatsimUser.region?.id);
+		const regionName = norm(vatsimUser.region?.name);
+		const divisionId = norm(vatsimUser.division?.id);
+		const divisionName = norm(vatsimUser.division?.name);
+		const subdivisionId = norm(vatsimUser.subdivision?.id);
+		const subdivisionName = norm(vatsimUser.subdivision?.name);
+
+		// Only update when new values are present; do not overwrite with nulls
+		await this.dbSession.executeWrite(
+			`UPDATE users
+			 SET 
+			   region_id = COALESCE(?, region_id),
+			   region_name = COALESCE(?, region_name),
+			   division_id = COALESCE(?, division_id),
+			   division_name = COALESCE(?, division_name),
+			   subdivision_id = COALESCE(?, subdivision_id),
+			   subdivision_name = COALESCE(?, subdivision_name)
+			 WHERE id = ?`,
+			[regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName, userId],
+		);
 	}
 
 	async deleteUserAccount(vatsimId: string): Promise<boolean> {
