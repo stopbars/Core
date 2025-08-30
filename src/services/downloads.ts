@@ -139,4 +139,28 @@ export class DownloadsService {
 		const total = versions.reduce((a, b) => a + b.count, 0);
 		return { product, total, versions };
 	}
+
+	/**
+	 * Returns download stats for all products.
+	 */
+	async getAllStats(): Promise<ProductDownloadStats[]> {
+		const rowsRes = await this.dbSession.executeRead<DownloadRow>(
+			'SELECT product, version, total_count FROM downloads ORDER BY product, created_at DESC',
+		);
+		const byProduct = new Map<InstallerProduct, VersionDownloadStats[]>();
+		for (const r of rowsRes.results) {
+			const prod = r.product as InstallerProduct;
+			const list = byProduct.get(prod) || [];
+			list.push({ version: r.version, count: r.total_count });
+			byProduct.set(prod, list);
+		}
+		const all: ProductDownloadStats[] = [];
+		for (const [product, versions] of byProduct.entries()) {
+			const total = versions.reduce((a, b) => a + b.count, 0);
+			all.push({ product, total, versions });
+		}
+		// Keep deterministic ordering by product name
+		all.sort((a, b) => (a.product < b.product ? -1 : a.product > b.product ? 1 : 0));
+		return all;
+	}
 }

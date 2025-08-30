@@ -4207,28 +4207,30 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
  * @openapi
  * /downloads/stats:
  *   get:
- *     summary: Get download statistics for a product
+ *     summary: Get download statistics (per product)
  *     tags:
  *       - Installer
  *     parameters:
  *       - in: query
  *         name: product
- *         required: true
+ *         required: false
  *         schema:
  *           type: string
  *           enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET]
  *     responses:
  *       200:
- *         description: Stats returned
- *       400:
- *         description: Missing/invalid product
+ *         description: Stats returned (single product when specified, otherwise array of all)
  */
 app.get('/downloads/stats', withCache(CacheKeys.fromUrl, 300, 'installer'), async (c) => {
 	const product = c.req.query('product') as InstallerProduct | undefined;
-	if (!product) return c.json({ error: 'product required' }, 400);
+	const downloads = ServicePool.getDownloads(c.env);
+	if (!product) {
+		// No product specified -> return stats for all products
+		const all = await downloads.getAllStats();
+		return c.json({ products: all });
+	}
 	const VALID: InstallerProduct[] = ['Pilot-Client', 'vatSys-Plugin', 'EuroScope-Plugin', 'Installer', 'SimConnect.NET'];
 	if (!VALID.includes(product)) return c.json({ error: 'invalid product' }, 400);
-	const downloads = ServicePool.getDownloads(c.env);
 	const stats = await downloads.getStats(product);
 	return c.json(stats);
 });
@@ -4710,6 +4712,23 @@ app.get('/openapi.json', (c) => {
 	return c.json(openapiSpec, 200, {
 		'Cache-Control': 'public, max-age=300',
 	});
+});
+
+// API Docs Redirect
+/**
+ * @openapi
+ * /docs:
+ *   get:
+ *     summary: Redirect to API documentation
+ *     tags:
+ *       - System
+ *     description: Redirects to the hosted API documentation site.
+ *     responses:
+ *       302:
+ *         description: Redirect to docs.stopbars.com
+ */
+app.get('/docs', (c) => {
+	return c.redirect('https://docs.stopbars.com/api-reference/', 302);
 });
 
 // Catch all other routes

@@ -2451,7 +2451,7 @@
     },
     "/downloads/stats": {
       "get": {
-        "summary": "Get download statistics for a product",
+        "summary": "Get download statistics (per product)",
         "tags": [
           "Installer"
         ],
@@ -2459,7 +2459,7 @@
           {
             "in": "query",
             "name": "product",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2474,10 +2474,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Stats returned"
-          },
-          "400": {
-            "description": "Missing/invalid product"
+            "description": "Stats returned (single product when specified, otherwise array of all)"
           }
         }
       }
@@ -2776,6 +2773,20 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "summary": "Redirect to API documentation",
+        "tags": [
+          "System"
+        ],
+        "description": "Redirects to the hosted API documentation site.",
+        "responses": {
+          "302": {
+            "description": "Redirect to docs.stopbars.com"
           }
         }
       }
