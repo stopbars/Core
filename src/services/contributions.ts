@@ -419,14 +419,27 @@ export class ContributionService {
 		if (!userInfo) {
 			throw new Error('User not found');
 		}
-		const hasPermission = await this.roleService.hasPermission(userInfo.id, StaffRole.LEAD_DEVELOPER);
-		if (!hasPermission) {
+		// Fetch contribution to validate existence/ownership
+		const existing = await this.getContribution(id);
+		if (!existing) {
+			return false; // not found
+		}
+		const isStaff = await this.roleService.hasPermission(userInfo.id, StaffRole.PRODUCT_MANAGER);
+		const isOwner = existing.userId === userId;
+		const isDeletableStatus = existing.status === 'pending' || existing.status === 'rejected';
+		const canDelete = isDeletableStatus && (isStaff || isOwner);
+		if (!canDelete) {
 			throw new Error('Not authorized to delete contributions');
 		}
 		const result = await this.dbSession.executeWrite('DELETE FROM contributions WHERE id = ?', [id]);
 		if (result.success) {
 			try {
-				this.posthog?.track('Contribution Deleted', { id, userId });
+				this.posthog?.track('Contribution Deleted', {
+					id,
+					deletedBy: userId,
+					role: isStaff ? 'staff' : 'owner',
+					status: existing.status,
+				});
 			} catch (e) {
 				console.warn('Posthog track failed (Contribution Deleted)', e);
 			}

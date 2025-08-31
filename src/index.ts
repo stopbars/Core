@@ -2908,15 +2908,15 @@ contributionsApp.post('/:id/decision', async (c) => {
 	}
 });
 
-// DELETE /contributions/:id - Delete a contribution (admin only)
+// DELETE /contributions/:id - Delete a contribution (staff or owner; only pending/rejected)
 /**
  * @openapi
  * /contributions/{id}:
  *   delete:
- *     x-hidden: true
  *     summary: Delete a contribution
  *     tags:
  *       - Contributions
+ *     description: Deletes a contribution only when it is pending or rejected. Staff (Product Manager or higher) or the original submitter may perform this action.
  *     security:
  *       - VatsimToken: []
  *     parameters:
@@ -2925,8 +2925,10 @@ contributionsApp.post('/:id/decision', async (c) => {
  *         required: true
  *         schema: { type: string }
  *     responses:
- *       200:
- *         description: Deletion result
+ *       204: { description: Deleted }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Not found }
  */
 contributionsApp.delete('/:id', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -2936,6 +2938,7 @@ contributionsApp.delete('/:id', async (c) => {
 
 	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
+	const contributions = ServicePool.getContributions(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
@@ -2944,16 +2947,20 @@ contributionsApp.delete('/:id', async (c) => {
 		return c.text('User not found', 404);
 	}
 
-	try {
-		const contributionId = c.req.param('id');
-		const contributions = ServicePool.getContributions(c.env);
-		const success = await contributions.deleteContribution(contributionId, user.vatsim_id);
+	const id = c.req.param('id');
+	const existing = await contributions.getContribution(id);
+	if (!existing) {
+		return c.text('Not found', 404);
+	}
 
-		return c.json({ success });
+	try {
+		const success = await contributions.deleteContribution(id, user.vatsim_id);
+		if (!success) return c.text('Not found', 404);
+		return c.body(null, 204);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
-		const status = error instanceof Error && error.message.includes('Not authorized') ? 403 : 400;
-		return c.json({ error: message }, status);
+		if (message.includes('Not authorized')) return c.text('Forbidden', 403);
+		return c.json({ error: message }, 400);
 	}
 });
 

@@ -1773,11 +1773,11 @@
         }
       },
       "delete": {
-        "x-hidden": true,
         "summary": "Delete a contribution",
         "tags": [
           "Contributions"
         ],
+        "description": "Deletes a contribution only when it is pending or rejected. Staff (Product Manager or higher) or the original submitter may perform this action.",
         "security": [
           {
             "VatsimToken": []
@@ -1794,8 +1794,17 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Deletion result"
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not found"
           }
         }
       }
