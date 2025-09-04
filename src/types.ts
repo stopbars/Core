@@ -111,17 +111,18 @@ export interface AirportState {
 
 export interface Packet {
 	type:
-		| 'STATE_UPDATE'
-		| 'INITIAL_STATE'
-		| 'CONTROLLER_CONNECT'
-		| 'CONTROLLER_DISCONNECT'
-		| 'SHARED_STATE_UPDATE'
-		| 'ERROR'
-		| 'HEARTBEAT'
-		| 'HEARTBEAT_ACK'
-		| 'CLOSE'
-		| 'GET_STATE'
-		| 'STATE_SNAPSHOT';
+	| 'STATE_UPDATE'
+	| 'INITIAL_STATE'
+	| 'CONTROLLER_CONNECT'
+	| 'CONTROLLER_DISCONNECT'
+	| 'SHARED_STATE_UPDATE'
+	| 'ERROR'
+	| 'HEARTBEAT'
+	| 'HEARTBEAT_ACK'
+	| 'CLOSE'
+	| 'GET_STATE'
+	| 'STATE_SNAPSHOT'
+	| 'STOPBAR_CROSSING';
 	airport?: string;
 	data?: {
 		objectId?: string;

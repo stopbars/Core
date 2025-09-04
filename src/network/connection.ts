@@ -647,6 +647,35 @@ export class Connection {
 						);
 						break;
 
+					case 'STOPBAR_CROSSING': {
+						// Only pilots can send this packet; observers and controllers shouldn't
+						if (clientType !== 'pilot') {
+							throw new Error('Only pilot clients can send STOPBAR_CROSSING');
+						}
+
+						const p = packet as Packet;
+						const airport = socketInfo.airport;
+						const objectId = p.data?.objectId as string | undefined;
+						if (!objectId) {
+							throw new Error('objectId is required');
+						}
+
+						// Prepare broadcast packet to controllers only
+						const broadcastPacket: Packet = {
+							type: 'STOPBAR_CROSSING',
+							airport,
+							data: {
+								objectId,
+								controllerId: user.vatsim_id,
+							},
+							timestamp: now,
+						};
+
+						await this.broadcastToControllers(broadcastPacket, server);
+						await this.trackMessage(clientType);
+						break;
+					}
+
 					case 'GET_STATE': {
 						// Provide current state snapshot (controllers + pilots can request; observers too)
 						const airport = (packet as Packet).airport || socketInfo.airport;
@@ -822,7 +851,7 @@ export class Connection {
 
 	private async trackMessage(_clientType: ClientType) {
 		void _clientType;
-		// Stats tracking removed
+		// TODO add posthog tracking of message types
 	}
 
 	private async updateActiveConnections(change: number) {
@@ -920,6 +949,37 @@ export class Connection {
 			return this.handleWebSocket(request);
 		}
 		return new Response('Expected WebSocket', { status: 400 });
+	}
+
+	private async broadcastToControllers(packet: Packet, sender?: WebSocket) {
+		const airport = packet.airport;
+		if (!airport) return;
+
+		const packetString = JSON.stringify(packet);
+		const promises: Promise<void>[] = [];
+
+		this.sockets.forEach((client, socket) => {
+			if (
+				socket !== sender &&
+				socket.readyState === WebSocket.OPEN &&
+				client.airport === airport &&
+				client.type === 'controller'
+			) {
+				promises.push(
+					new Promise((resolve) => {
+						try {
+							socket.send(packetString);
+						} catch (error) {
+							console.error('Failed to send packet to controller:', error);
+						} finally {
+							resolve();
+						}
+					}),
+				);
+			}
+		});
+
+		await Promise.all(promises);
 	}
 
 	private getOrCreateSharedState(airport: string): Record<string, unknown> {
@@ -1047,6 +1107,7 @@ export class Connection {
 			'ERROR',
 			'GET_STATE',
 			'STATE_SNAPSHOT',
+			'STOPBAR_CROSSING',
 		];
 
 		if (!validTypes.includes(type)) {
@@ -1071,6 +1132,8 @@ export class Connection {
 				return this.validateStateUpdatePacket(packet);
 			case 'SHARED_STATE_UPDATE':
 				return this.validateSharedStateUpdatePacket(packet);
+			case 'STOPBAR_CROSSING':
+				return this.validateStopbarCrossingPacket(packet);
 			default:
 				return true; // Other types are valid if they pass basic checks
 		}
@@ -1107,6 +1170,22 @@ export class Connection {
 		if (!data.sharedStatePatch || typeof data.sharedStatePatch !== 'object') {
 			return false;
 		}
+
+		return true;
+	}
+
+	private validateStopbarCrossingPacket(packet: unknown): boolean {
+		const obj = packet as { data?: unknown };
+		if (!obj.data || typeof obj.data !== 'object') {
+			return false;
+		}
+
+		const data = obj.data as Record<string, unknown>;
+		// Must have objectId
+		if (!data.objectId || typeof data.objectId !== 'string') {
+			return false;
+		}
+
 
 		return true;
 	}
