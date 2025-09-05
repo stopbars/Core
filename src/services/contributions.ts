@@ -475,8 +475,18 @@ export class ContributionService {
 	}> {
 		const { status = 'all', page = 1, limit = 10 } = options;
 
+		// Build WHERE and pagination first; we'll run summary and list queries in parallel
+		const whereConditions = ['user_id = ?'];
+		const params: (string | number)[] = [userId];
+		if (status !== 'all') {
+			whereConditions.push('status = ?');
+			params.push(status);
+		}
+		const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
+		const offset = (page - 1) * limit;
+
 		// Get summary counts
-		const summaryResult = await this.dbSession.executeRead<{
+		const summaryPromise = this.dbSession.executeRead<{
 			total: number;
 			approved: number;
 			pending: number;
@@ -493,31 +503,9 @@ export class ContributionService {
 	`,
 			[userId],
 		);
-		const summaryRow = summaryResult.results[0] || { total: 0, approved: 0, pending: 0, rejected: 0 };
-		const summary = {
-			total: summaryRow.total || 0,
-			approved: summaryRow.approved || 0,
-			pending: summaryRow.pending || 0,
-			rejected: summaryRow.rejected || 0,
-		};
-
-		// Calculate pagination
-		const totalPages = Math.ceil(summary.total / limit);
-		const offset = (page - 1) * limit;
-
-		// Build the query based on status filter
-		const whereConditions = ['user_id = ?'];
-		const params = [userId];
-
-		if (status !== 'all') {
-			whereConditions.push('status = ?');
-			params.push(status);
-		}
-
-		const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
 
 		// Get the detailed contributions list
-		const query = `
+		const listQuery = `
 	  SELECT 
 		id, user_id as userId, user_display_name as userDisplayName,
 		airport_icao as airportIcao, package_name as packageName,
@@ -529,8 +517,19 @@ export class ContributionService {
 	  ORDER BY submission_date DESC
 	  LIMIT ? OFFSET ?
 	`;
+		const listPromise = this.dbSession.executeRead<Contribution>(listQuery, [...params, limit, offset]);
 
-		const contributionsResult = await this.dbSession.executeRead<Contribution>(query, [...params, limit, offset]);
+		const [summaryResult, contributionsResult] = await Promise.all([summaryPromise, listPromise]);
+		const summaryRow = summaryResult.results[0] || { total: 0, approved: 0, pending: 0, rejected: 0 };
+		const summary = {
+			total: summaryRow.total || 0,
+			approved: summaryRow.approved || 0,
+			pending: summaryRow.pending || 0,
+			rejected: summaryRow.rejected || 0,
+		};
+
+		// Calculate pagination (uses summary.total and limit)
+		const totalPages = Math.ceil(summary.total / limit);
 		return {
 			contributions: contributionsResult.results,
 			summary,

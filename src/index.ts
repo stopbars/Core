@@ -757,7 +757,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 	const auth = ServicePool.getAuth(c.env);
 	try {
 		const { vatsimToken } = await auth.handleCallback(code);
-		return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
+		return Response.redirect(`http://localhost:5173/auth/callback?token=${vatsimToken}`, 302);
 	} catch {
 		return Response.redirect('https://v2.stopbars.com/auth?error=oauth_failed', 302);
 	}
@@ -796,9 +796,10 @@ app.get('/auth/account', async (c) => {
 		const vatsim = ServicePool.getVatsim(c.env);
 		const auth = ServicePool.getAuth(c.env);
 
+		// Fetch VATSIM user first (external call), then do DB lookups in parallel
 		const vatsimUser = await vatsim.getUser(vatsimToken);
-		const ban = await auth.getBanInfo(vatsimUser.id);
-		let user = await auth.getUserByVatsimIdEvenIfBanned(vatsimUser.id);
+		const [ban, userRaw] = await Promise.all([auth.getBanInfo(vatsimUser.id), auth.getUserByVatsimIdEvenIfBanned(vatsimUser.id)]);
+		const user = userRaw;
 		if (ban) {
 			return dbContext.jsonResponse(
 				{ banned: true, reason: ban.reason || null, expires_at: ban.expires_at || null },
@@ -809,26 +810,30 @@ app.get('/auth/account', async (c) => {
 			return dbContext.textResponse('User not found', { status: 404 });
 		}
 
-		// Ensure division/subdivision/region are synced on login with latest VATSIM data
+		// Fire-and-forget background maintenance so it doesn't block response
 		try {
-			await auth.syncUserLocationFields(user.id, vatsimUser);
-			const refreshed = await auth.getUserByVatsimId(vatsimUser.id);
-			if (refreshed) user = refreshed;
+			c.executionCtx?.waitUntil(
+				(async () => {
+					try {
+						await auth.syncUserLocationFields(user!.id, vatsimUser);
+					} catch {
+						// ignore background sync errors
+					}
+					// Backfill full_name if missing locally but available from VATSIM
+					try {
+						if ((!user!.full_name || user!.full_name.trim() === '') && (vatsimUser.first_name || vatsimUser.last_name)) {
+							const newFullName = [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ').trim();
+							if (newFullName) {
+								await auth.updateFullName(user!.id, newFullName);
+							}
+						}
+					} catch {
+						// ignore background name update errors
+					}
+				})(),
+			);
 		} catch {
-			/* ignore sync errors */
-		}
-		// Backfill full_name if missing locally but available from VATSIM
-		if ((!user.full_name || user.full_name.trim() === '') && (vatsimUser.first_name || vatsimUser.last_name)) {
-			const newFullName = [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ').trim();
-			if (newFullName) {
-				try {
-					await auth.updateFullName(user.id, newFullName);
-				} catch {
-					/* ignore */
-				}
-				const refreshed = await auth.getUserByVatsimId(vatsimUser.id);
-				if (refreshed) user = refreshed;
-			}
+			// ignore if waitUntil not available
 		}
 
 		return dbContext.jsonResponse({
@@ -836,7 +841,7 @@ app.get('/auth/account', async (c) => {
 			vatsim_id: user.vatsim_id,
 			email: vatsimUser.email,
 			api_key: user.api_key,
-			full_name: user.full_name || null,
+			full_name: user.full_name || [vatsimUser.first_name, vatsimUser.last_name].filter(Boolean).join(' ').trim() || null,
 			display_mode: user.display_mode ?? 0,
 			display_name: user.display_name || auth.computeDisplayName(user, vatsimUser),
 			region: user.region_id || user.region_name ? { id: user.region_id, name: user.region_name } : (vatsimUser.region ?? null),
@@ -1369,29 +1374,6 @@ const divisionsApp = new Hono<{
 	};
 }>();
 
-divisionsApp.use('*', async (c, next) => {
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-
-	if (!user) {
-		return c.text('User not found', 404);
-	}
-
-	c.set('vatsimUser', vatsimUser);
-	c.set('user', user);
-	c.set('auth', auth);
-	c.set('vatsim', vatsim);
-	await next();
-});
-
 /**
  * @openapi
  * /divisions:
@@ -1408,6 +1390,8 @@ divisionsApp.use('*', async (c, next) => {
  *         description: Unauthorized
  */
 divisionsApp.get('/', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
 	const divisions = ServicePool.getDivisions(c.env);
 	const allDivisions = await divisions.getAllDivisions();
 	return c.json(allDivisions);
@@ -1442,14 +1426,20 @@ divisionsApp.get('/', async (c) => {
  *         description: Forbidden
  */
 divisionsApp.post('/', async (c) => {
-	const user = c.get('user')!;
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+
 	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
-	if (!isLeadDev) {
-		return c.text('Forbidden', 403);
-	}
+	if (!isLeadDev) return c.text('Forbidden', 403);
 
 	const { name, headVatsimId } = (await c.req.json()) as CreateDivisionPayload;
 	const division = await divisions.createDivision(name, headVatsimId);
@@ -1490,10 +1480,18 @@ divisionsApp.post('/', async (c) => {
  *         description: Division not found
  */
 divisionsApp.put('/:id', async (c) => {
-	const user = c.get('user')!;
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 	const id = parseInt(c.req.param('id'));
+
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
 
 	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
 	if (!isLeadDev) return c.text('Forbidden', 403);
@@ -1532,10 +1530,18 @@ divisionsApp.put('/:id', async (c) => {
  *         description: Division not found
  */
 divisionsApp.delete('/:id', async (c) => {
-	const user = c.get('user')!;
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 	const id = parseInt(c.req.param('id'));
+
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
 
 	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
 	if (!isLeadDev) return c.text('Forbidden', 403);
@@ -1561,8 +1567,12 @@ divisionsApp.delete('/:id', async (c) => {
  *         description: User divisions returned
  */
 divisionsApp.get('/user', withCache(CacheKeys.withUser('divisions'), 3600, 'divisions'), async (c) => {
-	const vatsimUser = c.get('vatsimUser')!;
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const vatsim = ServicePool.getVatsim(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
 
 	const userDivisions = await divisions.getUserDivisions(vatsimUser.id);
 	return c.json(userDivisions);
@@ -1589,6 +1599,8 @@ divisionsApp.get('/user', withCache(CacheKeys.withUser('divisions'), 3600, 'divi
  *         description: Division not found
  */
 divisionsApp.get('/:id', withCache(CacheKeys.fromParams('id'), 2592000, 'divisions'), async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
 	const divisionId = parseInt(c.req.param('id'));
 	const divisions = ServicePool.getDivisions(c.env);
 
@@ -1621,6 +1633,8 @@ divisionsApp.get('/:id', withCache(CacheKeys.fromParams('id'), 2592000, 'divisio
  *         description: Division not found
  */
 divisionsApp.get('/:id/members', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
 	const divisionId = parseInt(c.req.param('id'));
 	const divisions = ServicePool.getDivisions(c.env);
 
@@ -1668,9 +1682,13 @@ divisionsApp.get('/:id/members', async (c) => {
  *         description: Forbidden
  */
 divisionsApp.post('/:id/members', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
 	const divisionId = parseInt(c.req.param('id'));
-	const vatsimUser = c.get('vatsimUser')!;
+	const vatsim = ServicePool.getVatsim(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -1714,10 +1732,14 @@ divisionsApp.post('/:id/members', async (c) => {
  *         description: Forbidden
  */
 divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
 	const divisionId = parseInt(c.req.param('id'));
 	const targetVatsimId = c.req.param('vatsimId');
-	const vatsimUser = c.get('vatsimUser')!;
+	const vatsim = ServicePool.getVatsim(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -1762,6 +1784,10 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 divisionsApp.get('/:id/airports', withCache(CacheKeys.fromParams('id'), 600, 'divisions'), async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const divisions = ServicePool.getDivisions(c.env);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	await vatsim.getUser(vatsimToken);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -1805,9 +1831,13 @@ divisionsApp.get('/:id/airports', withCache(CacheKeys.fromParams('id'), 600, 'di
  *         description: Division not found
  */
 divisionsApp.post('/:id/airports', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
 	const divisionId = parseInt(c.req.param('id'));
-	const vatsimUser = c.get('vatsimUser')!;
+	const vatsim = ServicePool.getVatsim(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
 
 	// Verify division exists
 	const division = await divisions.getDivision(divisionId);
@@ -1857,10 +1887,13 @@ divisionsApp.post('/:id/airports', async (c) => {
  *         description: Forbidden
  */
 divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
 	const divisionId = parseInt(c.req.param('id'));
 	const airportId = parseInt(c.req.param('airportId'));
-	const user = c.get('user')!;
-	const vatsimUser = c.get('vatsimUser')!;
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 
@@ -1870,10 +1903,12 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+
 	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
-	if (!isLeadDev) {
-		return c.text('Forbidden', 403);
-	}
+	if (!isLeadDev) return c.text('Forbidden', 403);
 
 	const { approved } = (await c.req.json()) as ApproveAirportPayload;
 	const airport = await divisions.approveAirport(airportId, vatsimUser.id, approved);
@@ -2977,40 +3012,53 @@ contributionsApp.post('/', async (c) => {
  *       - in: query
  *         name: status
  *         schema: { type: string }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1 }
  *     responses:
  *       200:
  *         description: Contributions returned
  */
-contributionsApp.get('/user', async (c) => {
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
+contributionsApp.get(
+	'/user',
+	withCache((req) => CacheKeys.withUser(CacheKeys.fromUrl(req))(req), 60, 'auth'),
+	async (c) => {
+		const vatsimToken = c.req.header('X-Vatsim-Token');
+		if (!vatsimToken) {
+			return c.text('Unauthorized', 401);
+		}
 
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
+		const vatsim = ServicePool.getVatsim(c.env);
+		const auth = ServicePool.getAuth(c.env);
 
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
+		const vatsimUser = await vatsim.getUser(vatsimToken);
+		const user = await auth.getUserByVatsimId(vatsimUser.id);
 
-	if (!user) {
-		return c.text('User not found', 404);
-	}
+		if (!user) {
+			return c.text('User not found', 404);
+		}
 
-	// Parse query parameters
-	const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'all') || 'all';
-	const page = 1; // Default to page 1 for user contributions
-	const limit = Number.MAX_SAFE_INTEGER;
+		// Parse query parameters
+		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'all') || 'all';
+		// Support optional pagination while preserving existing defaults
+		const pageParam = Number(c.req.query('page') || '1');
+		const limitParam = Number(c.req.query('limit') || String(Number.MAX_SAFE_INTEGER));
+		const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1; // Default to page 1
+		const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : Number.MAX_SAFE_INTEGER;
 
-	const contributions = ServicePool.getContributions(c.env);
-	const result = await contributions.getUserContributions(user.vatsim_id, {
-		status,
-		page,
-		limit,
-	});
+		const contributions = ServicePool.getContributions(c.env);
+		const result = await contributions.getUserContributions(user.vatsim_id, {
+			status,
+			page,
+			limit,
+		});
 
-	return c.json(result);
-});
+		return c.json(result);
+	},
+);
 
 /**
  * @openapi
