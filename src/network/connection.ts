@@ -4,6 +4,7 @@ import { VatsimService } from '../services/vatsim';
 import { PointsService } from '../services/points';
 import { IDService } from '../services/id';
 import { DivisionService } from '../services/divisions';
+import { DatabaseContextFactory } from '../services/database-context';
 
 // Add recursive merge utility function with safety checks
 function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): unknown {
@@ -81,6 +82,7 @@ export class Connection {
 	private airportSharedStates = new Map<string, Record<string, unknown>>(); // New shared state storage
 	private readonly TWO_MINUTES = 120000; // Add constant at class level
 	private objectId: string; // Store the DO's ID
+	private lastActiveObjectsUpdate = 0; // Throttle D1 updates
 
 	constructor(
 		private env: Env,
@@ -540,7 +542,10 @@ export class Connection {
 		// Start heartbeat mechanism
 		this.startHeartbeat(server);
 
-		await this.trackConnection(clientType);
+		// Track connection in background to avoid blocking WS upgrade on slow D1
+		this.trackConnection(clientType).catch((err) => {
+			console.error('trackConnection failed:', err);
+		});
 
 		// Load or create airport state
 		const state = this.getOrCreateAirportState(airport);
@@ -632,8 +637,12 @@ export class Connection {
 				// Update last heartbeat time for any message received
 				socketInfo.lastHeartbeat = now;
 
-				// Update object status on each message to keep last_updated current
-				await this.updateObjectStatus();
+				// Update object status on each message to keep last_updated current (non-fatal on failure)
+				try {
+					await this.updateObjectStatus();
+				} catch (e) {
+					console.warn('updateObjectStatus failed (non-fatal):', e instanceof Error ? e.message : e);
+				}
 
 				// Handle different packet types
 				switch ((packet as Packet).type) {
@@ -787,18 +796,34 @@ export class Connection {
 
 		server.addEventListener('close', async () => {
 			if (this.sockets.get(server)?.type === 'controller') {
-				await this.handleControllerDisconnect(server);
+				try {
+					await this.handleControllerDisconnect(server);
+				} catch (e) {
+					console.warn('handleControllerDisconnect failed on close (non-fatal):', e);
+				}
 			}
 			this.sockets.delete(server);
-			await this.trackDisconnection();
+			try {
+				await this.trackDisconnection();
+			} catch (e) {
+				console.warn('trackDisconnection failed on close (non-fatal):', e);
+			}
 		});
 
 		server.addEventListener('error', async () => {
 			if (this.sockets.get(server)?.type === 'controller') {
-				await this.handleControllerDisconnect(server);
+				try {
+					await this.handleControllerDisconnect(server);
+				} catch (e) {
+					console.warn('handleControllerDisconnect failed on error (non-fatal):', e);
+				}
 			}
 			this.sockets.delete(server);
-			await this.trackDisconnection();
+			try {
+				await this.trackDisconnection();
+			} catch (e) {
+				console.warn('trackDisconnection failed on error (non-fatal):', e);
+			}
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
@@ -810,10 +835,16 @@ export class Connection {
 
 		// Add this object to active_objects table when first connection is made
 		if (this.sockets.size === 1) {
-			const stmt = this.env.DB.prepare(
-				"INSERT OR REPLACE INTO active_objects (id, name, last_updated) VALUES (?, ?, datetime('now'))",
-			);
-			await stmt.bind(this.objectId, this.getObjectName()).run();
+			try {
+				const session = DatabaseContextFactory.createSessionService(this.env.DB);
+				await session.executeWrite(
+					"INSERT OR REPLACE INTO active_objects (id, name, last_updated) VALUES (?, ?, datetime('now'))",
+					[this.objectId, this.getObjectName()],
+				);
+				session.closeSession();
+			} catch (e) {
+				console.warn('Failed to upsert active_objects on connect (non-fatal):', e instanceof Error ? e.message : e);
+			}
 		}
 	}
 
@@ -822,8 +853,13 @@ export class Connection {
 
 		// If no more connections, remove from active_objects
 		if (this.sockets.size === 0) {
-			const stmt = this.env.DB.prepare('DELETE FROM active_objects WHERE id = ?');
-			await stmt.bind(this.objectId).run();
+			try {
+				const session = DatabaseContextFactory.createSessionService(this.env.DB);
+				await session.executeWrite('DELETE FROM active_objects WHERE id = ?', [this.objectId]);
+				session.closeSession();
+			} catch (e) {
+				console.warn('Failed to delete active_objects on disconnect (non-fatal):', e instanceof Error ? e.message : e);
+			}
 		}
 	}
 	private getObjectName(): string {
@@ -843,9 +879,23 @@ export class Connection {
 
 	private async updateObjectStatus() {
 		if (this.sockets.size > 0) {
+			// Throttle updates to avoid excessive D1 writes
+			const now = Date.now();
+			if (now - this.lastActiveObjectsUpdate < 5000) return; // 5s throttle
+
 			// Update the object's name and last_updated timestamp
-			const stmt = this.env.DB.prepare("UPDATE active_objects SET name = ?, last_updated = datetime('now') WHERE id = ?");
-			await stmt.bind(this.getObjectName(), this.objectId).run();
+			const name = this.getObjectName();
+			try {
+				const session = DatabaseContextFactory.createSessionService(this.env.DB);
+				await session.executeWrite("UPDATE active_objects SET name = ?, last_updated = datetime('now') WHERE id = ?", [
+					name,
+					this.objectId,
+				]);
+				session.closeSession();
+				this.lastActiveObjectsUpdate = now;
+			} catch (e) {
+				console.warn('Failed to update active_objects name (non-fatal):', e instanceof Error ? e.message : e);
+			}
 		}
 	}
 
@@ -959,12 +1009,7 @@ export class Connection {
 		const promises: Promise<void>[] = [];
 
 		this.sockets.forEach((client, socket) => {
-			if (
-				socket !== sender &&
-				socket.readyState === WebSocket.OPEN &&
-				client.airport === airport &&
-				client.type === 'controller'
-			) {
+			if (socket !== sender && socket.readyState === WebSocket.OPEN && client.airport === airport && client.type === 'controller') {
 				promises.push(
 					new Promise((resolve) => {
 						try {
@@ -1185,7 +1230,6 @@ export class Connection {
 		if (!data.objectId || typeof data.objectId !== 'string') {
 			return false;
 		}
-
 
 		return true;
 	}

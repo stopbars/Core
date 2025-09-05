@@ -2158,6 +2158,90 @@
         }
       }
     },
+    "/vatsys/profiles": {
+      "get": {
+        "summary": "List public vatSys profile XMLs",
+        "tags": [
+          "vatSys"
+        ],
+        "responses": {
+          "200": {
+            "description": "Profiles listed"
+          }
+        }
+      }
+    },
+    "/vatsys/profiles/upload": {
+      "post": {
+        "x-hidden": true,
+        "summary": "Upload or replace a vatSys profile XML (staff only)",
+        "tags": [
+          "vatSys"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "note": {
+                    "type": "string",
+                    "description": "Optional note; filename determines identity"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Uploaded"
+          }
+        }
+      }
+    },
+    "/vatsys/profiles/{filename}": {
+      "delete": {
+        "x-hidden": true,
+        "summary": "Delete a vatSys profile (staff only)",
+        "tags": [
+          "vatSys"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deletion result"
+          }
+        }
+      }
+    },
     "/releases": {
       "get": {
         "summary": "List all product releases (optionally filtered)",
@@ -2525,6 +2609,46 @@
         "responses": {
           "200": {
             "description": "Cache purged"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/purge-cache-all": {
+      "post": {
+        "x-hidden": true,
+        "summary": "Purge entire API cache (namespace bump)",
+        "description": "Bumps the cache version for the specified namespace or all known namespaces, invalidating all entries without enumerating keys. Lead developer only.",
+        "tags": [
+          "Staff",
+          "Cache"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "namespace": {
+                    "type": "string",
+                    "description": "If omitted, all namespaces are purged"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Namespace version bumped"
           },
           "403": {
             "description": "Forbidden"

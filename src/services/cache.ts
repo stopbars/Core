@@ -10,14 +10,53 @@ interface CacheOptions {
 export class CacheService {
 	constructor(private env: Env) {}
 
+	private versionMetaKey(namespace: string): Request {
+		return new Request(`https://cache.stopbars/__version/${namespace}`);
+	}
+
+	private async getNamespaceVersion(namespace: string): Promise<number> {
+		const cache = caches.default;
+		const res = await cache.match(this.versionMetaKey(namespace));
+		if (!res) return 1;
+		try {
+			const data = (await res.json()) as { version?: number };
+			const v = Number(data?.version);
+			return Number.isFinite(v) && v > 0 ? v : 1;
+		} catch {
+			return 1;
+		}
+	}
+
+	private async setNamespaceVersion(namespace: string, version: number): Promise<void> {
+		const cache = caches.default;
+		const body = JSON.stringify({ version });
+		const res = new Response(body, {
+			headers: {
+				'Content-Type': 'application/json',
+				// Long max-age; it's just a version marker we overwrite on bump
+				'Cache-Control': 'public, max-age=31536000',
+			},
+		});
+		await cache.put(this.versionMetaKey(namespace), res);
+	}
+
+	/** Bump and return the new version for a namespace. */
+	async bumpNamespaceVersion(namespace: string): Promise<number> {
+		const current = await this.getNamespaceVersion(namespace);
+		const next = current + 1;
+		await this.setNamespaceVersion(namespace, next);
+		return next;
+	}
+
 	/**
 	 * Get data from cache
 	 * @param key - Cache key
 	 * @returns Cached data or null if not found
 	 */
 	async get<T>(key: string, namespace = 'default'): Promise<T | null> {
-		// Create a cache key with namespace
-		const cacheKey = new Request(`https://cache.stopbars/${namespace}/${key}`);
+		// Versioned cache key with namespace
+		const ver = await this.getNamespaceVersion(namespace);
+		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
 
 		// Try to get from cache
 		const cache = caches.default;
@@ -43,8 +82,9 @@ export class CacheService {
 	async set<T>(key: string, data: T, options: CacheOptions = {}): Promise<void> {
 		const { ttl = 60, namespace = 'default' } = options;
 
-		// Create a cache key with namespace
-		const cacheKey = new Request(`https://cache.stopbars/${namespace}/${key}`);
+		// Versioned cache key with namespace
+		const ver = await this.getNamespaceVersion(namespace);
+		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
 
 		// Create response with the data
 		const response = new Response(JSON.stringify(data), {
@@ -65,7 +105,8 @@ export class CacheService {
 	 * @param namespace - Cache namespace
 	 */
 	async delete(key: string, namespace = 'default'): Promise<void> {
-		const cacheKey = new Request(`https://cache.stopbars/${namespace}/${key}`);
+		const ver = await this.getNamespaceVersion(namespace);
+		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
 		const cache = caches.default;
 		await cache.delete(cacheKey);
 	}

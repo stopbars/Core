@@ -18,6 +18,7 @@ import { FAQService } from './faqs';
 import { ReleaseService } from './releases';
 import { ContactService } from './contact';
 import { DownloadsService } from './downloads';
+import { VatSysProfilesService } from './vatsys-profiles';
 
 export const ServicePool = (() => {
 	let vatsim: VatsimService;
@@ -39,6 +40,7 @@ export const ServicePool = (() => {
 	let releases: ReleaseService;
 	let contact: ContactService;
 	let downloads: DownloadsService;
+	let vatsysProfiles: VatSysProfilesService;
 
 	return {
 		getVatsim(env: Env) {
@@ -160,6 +162,12 @@ export const ServicePool = (() => {
 				downloads = new DownloadsService(env.DB);
 			}
 			return downloads;
+		},
+		getVatSysProfiles(env: Env) {
+			if (!vatsysProfiles) {
+				vatsysProfiles = new VatSysProfilesService(this.getStorage(env));
+			}
+			return vatsysProfiles;
 		},
 	};
 })();

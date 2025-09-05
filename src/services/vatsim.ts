@@ -1,4 +1,5 @@
 import { AuthResponse, VatsimUser, VatsimUserResponse } from '../types';
+import { HttpError } from './errors';
 
 export class VatsimService {
 	constructor(
@@ -32,7 +33,23 @@ export class VatsimService {
 		});
 
 		if (!res.ok) {
-			throw new Error('Failed to get VATSIM user');
+			// Translate upstream statuses to client-friendly HTTP errors so routes return 401/403/429/5xx
+			// Map common statuses to client-friendly errors
+			const status = res.status;
+			const text = res.statusText || 'VATSIM API error';
+			if (status === 401) {
+				throw new HttpError(401, 'Unauthorized: invalid or expired VATSIM token');
+			}
+			if (status === 403) {
+				throw new HttpError(403, 'Forbidden: access to VATSIM user endpoint denied');
+			}
+			if (status === 429) {
+				throw new HttpError(429, 'Rate limited by VATSIM');
+			}
+			if (status >= 500) {
+				throw new HttpError(503, `VATSIM service unavailable (${status})`, { statusText: text }, false);
+			}
+			throw new HttpError(502, `Failed to get VATSIM user (${status})`, { statusText: text }, false);
 		}
 
 		const userData = (await res.json()) as VatsimUserResponse;

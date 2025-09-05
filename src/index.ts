@@ -13,6 +13,7 @@ import { withCache, CacheKeys, CacheService } from './services/cache';
 import { ServicePool } from './services/service-pool';
 import { sanitizeContributionXml } from './services/xml-sanitizer';
 import { getLightsByObject, type RadarLight } from './services/lights-cache';
+import { HttpError } from './services/errors';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
 interface CreateDivisionPayload {
@@ -71,6 +72,22 @@ const app = new Hono<{
 		clientIp?: string;
 	};
 }>();
+
+// Global error handler to turn expected HttpErrors into clean responses
+app.onError((err) => {
+	if (err instanceof HttpError) {
+		const body = err.expose ? { error: err.message } : { error: 'Upstream service error' };
+		return new Response(JSON.stringify(body), {
+			status: err.status,
+			headers: { 'content-type': 'application/json; charset=utf-8' },
+		});
+	}
+	console.error('Unhandled error:', err);
+	return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
+		status: 500,
+		headers: { 'content-type': 'application/json; charset=utf-8' },
+	});
+});
 
 app.use('*', async (c, next) => {
 	const start = Date.now();
@@ -571,13 +588,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -660,13 +677,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-						.filter((o: DOObject) => allowedIds.has(o.id))
-						.map((o: DOObject) => ({
-							id: o.id,
-							state: o.state,
-							timestamp: o.timestamp,
-							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-						}))
+							.filter((o: DOObject) => allowedIds.has(o.id))
+							.map((o: DOObject) => ({
+								id: o.id,
+								state: o.state,
+								timestamp: o.timestamp,
+								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+							}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -3694,6 +3711,127 @@ app.route('/euroscope', euroscopeApp);
 
 /**
  * @openapi
+ * /vatsys/profiles:
+ *   get:
+ *     summary: List public vatSys profile XMLs
+ *     tags:
+ *       - vatSys
+ *     responses:
+ *       200:
+ *         description: Profiles listed
+ */
+app.get('/vatsys/profiles', withCache(CacheKeys.fromUrl, 600, 'airports'), async (c) => {
+	const svc = ServicePool.getVatSysProfiles(c.env);
+	const items = await svc.list();
+	const profiles = items.map((it) => ({
+		icao: it.icao,
+		name: it.name,
+		url: new URL(`https://dev-cdn.stopbars.com/${it.key}`, c.req.url).toString(),
+	}));
+	return c.json({ profiles });
+});
+
+const vatsysStaffApp = new Hono<{ Bindings: Env; Variables: { user?: UserRecord; vatsimUser?: VatsimUser } }>();
+
+vatsysStaffApp.use('*', async (c, next) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const isStaff = await roles.isStaff(user.id);
+	if (!isStaff) return c.text('Forbidden', 403);
+	c.set('user', user);
+	c.set('vatsimUser', vatsimUser);
+	await next();
+});
+
+/**
+ * @openapi
+ * /vatsys/profiles/upload:
+ *   post:
+ *     x-hidden: true
+ *     summary: Upload or replace a vatSys profile XML (staff only)
+ *     tags:
+ *       - vatSys
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file]
+ *             properties:
+ *               file: { type: string, format: binary }
+ *               note: { type: string, description: 'Optional note; filename determines identity' }
+ *     responses:
+ *       201:
+ *         description: Uploaded
+ */
+vatsysStaffApp.post('/profiles/upload', async (c) => {
+	const user = c.get('user')!;
+	let form: FormData;
+	try {
+		form = await c.req.formData();
+	} catch {
+		return c.json({ error: 'Invalid form-data' }, 400);
+	}
+	const file = form.get('file');
+	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
+	// Max size 1MB (service also guards)
+	if (file.size > 1_000_000) return c.json({ error: 'File too large (1MB max)' }, 400);
+
+	const bytes = await file.arrayBuffer();
+	const svc = ServicePool.getVatSysProfiles(c.env);
+	try {
+		const res = await svc.upload(file.name, bytes, user.vatsim_id);
+		const url = new URL(`https://dev-cdn.stopbars.com/${res.key}`, c.req.url).toString();
+		return c.json({ success: true, key: res.key, etag: res.etag, url }, 201);
+	} catch (e) {
+		return c.json({ error: e instanceof Error ? e.message : 'Upload failed' }, 400);
+	}
+});
+
+/**
+ * @openapi
+ * /vatsys/profiles/{filename}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Delete a vatSys profile (staff only)
+ *     tags:
+ *       - vatSys
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: filename
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion result
+ */
+vatsysStaffApp.delete('/profiles/:filename', async (c) => {
+	const filename = c.req.param('filename');
+	const svc = ServicePool.getVatSysProfiles(c.env);
+	try {
+		const ok = await svc.delete(filename);
+		if (!ok) return c.text('Not found', 404);
+		return c.json({ success: true });
+	} catch (e) {
+		return c.json({ error: e instanceof Error ? e.message : 'Delete failed' }, 400);
+	}
+});
+
+app.route('/vatsys', vatsysStaffApp);
+
+/**
+ * @openapi
  * /releases:
  *   get:
  *     summary: List all product releases (optionally filtered)
@@ -4320,6 +4458,71 @@ app.post('/purge-cache', async (c) => {
 			},
 			500,
 		);
+	}
+});
+
+/**
+ * @openapi
+ * /purge-cache-all:
+ *   post:
+ *     x-hidden: true
+ *     summary: Purge entire API cache (namespace bump)
+ *     description: Bumps the cache version for the specified namespace or all known namespaces, invalidating all entries without enumerating keys. Lead developer only.
+ *     tags:
+ *       - Staff
+ *       - Cache
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               namespace: { type: string, description: 'If omitted, all namespaces are purged' }
+ *     responses:
+ *       200:
+ *         description: Namespace version bumped
+ *       403:
+ *         description: Forbidden
+ */
+app.post('/purge-cache-all', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!isLeadDev) return c.text('Forbidden', 403);
+
+	const cache = ServicePool.getCache(c.env);
+	try {
+		let body: unknown = undefined;
+		try {
+			body = await c.req.json();
+		} catch {
+			/* allow empty body */
+		}
+		let namespace: string | undefined = undefined;
+		if (body && typeof body === 'object') {
+			const maybe = body as Record<string, unknown>;
+			if (typeof maybe.namespace === 'string') namespace = maybe.namespace;
+		}
+		// Known namespaces used in codebase (see agent guide): airports, points, divisions, auth, state, health, installer, github, faq
+		const allNamespaces = ['airports', 'points', 'divisions', 'auth', 'state', 'health', 'installer', 'github', 'faq'];
+		const toPurge = namespace ? [namespace] : allNamespaces;
+		const results: Record<string, number> = {};
+		for (const ns of toPurge) {
+			results[ns] = await cache.bumpNamespaceVersion(ns);
+		}
+		return c.json({ success: true, bumped: results });
+	} catch (e) {
+		return c.json({ error: e instanceof Error ? e.message : 'Failed to purge namespaces' }, 500);
 	}
 });
 
