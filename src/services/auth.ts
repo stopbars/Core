@@ -320,12 +320,13 @@ export class AuthService {
 	/** Create or update a ban for a vatsim id. Account is kept so UI can surface ban. */
 	async banUser(vatsimId: string, reason: string | null, issuedBy: string, expiresAt?: string | null): Promise<void> {
 		this.dbSession.startSession({ mode: 'first-primary' });
-		// Upsert ban
+		const nowIso = new Date().toISOString();
+		if (!/^\d{3,10}$/.test(vatsimId)) throw new Error('Invalid VATSIM ID format');
 		await this.dbSession.executeWrite(
 			`INSERT INTO bans (vatsim_id, reason, issued_by, created_at, expires_at)
-			 VALUES (?, ?, ?, datetime('now'), ?)
-			 ON CONFLICT(vatsim_id) DO UPDATE SET reason=excluded.reason, issued_by=excluded.issued_by, created_at=datetime('now'), expires_at=excluded.expires_at`,
-			[vatsimId, reason ?? null, issuedBy, expiresAt ?? null],
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(vatsim_id) DO UPDATE SET reason=excluded.reason, issued_by=excluded.issued_by, created_at=?, expires_at=excluded.expires_at`,
+			[vatsimId, reason ?? null, issuedBy, nowIso, expiresAt ?? null, nowIso],
 		);
 	}
 

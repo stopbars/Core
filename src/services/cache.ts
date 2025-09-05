@@ -171,7 +171,14 @@ export const CacheKeys = {
 	 */
 	fromUrl: (req: Request): string => {
 		const url = new URL(req.url);
-		return `${url.pathname}${url.search}`;
+		// Normalize path and sort params to avoid cache key ambiguity/poisoning
+		const path = url.pathname.replace(/[^A-Za-z0-9/_-]/g, '');
+		const params = Array.from(url.searchParams.entries())
+			.filter(([k]) => !/^auth(orization)?$/i.test(k))
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+			.join('&');
+		return params ? `${path}?${params}` : path;
 	},
 
 	/**
@@ -181,8 +188,12 @@ export const CacheKeys = {
 		(...params: string[]) =>
 		(req: Request): string => {
 			const url = new URL(req.url);
-			const values = params.map((p) => url.searchParams.get(p) || '').join('-');
-			return `${url.pathname}-${values}`;
+			const path = url.pathname.replace(/[^A-Za-z0-9/_-]/g, '');
+			const safeValues = params
+				.map((p) => url.searchParams.get(p) || '')
+				.map((v) => v.replace(/[^A-Za-z0-9._-]/g, '')) // whitelist chars
+				.join('-');
+			return `${path}-${safeValues}`;
 		},
 
 	/**
@@ -191,9 +202,23 @@ export const CacheKeys = {
 	withUser:
 		(baseKey: string) =>
 		(req: Request): string => {
-			const token = req.headers.get('X-Vatsim-Token') || 'anonymous';
-			// Use a hash of the token to avoid storing sensitive data in cache keys
-			const userHash = token.substring(0, 8); // Simple approach, could use proper hashing
+			// Prefer explicit X-Vatsim-Token; fall back to Bearer token from Authorization
+			let token = req.headers.get('X-Vatsim-Token') || '';
+			if (!token) {
+				const authz = req.headers.get('Authorization') || '';
+				if (authz.toLowerCase().startsWith('bearer ')) {
+					token = authz.slice(7);
+				}
+			}
+			if (!token) {
+				return `${baseKey}-user-anonymous`;
+			}
+			// Synchronous non-cryptographic hash (djb2) to avoid leaking token bytes
+			let hash = 5381;
+			for (let i = 0; i < token.length; i++) {
+				hash = ((hash << 5) + hash) ^ token.charCodeAt(i);
+			}
+			const userHash = (hash >>> 0).toString(16).padStart(8, '0');
 			return `${baseKey}-user-${userHash}`;
 		},
 };

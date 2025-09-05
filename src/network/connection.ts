@@ -533,14 +533,27 @@ export class Connection {
 
 	async handleWebSocket(request: Request) {
 		const url = new URL(request.url);
-		const apiKey = url.searchParams.get('key');
+		let apiKey = url.searchParams.get('key');
 		const airport = url.searchParams.get('airport');
+		// Also accept API key via Authorization
+		if (!apiKey) {
+			const authz = request.headers.get('Authorization') || '';
+			if (authz.toLowerCase().startsWith('bearer ')) {
+				apiKey = authz.slice(7);
+			}
+		}
 
-		if (!apiKey) return new Response('Unauthorized', { status: 401 });
-		if (!airport) return new Response('Airport parameter required', { status: 400 });
+		const deny = async () => {
+			const jitter = Math.floor(Math.random() * 30) + 20;
+			await new Promise((r) => setTimeout(r, jitter));
+			return new Response('Unauthorized', { status: 401 });
+		};
+
+		if (!apiKey) return await deny();
+		if (!airport) return await deny();
 
 		const user = await this.auth.getUserByApiKey(apiKey);
-		if (!user) return new Response('Unauthorized', { status: 401 });
+		if (!user) return await deny();
 
 		// Ban enforcement: deny connection if banned
 		if (await this.auth.isVatsimIdBanned(user.vatsim_id)) {
@@ -1214,6 +1227,14 @@ export class Connection {
 		}
 
 		// Type-specific validation
+		// Global size/depth guard for any packet carrying data
+		const MAX_PACKET_CHARS = 50000;
+		try {
+			const s = JSON.stringify(packet);
+			if (s.length > MAX_PACKET_CHARS) return false;
+		} catch {
+			return false;
+		}
 		switch (type) {
 			case 'STATE_UPDATE':
 				return this.validateStateUpdatePacket(packet);
@@ -1243,6 +1264,28 @@ export class Connection {
 			return false;
 		}
 
+		// Guard patch/state size and depth
+		const guardObject = (val: unknown, maxDepth = 20, maxProps = 100): boolean => {
+			const seen = new WeakSet<object>();
+			const walk = (v: unknown, depth: number): boolean => {
+				if (v === null) return true;
+				if (typeof v !== 'object') return true;
+				if (Array.isArray(v)) {
+					return v.length <= 1000 && v.every((it) => walk(it, depth + 1));
+				}
+				if (depth > maxDepth) return false;
+				const o = v as Record<string, unknown>;
+				if (seen.has(o)) return false;
+				seen.add(o);
+				const keys = Object.keys(o);
+				if (keys.length > maxProps) return false;
+				return keys.every((k) => typeof k === 'string' && k.length <= 100 && walk(o[k], depth + 1));
+			};
+			return walk(val, 0);
+		};
+		if (data.patch !== undefined && !guardObject(data.patch)) return false;
+		if (data.state !== undefined && !guardObject(data.state)) return false;
+
 		return true;
 	}
 
@@ -1258,6 +1301,26 @@ export class Connection {
 			return false;
 		}
 
+		// Size/depth guard
+		const guardObject = (val: unknown, maxDepth = 20, maxProps = 100): boolean => {
+			const seen = new WeakSet<object>();
+			const walk = (v: unknown, depth: number): boolean => {
+				if (v === null) return true;
+				if (typeof v !== 'object') return true;
+				if (Array.isArray(v)) {
+					return v.length <= 1000 && v.every((it) => walk(it, depth + 1));
+				}
+				if (depth > maxDepth) return false;
+				const o = v as Record<string, unknown>;
+				if (seen.has(o)) return false;
+				seen.add(o);
+				const keys = Object.keys(o);
+				if (keys.length > maxProps) return false;
+				return keys.every((k) => typeof k === 'string' && k.length <= 100 && walk(o[k], depth + 1));
+			};
+			return walk(val, 0);
+		};
+		if (!guardObject(data.sharedStatePatch)) return false;
 		return true;
 	}
 

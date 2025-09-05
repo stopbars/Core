@@ -275,7 +275,7 @@
         "tags": [
           "RealTime"
         ],
-        "description": "Performs a WebSocket upgrade to stream real-time airport state. Requires:\n- GET with `Upgrade: websocket`\n- `airport` (ICAO, 4 chars) & `key` (API key) query params\nThe API key is forwarded as a Bearer token to the airport's Durable Object for auth.\n",
+        "description": "Performs a WebSocket upgrade to stream real-time airport state. Requires:\n- GET with `Upgrade: websocket`\n- `airport` (ICAO, 4 chars) and an API key via either:\n  - `key` query parameter, or\n  - `Authorization: Bearer <API key>` header\nThe API key is forwarded as a Bearer token to the airport's Durable Object for auth.\n",
         "parameters": [
           {
             "in": "query",
@@ -292,8 +292,17 @@
           {
             "in": "query",
             "name": "key",
-            "required": true,
-            "description": "User API key",
+            "required": false,
+            "description": "User API key (optional when using Authorization header)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "description": "Bearer <API key> (alternative to `key` query parameter)",
             "schema": {
               "type": "string"
             }
@@ -304,10 +313,13 @@
             "description": "WebSocket upgrade accepted"
           },
           "400": {
-            "description": "Missing/invalid params or not a WebSocket upgrade"
+            "description": "Not a WebSocket upgrade"
           },
           "401": {
-            "description": "API key rejected"
+            "description": "Missing or invalid API key/airport, or key rejected"
+          },
+          "403": {
+            "description": "Forbidden"
           }
         }
       }

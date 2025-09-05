@@ -82,7 +82,12 @@ app.onError((err) => {
 			headers: { 'content-type': 'application/json; charset=utf-8' },
 		});
 	}
-	console.error('Unhandled error:', err);
+	try {
+		console.error('Unhandled error:', err instanceof Error ? err.name : String(err));
+	} catch (e) {
+		// ignore logging failures
+		void e;
+	}
 	return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
 		status: 500,
 		headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -421,7 +426,9 @@ app.delete('/contact/:id', async (c) => {
  *     description: |
  *       Performs a WebSocket upgrade to stream real-time airport state. Requires:
  *       - GET with `Upgrade: websocket`
- *       - `airport` (ICAO, 4 chars) & `key` (API key) query params
+ *       - `airport` (ICAO, 4 chars) and an API key via either:
+ *         - `key` query parameter, or
+ *         - `Authorization: Bearer <API key>` header
  *       The API key is forwarded as a Bearer token to the airport's Durable Object for auth.
  *     parameters:
  *       - in: query
@@ -435,17 +442,25 @@ app.delete('/contact/:id', async (c) => {
  *           pattern: "^[A-Z0-9]{4}$"
  *       - in: query
  *         name: key
- *         required: true
- *         description: User API key
+ *         required: false
+ *         description: User API key (optional when using Authorization header)
+ *         schema:
+ *           type: string
+ *       - in: header
+ *         name: Authorization
+ *         required: false
+ *         description: Bearer <API key> (alternative to `key` query parameter)
  *         schema:
  *           type: string
  *     responses:
  *       101:
  *         description: WebSocket upgrade accepted
  *       400:
- *         description: Missing/invalid params or not a WebSocket upgrade
+ *         description: Not a WebSocket upgrade
  *       401:
- *         description: API key rejected
+ *         description: Missing or invalid API key/airport, or key rejected
+ *       403:
+ *         description: Forbidden
  */
 app.get('/connect', async (c) => {
 	const upgradeHeader = c.req.header('Upgrade');
@@ -459,18 +474,21 @@ app.get('/connect', async (c) => {
 	}
 
 	const airportId = c.req.query('airport');
-	const apiKey = c.req.query('key');
-
+	let apiKey = c.req.query('key');
 	if (!apiKey) {
-		return c.text('Missing API key', 400);
+		const authz = c.req.header('Authorization') || '';
+		if (authz.toLowerCase().startsWith('bearer ')) {
+			apiKey = authz.slice(7);
+		}
 	}
 
-	if (!airportId) {
-		return c.text('Missing airport ID', 400);
+	// Use uniform messages where possible to limit side-channel differences
+	if (!apiKey || !airportId) {
+		return c.text('Unauthorized', 401);
 	}
 
 	if (airportId === 'ZZZZ' || !/^[A-Z0-9]{4}$/.test(airportId)) {
-		return c.text('Invalid ICAO', 400);
+		return c.text('Unauthorized', 401);
 	}
 
 	const newHeaders = new Headers(c.req.raw.headers);
@@ -588,13 +606,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -677,13 +695,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-						.filter((o: DOObject) => allowedIds.has(o.id))
-						.map((o: DOObject) => ({
-							id: o.id,
-							state: o.state,
-							timestamp: o.timestamp,
-							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-						}))
+							.filter((o: DOObject) => allowedIds.has(o.id))
+							.map((o: DOObject) => ({
+								id: o.id,
+								state: o.state,
+								timestamp: o.timestamp,
+								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+							}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -1139,7 +1157,11 @@ app.post('/bans', async (c) => {
 	const token = c.req.header('X-Vatsim-Token');
 	if (!token) return c.text('Unauthorized', 401);
 	let body: unknown;
-	try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
 	const b = (body ?? {}) as Record<string, unknown>;
 	const vatsimId = typeof b.vatsimId === 'string' || typeof b.vatsimId === 'number' ? String(b.vatsimId) : '';
 	const reason = typeof b.reason === 'string' ? b.reason : null;
@@ -2294,6 +2316,15 @@ app.post('/supports/generate', async (c) => {
 			return c.json({ error: 'ICAO code is required' }, 400);
 		}
 
+		// Enforce XML content type or .xml extension for safety
+		const fileType = (xmlFile as File).type?.toLowerCase() || '';
+		const fileName = (xmlFile as File).name || '';
+		const looksXml =
+			fileType === 'application/xml' || fileType === 'text/xml' || fileType === 'application/x-xml' || /\.xml$/i.test(fileName);
+		if (!looksXml) {
+			return c.json({ error: 'Invalid file type. Please upload an XML file.' }, 400);
+		}
+
 		const MAX_XML_BYTES = 200_000;
 		if (xmlFile.size > MAX_XML_BYTES) {
 			return c.json({ error: `XML file too large (>${MAX_XML_BYTES} bytes)` }, 400);
@@ -2320,7 +2351,7 @@ app.post('/supports/generate', async (c) => {
 		return c.json({ supportsXml, barsXml });
 	} catch (error) {
 		console.error('Error generating XMLs:', error);
-		return c.json({ error: error instanceof Error ? error.message : 'Unknown error generating XMLs' }, 500);
+		return c.json({ error: 'Internal server error while generating XMLs' }, 500);
 	}
 });
 
