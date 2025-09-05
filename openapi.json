@@ -385,6 +385,9 @@
           "401": {
             "description": "Missing or invalid token"
           },
+          "403": {
+            "description": "User is banned"
+          },
           "404": {
             "description": "User not found"
           }
@@ -503,6 +506,115 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/bans": {
+      "get": {
+        "x-hidden": true,
+        "summary": "List all bans",
+        "tags": [
+          "Staff"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of bans"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      },
+      "post": {
+        "x-hidden": true,
+        "summary": "Ban a user (by VATSIM CID)",
+        "tags": [
+          "Staff"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vatsimId"
+                ],
+                "properties": {
+                  "vatsimId": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ban created/updated"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/bans/{vatsimId}": {
+      "delete": {
+        "x-hidden": true,
+        "summary": "Remove a ban",
+        "tags": [
+          "Staff"
+        ],
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "vatsimId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Ban removed"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
           }
         }
       }

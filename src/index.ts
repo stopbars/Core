@@ -588,13 +588,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-										.filter((o: DOObject) => allowedIds.has(o.id))
-										.map((o: DOObject) => ({
-											id: o.id,
-											state: o.state,
-											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-										}))
+									.filter((o: DOObject) => allowedIds.has(o.id))
+									.map((o: DOObject) => ({
+										id: o.id,
+										state: o.state,
+										timestamp: o.timestamp,
+										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+									}))
 								: [];
 
 							return {
@@ -677,13 +677,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-							.filter((o: DOObject) => allowedIds.has(o.id))
-							.map((o: DOObject) => ({
-								id: o.id,
-								state: o.state,
-								timestamp: o.timestamp,
-								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-							}))
+						.filter((o: DOObject) => allowedIds.has(o.id))
+						.map((o: DOObject) => ({
+							id: o.id,
+							state: o.state,
+							timestamp: o.timestamp,
+							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+						}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -737,9 +737,12 @@ app.get('/auth/vatsim/callback', async (c) => {
 	}
 
 	const auth = ServicePool.getAuth(c.env);
-
-	const { vatsimToken } = await auth.handleCallback(code);
-	return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
+	try {
+		const { vatsimToken } = await auth.handleCallback(code);
+		return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
+	} catch {
+		return Response.redirect('https://v2.stopbars.com/auth?error=oauth_failed', 302);
+	}
 });
 
 // Get account info
@@ -759,6 +762,8 @@ app.get('/auth/vatsim/callback', async (c) => {
  *         description: Missing or invalid token
  *       404:
  *         description: User not found
+ *       403:
+ *         description: User is banned
  */
 app.get('/auth/account', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -774,7 +779,14 @@ app.get('/auth/account', async (c) => {
 		const auth = ServicePool.getAuth(c.env);
 
 		const vatsimUser = await vatsim.getUser(vatsimToken);
-		let user = await auth.getUserByVatsimId(vatsimUser.id);
+		const ban = await auth.getBanInfo(vatsimUser.id);
+		let user = await auth.getUserByVatsimIdEvenIfBanned(vatsimUser.id);
+		if (ban) {
+			return dbContext.jsonResponse(
+				{ banned: true, reason: ban.reason || null, expires_at: ban.expires_at || null },
+				{ status: 403 },
+			);
+		}
 		if (!user) {
 			return dbContext.textResponse('User not found', { status: 404 });
 		}
@@ -1053,6 +1065,143 @@ app.get('/auth/is-staff', withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'
 	const isStaff = await roles.isStaff(user.id);
 	const role = await roles.getUserRole(user.id);
 	return c.json({ isStaff, role });
+});
+
+// Ban management endpoints (Lead Developer only)
+/**
+ * @openapi
+ * /bans:
+ *   get:
+ *     x-hidden: true
+ *     summary: List all bans
+ *     tags:
+ *       - Staff
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: List of bans
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+app.get('/bans', async (c) => {
+	const token = c.req.header('X-Vatsim-Token');
+	if (!token) return c.text('Unauthorized', 401);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const vatsimUser = await vatsim.getUser(token);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('Unauthorized', 401);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	const bans = await auth.listBans();
+	return c.json({ bans });
+});
+
+/**
+ * @openapi
+ * /bans:
+ *   post:
+ *     x-hidden: true
+ *     summary: Ban a user (by VATSIM CID)
+ *     tags:
+ *       - Staff
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [vatsimId]
+ *             properties:
+ *               vatsimId:
+ *                 type: string
+ *               reason:
+ *                 type: string
+ *               expiresAt:
+ *                 type: string
+ *                 format: date-time
+ *                 nullable: true
+ *     responses:
+ *       200:
+ *         description: Ban created/updated
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+app.post('/bans', async (c) => {
+	const token = c.req.header('X-Vatsim-Token');
+	if (!token) return c.text('Unauthorized', 401);
+	let body: unknown;
+	try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+	const b = (body ?? {}) as Record<string, unknown>;
+	const vatsimId = typeof b.vatsimId === 'string' || typeof b.vatsimId === 'number' ? String(b.vatsimId) : '';
+	const reason = typeof b.reason === 'string' ? b.reason : null;
+	const expiresAtRaw = b.expiresAt;
+	const expiresAt =
+		expiresAtRaw === null || expiresAtRaw === undefined
+			? null
+			: typeof expiresAtRaw === 'string'
+				? expiresAtRaw
+				: typeof expiresAtRaw === 'number'
+					? new Date(expiresAtRaw).toISOString()
+					: null;
+	if (!vatsimId) return c.json({ error: 'vatsimId required' }, 400);
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const staffUser = await vatsim.getUser(token);
+	const localUser = await auth.getUserByVatsimId(staffUser.id);
+	if (!localUser) return c.text('Unauthorized', 401);
+	const allowed = await roles.hasPermission(localUser.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	await auth.banUser(vatsimId, reason, staffUser.id, expiresAt);
+	return c.json({ success: true });
+});
+
+/**
+ * @openapi
+ * /bans/{vatsimId}:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Remove a ban
+ *     tags:
+ *       - Staff
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: vatsimId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Ban removed
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+app.delete('/bans/:vatsimId', async (c) => {
+	const token = c.req.header('X-Vatsim-Token');
+	if (!token) return c.text('Unauthorized', 401);
+	const targetId = c.req.param('vatsimId');
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const staffUser = await vatsim.getUser(token);
+	const localUser = await auth.getUserByVatsimId(staffUser.id);
+	if (!localUser) return c.text('Unauthorized', 401);
+	const allowed = await roles.hasPermission(localUser.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
+	await auth.unbanUser(targetId);
+	return c.body(null, 204);
 });
 
 /**
@@ -4513,7 +4662,6 @@ app.post('/purge-cache-all', async (c) => {
 			const maybe = body as Record<string, unknown>;
 			if (typeof maybe.namespace === 'string') namespace = maybe.namespace;
 		}
-		// Known namespaces used in codebase (see agent guide): airports, points, divisions, auth, state, health, installer, github, faq
 		const allNamespaces = ['airports', 'points', 'divisions', 'auth', 'state', 'health', 'installer', 'github', 'faq'];
 		const toPurge = namespace ? [namespace] : allNamespaces;
 		const results: Record<string, number> = {};

@@ -370,6 +370,29 @@ export class Connection {
 				vatsimCheckCounter++;
 				if (vatsimCheckCounter >= VATSIM_CHECK_FREQUENCY) {
 					vatsimCheckCounter = 0;
+					// Ban check: disconnect if the user has been banned since connect
+					try {
+						if (await this.auth.isVatsimIdBanned(socketInfo.controllerId)) {
+							console.log(`User ${socketInfo.controllerId} banned, closing connection`);
+							socket.send(
+								JSON.stringify({
+									type: 'ERROR',
+									data: { message: 'Account banned' },
+									timestamp: now,
+								}),
+							);
+							if (socketInfo.type === 'controller') {
+								await this.handleControllerDisconnect(socket);
+							}
+							this.sockets.delete(socket);
+							await this.trackDisconnection();
+							socket.close(1008, 'Banned');
+							clearInterval(interval);
+							return;
+						}
+					} catch (e) {
+						console.warn('Ban check failed (non-fatal):', e);
+					}
 					// Get the latest VATSIM status
 					const status = await this.vatsim.getUserStatus(socketInfo.controllerId);
 
@@ -519,6 +542,11 @@ export class Connection {
 		const user = await this.auth.getUserByApiKey(apiKey);
 		if (!user) return new Response('Unauthorized', { status: 401 });
 
+		// Ban enforcement: deny connection if banned
+		if (await this.auth.isVatsimIdBanned(user.vatsim_id)) {
+			return new Response('Banned', { status: 403 });
+		}
+
 		const status = await this.vatsim.getUserStatus(user.vatsim_id);
 		if (!status) {
 			return new Response('User not connected to VATSIM', { status: 403 });
@@ -644,6 +672,20 @@ export class Connection {
 					console.warn('updateObjectStatus failed (non-fatal):', e instanceof Error ? e.message : e);
 				}
 
+				// Before handling, re-check ban in case it was applied after connect
+				if (await this.auth.isVatsimIdBanned(user.vatsim_id)) {
+					server.send(
+						JSON.stringify({
+							type: 'ERROR',
+							data: { message: 'Account banned' },
+							timestamp: Date.now(),
+						}),
+					);
+					this.sockets.delete(server);
+					await this.trackDisconnection();
+					server.close(1008, 'Banned');
+					return;
+				}
 				// Handle different packet types
 				switch ((packet as Packet).type) {
 					case 'HEARTBEAT':

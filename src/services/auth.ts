@@ -14,23 +14,33 @@ export class AuthService {
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
-	async handleCallback(code: string) {
+	async handleCallback(code: string): Promise<{ vatsimToken: string }> {
 		const auth = await this.vatsim.getToken(code);
 		const vatsimUser = await this.vatsim.getUser(auth.access_token);
 		if (!vatsimUser.id || !vatsimUser.email) {
 			throw new Error('Invalid VATSIM user data');
 		}
-		const { user, created } = await this.getOrCreateUser(vatsimUser);
-		try {
-			this.posthog?.track(created ? 'User Signed Up' : 'User Logged In', {
-				vatsimId: vatsimUser.id,
-				isNewUser: created,
-				userId: user.id,
-			});
-		} catch {
-			/* ignore analytics errors */
+		// If banned, don't create user but still return token so UI can fetch /auth/account and get banned message
+		const banned = await this.isVatsimIdBanned(vatsimUser.id);
+		if (!banned) {
+			const { user, created } = await this.getOrCreateUser(vatsimUser);
+			try {
+				this.posthog?.track(created ? 'User Signed Up' : 'User Logged In', {
+					vatsimId: vatsimUser.id,
+					isNewUser: created,
+					userId: user.id,
+				});
+			} catch {
+				/* ignore analytics errors */
+			}
+		} else {
+			try {
+				this.posthog?.track('Banned Login Attempt', { vatsimId: vatsimUser.id });
+			} catch {
+				/* ignore */
+			}
 		}
-		return { user, vatsimToken: auth.access_token };
+		return { vatsimToken: auth.access_token };
 	}
 
 	private async getOrCreateUser(vatsimUser: VatsimUser): Promise<{ user: UserRecord; created: boolean }> {
@@ -172,11 +182,27 @@ export class AuthService {
 	async getUserByApiKey(apiKey: string): Promise<UserRecord | null> {
 		// Use unconstrained read for API key lookups (performance optimization)
 		const result = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE api_key = ?', [apiKey]);
-		return result.results[0] || null;
+		const user = result.results[0] || null;
+		if (user) {
+			const banned = await this.isVatsimIdBanned(user.vatsim_id);
+			if (banned) return null;
+		}
+		return user;
 	}
 
 	async getUserByVatsimId(vatsimId: string): Promise<UserRecord | null> {
 		// Use unconstrained read for VATSIM ID lookups
+		const result = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
+		const user = result.results[0] || null;
+		if (user) {
+			const banned = await this.isVatsimIdBanned(user.vatsim_id);
+			if (banned) return null;
+		}
+		return user;
+	}
+
+	// Explicitly fetch user without applying ban filter (for account page visibility)
+	async getUserByVatsimIdEvenIfBanned(vatsimId: string): Promise<UserRecord | null> {
 		const result = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
 		return result.results[0] || null;
 	}
@@ -277,5 +303,67 @@ export class AuthService {
 			console.warn('Posthog track failed (API Key Regenerated)', e);
 		}
 		return apiKey;
+	}
+	async isVatsimIdBanned(vatsimId: string): Promise<boolean> {
+		const res = await this.dbSession.executeRead<{ vatsim_id: string; expires_at: string | null }>(
+			'SELECT vatsim_id, expires_at FROM bans WHERE vatsim_id = ?',
+			[vatsimId],
+		);
+		const row = res.results[0];
+		if (!row) return false;
+		if (!row.expires_at) return true; // permanent
+		const now = Date.now();
+		const exp = new Date(row.expires_at).getTime();
+		return now <= exp;
+	}
+
+	/** Create or update a ban for a vatsim id. Account is kept so UI can surface ban. */
+	async banUser(vatsimId: string, reason: string | null, issuedBy: string, expiresAt?: string | null): Promise<void> {
+		this.dbSession.startSession({ mode: 'first-primary' });
+		// Upsert ban
+		await this.dbSession.executeWrite(
+			`INSERT INTO bans (vatsim_id, reason, issued_by, created_at, expires_at)
+			 VALUES (?, ?, ?, datetime('now'), ?)
+			 ON CONFLICT(vatsim_id) DO UPDATE SET reason=excluded.reason, issued_by=excluded.issued_by, created_at=datetime('now'), expires_at=excluded.expires_at`,
+			[vatsimId, reason ?? null, issuedBy, expiresAt ?? null],
+		);
+	}
+
+	/** Remove a ban for a vatsim id */
+	async unbanUser(vatsimId: string): Promise<void> {
+		this.dbSession.startSession({ mode: 'first-primary' });
+		await this.dbSession.executeWrite('DELETE FROM bans WHERE vatsim_id = ?', [vatsimId]);
+	}
+
+	/** List bans */
+	async listBans(): Promise<
+		Array<{ vatsim_id: string; reason: string | null; issued_by: string; created_at: string; expires_at: string | null }>
+	> {
+		const res = await this.dbSession.executeRead<{
+			vatsim_id: string;
+			reason: string | null;
+			issued_by: string;
+			created_at: string;
+			expires_at: string | null;
+		}>('SELECT vatsim_id, reason, issued_by, created_at, expires_at FROM bans ORDER BY created_at DESC');
+		return res.results;
+	}
+
+	/** Return ban details if banned, otherwise null */
+	async getBanInfo(
+		vatsimId: string,
+	): Promise<{ vatsim_id: string; reason: string | null; created_at: string; expires_at: string | null } | null> {
+		const res = await this.dbSession.executeRead<{
+			vatsim_id: string;
+			reason: string | null;
+			created_at: string;
+			expires_at: string | null;
+		}>('SELECT vatsim_id, reason, created_at, expires_at FROM bans WHERE vatsim_id = ?', [vatsimId]);
+		const row = res.results[0];
+		if (!row) return null;
+		if (!row.expires_at) return row; // permanent
+		const now = Date.now();
+		const exp = new Date(row.expires_at).getTime();
+		return now <= exp ? row : null;
 	}
 }

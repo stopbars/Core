@@ -231,3 +231,15 @@ CREATE TABLE IF NOT EXISTS download_ip_hits (
 );
 CREATE INDEX IF NOT EXISTS idx_download_ip_hits_product_version ON download_ip_hits(product, version);
 CREATE INDEX IF NOT EXISTS idx_download_ip_hits_last_seen ON download_ip_hits(last_seen);
+
+-- Bans table to block users by VATSIM CID
+CREATE TABLE IF NOT EXISTS bans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vatsim_id TEXT NOT NULL UNIQUE,
+    reason TEXT,
+    issued_by TEXT NOT NULL, -- VATSIM ID of staff who issued the ban
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME -- NULL means permanent
+);
+CREATE INDEX IF NOT EXISTS idx_bans_vatsim_id ON bans(vatsim_id);
+CREATE INDEX IF NOT EXISTS idx_bans_expires_at ON bans(expires_at);
