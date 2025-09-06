@@ -217,8 +217,10 @@ export class PolygonService {
 				const lightColor = (point.properties?.color || obj.properties.color || '').toLowerCase();
 				const isElevatedStopbar = obj.type === 'stopbar' && point.properties?.elevated === true;
 				const lightStateId = this.mapLightStateId(lightOrientation, lightColor, isElevatedStopbar);
+				const offStateId = this.mapOffLightStateId(obj.type, lightOrientation, lightColor, isElevatedStopbar);
 				const lightStateAttr = lightStateId !== undefined ? ` stateId="${lightStateId}"` : '';
-				xml += `\t\t<Light${lightStateAttr}>\n`;
+				const offStateAttr = ` offStateId="${offStateId}"`;
+				xml += `\t\t<Light${lightStateAttr}${offStateAttr}>\n`;
 				xml += `\t\t\t<Position>${point.lat},${point.lon}</Position>\n`;
 				xml += `\t\t\t<Heading>${point.heading.toFixed(2)}</Heading>\n`;
 
@@ -266,6 +268,38 @@ export class PolygonService {
 		// Stats tracking removed
 
 		return xml;
+	}
+
+	/**
+	 * Map an OFF state for a light. Default is 0 for all lights.
+	 * Special handling for lead-on lights so that the lead-off side remains lit when "off":
+	 *  - mixed yellow-green (any order) -> uni yellow (3)
+	 *  - pure green -> uni green (2)
+	 *  - elevated stopbars -> 7; all others -> 0 (off)
+	 */
+	private mapOffLightStateId(
+		objectType: string,
+		orientation: 'left' | 'right' | 'both',
+		rawColor: string,
+		elevatedStopbar?: boolean,
+	): number {
+		if (elevatedStopbar) return 7;
+		if (!rawColor) return 0;
+
+		if (objectType === 'leadon' || objectType === 'lead_on') {
+			const normalized = rawColor
+				.toLowerCase()
+				.split('-')
+				.map((seg) => seg.replace(/uni$/i, ''))
+				.join('-')
+				.replace(/--+/g, '-');
+
+			if (/(green-yellow|yellow-green)/.test(normalized)) return 3;
+			if (normalized === 'green') return 2;
+		}
+
+		// Default for all other cases
+		return 0;
 	}
 	/**
 	 * Map a processed BARS object to a light stateId used by pilot client.

@@ -2964,6 +2964,8 @@ contributionsApp.get(
  *     responses:
  *       201:
  *         description: Contribution created
+ *       400:
+ *         description: Validation error (including duplicate detection when uploaded XML matches an existing pending/approved submission for the same package name)
  */
 contributionsApp.post('/', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');

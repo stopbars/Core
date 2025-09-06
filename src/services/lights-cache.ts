@@ -1,7 +1,7 @@
 import { CacheService } from './cache';
 import { ServicePool } from './service-pool';
 
-export type RadarLight = { stateId: number | null; position: [number, number]; heading: number };
+export type RadarLight = { stateId: number | null; offStateId: number | null; position: [number, number]; heading: number };
 
 // Parse BARS Lights XML into objectId -> lights[] mapping
 export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
@@ -20,6 +20,7 @@ export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
 			const attrs = lightMatch[1] || '';
 			const inner = lightMatch[2] || '';
 			const stateIdMatch = attrs.match(/stateId\s*=\s*"(\d+)"/i);
+			const offStateIdMatch = attrs.match(/offStateId\s*=\s*"(\d+)"/i);
 			const posMatch = inner.match(/<Position>\s*([^<]+)\s*<\/Position>/i);
 			const headingMatch = inner.match(/<Heading>\s*([^<]+)\s*<\/Heading>/i);
 			if (!posMatch || !headingMatch) continue;
@@ -29,7 +30,8 @@ export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
 			const heading = parseFloat(headingMatch[1]);
 			if (Number.isNaN(lat) || Number.isNaN(lon) || Number.isNaN(heading)) continue;
 			const stateId = stateIdMatch ? parseInt(stateIdMatch[1], 10) : null;
-			lights.push({ stateId, position: [lat, lon], heading });
+			const offStateId = offStateIdMatch ? parseInt(offStateIdMatch[1], 10) : null;
+			lights.push({ stateId, offStateId, position: [lat, lon], heading });
 		}
 		if (lights.length > 0) {
 			result[id] = lights;

@@ -87,26 +87,45 @@ export class ContributionService {
 			throw new Error(msg);
 		}
 
-		try {
-			const latestApproved = await this.getLatestApprovedContributionForAirportPackage(
-				submission.airportIcao,
-				submission.packageName,
-			);
-			if (latestApproved) {
-				const normalize = (xml: string) =>
-					xml
-						.trim()
-						.replace(/\r/g, '')
-						.replace(/[\t ]+/g, ' ')
-						.replace(/>\s+</g, '><');
-				if (normalize(trimmedXml) === normalize(latestApproved.submittedXml)) {
-					throw new Error('Duplicate of current approved XML for this airport & package');
-				}
-			}
-		} catch (e) {
-			if (e instanceof Error && e.message.startsWith('Duplicate')) {
-				// Re-throw duplicate error directly
-				throw e;
+		// Normalize XML content for stable hashing and comparison
+		const normalize = (xml: string) =>
+			xml
+				.trim()
+				.replace(/\r/g, '')
+				.replace(/[\t ]+/g, ' ')
+				.replace(/>\s+</g, '><');
+		const normalizedXml = normalize(trimmedXml);
+
+		// Compute SHA-256 hash of normalized XML (hex)
+		const encoder = new TextEncoder();
+		const digest = await crypto.subtle.digest('SHA-256', encoder.encode(normalizedXml));
+		const xmlHash = Array.from(new Uint8Array(digest))
+			.map((b) => b.toString(16).padStart(2, '0'))
+			.join('');
+
+		// Prevent duplicate or stolen submissions:
+		const existingForPackage = await this.dbSession.executeRead<{
+			id: string;
+			airport_icao: string;
+			package_name: string;
+			submitted_xml: string;
+			status: 'pending' | 'approved' | 'rejected' | 'outdated';
+		}>(
+			`SELECT id, airport_icao, package_name, submitted_xml, status
+			 FROM contributions
+			 WHERE package_name = ? COLLATE NOCASE
+			   AND status IN ('pending','approved')`,
+			[submission.packageName],
+		);
+		for (const row of existingForPackage.results) {
+			const otherHashDigest = await crypto.subtle.digest('SHA-256', encoder.encode(normalize(row.submitted_xml)));
+			const otherHash = Array.from(new Uint8Array(otherHashDigest))
+				.map((b) => b.toString(16).padStart(2, '0'))
+				.join('');
+			if (otherHash === xmlHash) {
+				throw new Error(
+					'Duplicate submission detected: XML matches an existing contribution for the same package. Please submit original work.',
+				);
 			}
 		}
 
