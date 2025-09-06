@@ -18,11 +18,24 @@ export class ContactService {
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
+	private async hashIp(ip: string): Promise<string> {
+		try {
+			const data = new TextEncoder().encode(ip || '0.0.0.0');
+			const digest = await crypto.subtle.digest('SHA-256', data);
+			return Array.from(new Uint8Array(digest))
+				.map((b) => b.toString(16).padStart(2, '0'))
+				.join('');
+		} catch {
+			return (ip || '0.0.0.0').slice(0, 128);
+		}
+	}
+
 	async createMessage(email: string, topic: string, message: string, ip: string): Promise<ContactMessageRecord> {
 		const id = crypto.randomUUID();
+		const ipHash = await this.hashIp(ip);
 		await this.dbSession.executeWrite(
 			`INSERT INTO contact_messages (id, email, topic, message, ip_address, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'))`,
-			[id, email, topic, message, ip],
+			[id, email, topic, message, ipHash],
 		);
 		const created = await this.getMessage(id);
 		if (!created) throw new Error('Failed to create contact message');
@@ -68,9 +81,10 @@ export class ContactService {
 	}
 
 	async hasRecentSubmissionFromIp(ip: string, withinHours = 24): Promise<boolean> {
+		const ipHash = await this.hashIp(ip);
 		const res = await this.dbSession.executeRead<{ cnt: number }>(
-			`SELECT COUNT(*) as cnt FROM contact_messages WHERE ip_address = ? AND datetime(created_at) >= datetime('now', ?)`,
-			[ip, `-${withinHours} hours`],
+			`SELECT COUNT(*) as cnt FROM contact_messages WHERE ip_address IN (?, ?) AND datetime(created_at) >= datetime('now', ?)`,
+			[ip, ipHash, `-${withinHours} hours`],
 		);
 		return (res.results[0]?.cnt || 0) > 0;
 	}
