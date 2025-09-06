@@ -465,6 +465,86 @@ export class ContributionService {
 		}
 		return result.success;
 	}
+
+	async regenerateContribution(
+		id: string,
+		requestedByVatsimId: string,
+	): Promise<{
+		maps: { key: string; etag: string };
+		supports: { key: string; etag: string };
+	}> {
+		// Resolve local user and permissions
+		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [
+			requestedByVatsimId,
+		]);
+		const userInfo = userInfoResult.results[0];
+		if (!userInfo) {
+			throw new Error('User not found');
+		}
+		const allowed = await this.roleService.hasPermission(userInfo.id, StaffRole.PRODUCT_MANAGER);
+		if (!allowed) {
+			throw new Error('Not authorized to regenerate contributions');
+		}
+
+		// Load contribution
+		const contribution = await this.getContribution(id);
+		if (!contribution) {
+			throw new Error('Contribution not found');
+		}
+
+		// Only approved entries can be regenerated to avoid conflicts
+		if (contribution.status !== 'approved') {
+			throw new Error('Only approved contributions can be regenerated');
+		}
+
+		try {
+			// Generate both XMLs
+			const [supportsXml, barsXml] = await Promise.all([
+				this.supportService.generateLightSupportsXML(contribution.submittedXml, contribution.airportIcao),
+				this.polygonService.processBarsXML(contribution.submittedXml),
+			]);
+
+			// Safe filename components
+			const safePackageName = contribution.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
+			const supportsFileName = `${contribution.airportIcao}_${safePackageName}_supports.xml`;
+			const barsFileName = `${contribution.airportIcao}_${safePackageName}_bars.xml`;
+
+			// Upload to the same paths (overwrite)
+			const [supportsRes, barsRes] = await Promise.all([
+				this.storageService.uploadFile(`RemovalObjects/${supportsFileName}`, supportsXml, 'application/xml', {
+					airportIcao: contribution.airportIcao,
+					packageName: contribution.packageName,
+					type: 'removal',
+					regeneratedFrom: `contribution_${id}`,
+				}),
+				this.storageService.uploadFile(`Maps/${barsFileName}`, barsXml, 'application/xml', {
+					airportIcao: contribution.airportIcao,
+					packageName: contribution.packageName,
+					type: 'bars',
+					regeneratedFrom: `contribution_${id}`,
+				}),
+			]);
+
+			try {
+				this.posthog?.track('Contribution Regenerated', {
+					id,
+					airport: contribution.airportIcao,
+					packageName: contribution.packageName,
+					requestedBy: requestedByVatsimId,
+				});
+			} catch (e) {
+				console.warn('Posthog track failed (Contribution Regenerated)', e);
+			}
+
+			return {
+				maps: { key: barsRes.key, etag: barsRes.etag },
+				supports: { key: supportsRes.key, etag: supportsRes.etag },
+			};
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : 'Unknown error';
+			throw new Error(`Failed to regenerate: ${msg}`);
+		}
+	}
 	/**
 	 * Get user contributions with detailed list and summary statistics
 	 * @param userId The user ID to get contributions for

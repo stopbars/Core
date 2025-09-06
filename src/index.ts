@@ -757,7 +757,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 	const auth = ServicePool.getAuth(c.env);
 	try {
 		const { vatsimToken } = await auth.handleCallback(code);
-		return Response.redirect(`http://localhost:5173/auth/callback?token=${vatsimToken}`, 302);
+		return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
 	} catch {
 		return Response.redirect('https://v2.stopbars.com/auth?error=oauth_failed', 302);
 	}
@@ -3156,6 +3156,73 @@ contributionsApp.post('/:id/decision', async (c) => {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
 		const status = error instanceof Error && error.message.includes('Not authorized') ? 403 : 400;
 		return c.json({ error: message }, status);
+	}
+});
+
+/**
+ * @openapi
+ * /contributions/{id}/regenerate:
+ *   post:
+ *     x-hidden: true
+ *     summary: Regenerate CDN files for a contribution
+ *     tags:
+ *       - Contributions
+ *     description: Re-runs the generation pipeline for an existing approved contribution and overwrites its CDN artifacts. Staff only.
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Regeneration completed
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Not found
+ */
+contributionsApp.post('/:id/regenerate', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+
+	const isPM = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!isPM) return c.text('Forbidden', 403);
+
+	const id = c.req.param('id');
+	const contributions = ServicePool.getContributions(c.env);
+	const existing = await contributions.getContribution(id);
+	if (!existing) return c.text('Not found', 404);
+
+	try {
+		const res = await contributions.regenerateContribution(id, user.vatsim_id);
+		// Provide convenience URLs alongside keys
+		const baseCdn = new URL(c.req.url);
+		baseCdn.pathname = '/cdn/files/';
+		const fileUrl = (key: string) => new URL(key, baseCdn).toString();
+		return c.json({
+			success: true,
+			id,
+			airport: existing.airportIcao,
+			packageName: existing.packageName,
+			maps: { key: res.maps.key, etag: res.maps.etag, url: fileUrl(res.maps.key) },
+			supports: { key: res.supports.key, etag: res.supports.etag, url: fileUrl(res.supports.key) },
+		});
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : 'Failed to regenerate';
+		const status = msg.includes('authorized') ? 403 : msg.includes('not found') ? 404 : 400;
+		return c.json({ error: msg }, status);
 	}
 });
 

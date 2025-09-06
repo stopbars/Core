@@ -2008,6 +2008,45 @@
         }
       }
     },
+    "/contributions/{id}/regenerate": {
+      "post": {
+        "x-hidden": true,
+        "summary": "Regenerate CDN files for a contribution",
+        "tags": [
+          "Contributions"
+        ],
+        "description": "Re-runs the generation pipeline for an existing approved contribution and overwrites its CDN artifacts. Staff only.",
+        "security": [
+          {
+            "VatsimToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Regeneration completed"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/maps/{icao}/packages/{package}/latest": {
       "get": {
         "summary": "Get latest approved BARS map XML (raw content) for an airport & package",
