@@ -12,18 +12,11 @@ const ELEVATED_LIGHT_DISTANCE = 1.5;
 export abstract class BarsTypeHandler {
 	abstract generateLightPoints(polygon: BarsPolygon, dbRecord: BarsDBRecord): BarsLightPoint[];
 
-	protected getHeadingAdjustment(orientation: 'left' | 'right' | 'both'): number {
-		switch (orientation) {
-			case 'left':
-				return 0;
-			case 'right':
-				return 180;
-			case 'both':
-				return 0;
-			default:
-				return 0;
-		}
+	// Keep for non-stopbar handlers that still need along-line adjustments.
+	protected getHeadingAdjustmentForRightFacing(): number {
+		return 180;
 	}
+
 	protected addHeadingToPoints(points: GeoPoint[], headingAdjustment: number = 0): BarsLightPoint[] {
 		if (points.length < 2) return [];
 
@@ -79,28 +72,19 @@ export class StopbarHandler extends BarsTypeHandler {
 		// First derive along-line headings without any adjustment
 		const alongHeadings = this.addHeadingToPoints(lightPoints, 0);
 
-		// Orientation mapping requirement (perpendicular to line):
-		//  We compute perpendicular headings (seg - 90) and (seg + 90).
-		//  Flipped per latest feedback:
-		//  left  -> choose perpendicular in north/east half (<180)
-		//  right -> choose perpendicular in south/west half (>=180)
-		//  both  -> deterministic choice (south/west half) so stable output.
-		const orientation = dbRecord.orientation || 'both';
+		const isBiDirectional = dbRecord.directionality === 'bi-directional' || !dbRecord.directionality;
 
 		const lightsWithHeading: BarsLightPoint[] = alongHeadings.map((p) => {
 			const seg = ((p.heading % 360) + 360) % 360; // along-line heading
-			const perpA = (seg + 90) % 360; // right side relative to direction of drawing
-			const perpB = (seg + 270) % 360; // left side (seg - 90)
-			// Determine which candidate is north/east (<180) vs south/west (>=180)
-			const candidateNorthEast = perpA < 180 ? perpA : perpB < 180 ? perpB : perpA; // one <180 if possible
-			const candidateSouthWest = perpA >= 180 ? perpA : perpB >= 180 ? perpB : perpA; // one >=180 if possible
+			const perpRight = (seg + 90) % 360; // geometrical right of line
+			const perpLeft = (seg + 270) % 360; // geometrical left of line
+			// uni -> face right edge always
+			// bi  -> keep previous deterministic choice (south/west half) for stability
 			let chosen: number;
-			if (orientation === 'right') {
-				chosen = candidateSouthWest; // flipped
-			} else if (orientation === 'left') {
-				chosen = candidateNorthEast; // flipped
+			if (!isBiDirectional) {
+				chosen = perpRight;
 			} else {
-				// both -> deterministic pick south/west
+				const candidateSouthWest = perpRight >= 180 ? perpRight : perpLeft >= 180 ? perpLeft : perpRight;
 				chosen = candidateSouthWest;
 			}
 			return { ...p, heading: chosen };
@@ -113,7 +97,7 @@ export class StopbarHandler extends BarsTypeHandler {
 				properties: {
 					type: 'stopbar',
 					color: dbRecord.color || 'red',
-					orientation: dbRecord.orientation,
+					directionality: dbRecord.directionality || 'bi-directional',
 					elevated: false,
 					ihp: dbRecord.ihp,
 				},
@@ -199,7 +183,7 @@ export class StopbarHandler extends BarsTypeHandler {
 				properties: {
 					type: 'stopbar',
 					color: 'yellow', // IHP lights are always yellow
-					orientation: dbRecord.orientation, // Inherit orientation from stopbar
+					directionality: dbRecord.directionality || 'bi-directional', // inherit
 					elevated: false, // IHP lights are never elevated
 					ihp: true, // Mark as IHP light
 				},
@@ -265,7 +249,7 @@ export class StopbarHandler extends BarsTypeHandler {
 				type: 'stopbar',
 				color: 'red',
 				elevated: true,
-				orientation: firstLight.properties?.orientation || 'both',
+				directionality: 'uni-directional',
 			},
 		});
 
@@ -276,7 +260,7 @@ export class StopbarHandler extends BarsTypeHandler {
 				type: 'stopbar',
 				color: 'red',
 				elevated: true,
-				orientation: lastLight.properties?.orientation || 'both',
+				directionality: 'uni-directional',
 			},
 		});
 
@@ -299,7 +283,8 @@ export class LeadonHandler extends BarsTypeHandler {
 		const isInSouthernHemisphere = points[0].lat < 0;
 
 		// Calculate heading for each light - account for hemisphere differences
-		let headingAdjustment = this.getHeadingAdjustment(dbRecord.orientation);
+		// With orientation removed, default to right-facing along-line adjustment
+		let headingAdjustment = this.getHeadingAdjustmentForRightFacing();
 
 		// In the southern hemisphere, we need to add 180 degrees to correct the direction
 		if (isInSouthernHemisphere) {
@@ -318,7 +303,7 @@ export class LeadonHandler extends BarsTypeHandler {
 				properties: {
 					type: 'leadon',
 					color: isYellowGreenUni ? 'yellow-green-uni' : 'green',
-					orientation: isYellowGreenUni ? 'both' : dbRecord.orientation,
+					directionality: isYellowGreenUni ? 'bi-directional' : dbRecord.directionality || 'bi-directional',
 					elevated: false,
 				},
 			};
@@ -343,16 +328,12 @@ export class TaxiwayHandler extends BarsTypeHandler {
 		// Determine if we're in the southern hemisphere by checking the first point's latitude
 		const isInSouthernHemisphere = points[0].lat < 0;
 
-		// Check if the taxiway is uni-directional
-		const isUniDirectional = dbRecord.directionality === 'uni-directional'; // For uni-directional taxiways, always use 'left' orientation consistently
-		// For bi-directional taxiways, use 'both' orientation
-		const defaultOrientation: 'left' | 'right' | 'both' = isUniDirectional ? 'left' : 'both';
+		// Check directionality
+		const isUniDirectional = dbRecord.directionality === 'uni-directional';
 
 		// Calculate heading for each light - account for hemisphere differences for uni-directional taxiways
 		// For uni-directional taxiways, use right orientation like leadon lights
-		let headingAdjustment = isUniDirectional
-			? this.getHeadingAdjustment('right')
-			: this.getHeadingAdjustment(dbRecord.orientation || 'both');
+		let headingAdjustment = 0;
 
 		// For uni-directional taxiways, handle like leadon/stand lights with hemisphere adjustment
 		if (isUniDirectional && isInSouthernHemisphere) {
@@ -368,7 +349,6 @@ export class TaxiwayHandler extends BarsTypeHandler {
 			// Handle hyphenated colors (green-yellow, green-blue, green-orange)
 			const isHyphenatedColor = colorValue.includes('-');
 			let finalColor = colorValue;
-			let finalOrientation: 'left' | 'right' | 'both' = defaultOrientation;
 
 			// Handle different directionality types - ensure we have proper null checking
 			const isBiDirectional = !dbRecord.directionality || dbRecord.directionality === 'bi-directional';
@@ -382,7 +362,6 @@ export class TaxiwayHandler extends BarsTypeHandler {
 				if (isBiDirectional) {
 					// For bi-directional, every 2nd light in both directions is the secondary color
 					finalColor = index % 2 === 0 ? primaryColor : secondaryColor;
-					finalOrientation = 'both';
 				} else {
 					// For uni-directional, use the special "color-uni" format for alternating colors
 					if (index % 2 === 0) {
@@ -391,8 +370,6 @@ export class TaxiwayHandler extends BarsTypeHandler {
 						// Add "-uni" suffix to the secondary color for uni-directional segments
 						finalColor = `${secondaryColor}-uni`;
 					}
-					// For uni-directional taxiways, all lights should face the same way (left)
-					finalOrientation = 'left'; // All uni-directional taxiway lights face left
 				}
 			} else {
 				// Normal single color handling
@@ -411,7 +388,7 @@ export class TaxiwayHandler extends BarsTypeHandler {
 				properties: {
 					type: 'taxiway',
 					color: finalColor,
-					orientation: finalOrientation,
+					directionality: isUniDirectional ? 'uni-directional' : 'bi-directional',
 					elevated: false,
 				},
 			};
@@ -423,7 +400,7 @@ export class TaxiwayHandler extends BarsTypeHandler {
  * Handler for stand type BARS (stand lead-in lights)
  */
 export class StandHandler extends BarsTypeHandler {
-	generateLightPoints(polygon: BarsPolygon, dbRecord: BarsDBRecord): BarsLightPoint[] {
+	generateLightPoints(polygon: BarsPolygon): BarsLightPoint[] {
 		const points = polygon.points;
 		if (points.length < 2) return [];
 
@@ -438,7 +415,7 @@ export class StandHandler extends BarsTypeHandler {
 		const isInSouthernHemisphere = points[0].lat < 0;
 
 		// Calculate heading for each light - account for hemisphere differences
-		let headingAdjustment = this.getHeadingAdjustment(dbRecord.orientation);
+		let headingAdjustment = 0;
 
 		// In the southern hemisphere, we need to add 180 degrees to correct the direction
 		if (isInSouthernHemisphere) {
@@ -454,7 +431,7 @@ export class StandHandler extends BarsTypeHandler {
 				properties: {
 					type: 'stand',
 					color: 'yellow', // Stand lead-in lights are amber
-					orientation: 'right', // Uni-directional facing the start of the line
+					directionality: 'uni-directional', // Uni-directional facing the start of the line
 					elevated: false,
 				},
 			};
@@ -500,7 +477,7 @@ export async function processBarsPolygon(polygon: BarsPolygon, dbRecord: BarsDBR
 			properties: {
 				type: dbRecord.type,
 				color: dbRecord.color,
-				orientation: dbRecord.orientation,
+				directionality: dbRecord.directionality,
 				elevated: dbRecord.elevated,
 			},
 		};
@@ -607,7 +584,7 @@ export function deduplicateTaxiwayPoints(objects: ProcessedBarsObject[]): Proces
 			properties: {
 				type: (group.point.properties?.type || 'taxiway') as string, // Ensure type is never undefined
 				color: group.point.properties?.color,
-				orientation: group.point.properties?.orientation,
+				directionality: group.point.properties?.directionality,
 				elevated: group.point.properties?.elevated,
 				intensity: group.point.properties?.intensity,
 			},

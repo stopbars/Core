@@ -13,7 +13,7 @@ type PointRow = {
 	name: string;
 	coordinates: string;
 	directionality: Point['directionality'] | null;
-	orientation: Point['orientation'] | null;
+	orientation: string | null;
 	color: Point['color'] | null;
 	elevated: number | boolean | null;
 	ihp: number | boolean | null;
@@ -24,6 +24,25 @@ type PointRow = {
 
 export class PointsService {
 	private dbSession: DatabaseSessionService;
+
+	private static isCoordinate(value: unknown): value is { lat: number; lng: number } {
+		if (!value || typeof value !== 'object') return false;
+		const obj = value as Record<string, unknown>;
+		return (
+			Object.prototype.hasOwnProperty.call(obj, 'lat') &&
+			Object.prototype.hasOwnProperty.call(obj, 'lng') &&
+			typeof obj.lat === 'number' &&
+			typeof obj.lng === 'number' &&
+			obj.lat >= -90 &&
+			obj.lat <= 90 &&
+			obj.lng >= -180 &&
+			obj.lng <= 180
+		);
+	}
+
+	private static isCoordinateArray(value: unknown): value is Array<{ lat: number; lng: number }> {
+		return Array.isArray(value) && value.length > 0 && value.every((v) => PointsService.isCoordinate(v));
+	}
 
 	private stmtSelect: PreparedStatement<{
 		id: string;
@@ -43,7 +62,6 @@ export class PointsService {
 		name: string;
 		coordinates: string;
 		directionality: null | Required<Point>['directionality'];
-		orientation: null | Required<Point>['orientation'];
 		color: null | Required<Point>['color'];
 		elevated: null | boolean;
 		ihp: null | boolean;
@@ -64,7 +82,7 @@ export class PointsService {
 
 		this.stmtSelect = this.dbSession.prepare(
 			`SELECT
-				type, name, coordinates, directionality, orientation, color, elevated, ihp
+				type, name, coordinates, directionality, color, elevated, ihp
 				FROM points
 				WHERE id = ? AND airport_id = ?;`,
 			['id', 'airportId'],
@@ -72,10 +90,10 @@ export class PointsService {
 		this.stmtInsert = this.dbSession.prepare(
 			`INSERT
 				INTO points (
-					id, airport_id, type, name, coordinates, directionality, orientation,
+					id, airport_id, type, name, coordinates, directionality,
 					color, elevated, ihp, created_at, updated_at, created_by
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 			[
 				'id',
 				'airportId',
@@ -83,7 +101,6 @@ export class PointsService {
 				'name',
 				'coordinates',
 				'directionality',
-				'orientation',
 				'color',
 				'elevated',
 				'ihp',
@@ -99,13 +116,12 @@ export class PointsService {
 					name           = ?,
 					coordinates    = ?,
 					directionality = ?,
-					orientation    = ?,
 					color          = ?,
 					elevated       = ?,
 					ihp            = ?,
 					updated_at     = CURRENT_TIMESTAMP
 				WHERE id = ? AND airport_id = ?;`,
-			['type', 'name', 'coordinates', 'directionality', 'orientation', 'color', 'elevated', 'ihp', 'id', 'airportId'],
+			['type', 'name', 'coordinates', 'directionality', 'color', 'elevated', 'ihp', 'id', 'airportId'],
 		);
 		this.stmtDelete = this.dbSession.prepare('DELETE FROM points WHERE id = ? AND airport_id = ?;', ['id', 'airportId']);
 	}
@@ -120,7 +136,7 @@ export class PointsService {
 		// Generate unique BARS ID
 		const barsId = await this.idService.generateBarsId();
 
-		// Validate point data
+		// Validate and normalize point data (coordinates array)
 		this.validatePoint(point);
 
 		const now = new Date().toISOString();
@@ -138,8 +154,8 @@ export class PointsService {
 			`
 				INSERT INTO points (
 				id, airport_id, type, name, coordinates, directionality,
-				orientation, color, elevated, ihp, created_at, updated_at, created_by
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				color, elevated, ihp, created_at, updated_at, created_by
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`,
 			[
 				newPoint.id,
@@ -148,7 +164,6 @@ export class PointsService {
 				newPoint.name,
 				JSON.stringify(newPoint.coordinates),
 				newPoint.directionality || null,
-				newPoint.orientation || null,
 				newPoint.color || null,
 				newPoint.elevated || false,
 				newPoint.ihp || false,
@@ -179,16 +194,16 @@ export class PointsService {
 		}
 
 		// Validate updates
-		const mergedPoint = { ...point, ...updates };
+		const mergedPoint = { ...point, ...updates } as PointData;
 		this.validatePoint(mergedPoint);
 
 		// Define allowed fields for updates
-		const allowedFields = ['type', 'name', 'coordinates', 'directionality', 'orientation', 'color', 'elevated', 'ihp'];
+		const allowedFields = ['type', 'name', 'coordinates', 'directionality', 'color', 'elevated', 'ihp'];
 		const processedUpdates: Record<string, string | number | boolean | null> = {};
 		Object.entries(updates).forEach(([key, value]) => {
 			if (allowedFields.includes(key)) {
 				if (key === 'coordinates') {
-					processedUpdates[key] = JSON.stringify(value as Point['coordinates']);
+					processedUpdates[key] = JSON.stringify((mergedPoint as PointData).coordinates);
 				} else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
 					processedUpdates[key] = value;
 				} else if (value == null) {
@@ -204,7 +219,6 @@ export class PointsService {
 			name: 'name',
 			coordinates: 'coordinates',
 			directionality: 'directionality',
-			orientation: 'orientation',
 			color: 'color',
 			elevated: 'elevated',
 			ihp: 'ihp',
@@ -313,7 +327,6 @@ export class PointsService {
 				name: point.name ?? null,
 				coordinates: JSON.stringify(point.coordinates),
 				directionality: point.directionality ?? null,
-				orientation: point.orientation ?? null,
 				color: point.color ?? null,
 				elevated: point.elevated ?? null,
 				ihp: point.ihp ?? null,
@@ -350,31 +363,28 @@ export class PointsService {
 	}
 
 	private validatePoint(point: PointData) {
-		// Validate coordinates format for single point
-		if (!point.coordinates || typeof point.coordinates !== 'object') {
-			throw new Error('Point must have coordinates');
+		// Normalize coordinates: accept either legacy single object or array of objects
+		const rawCoords: unknown = (point as unknown as { coordinates?: unknown }).coordinates;
+		if (rawCoords === undefined || rawCoords === null) throw new Error('Point must have coordinates');
+
+		let arr: Array<{ lat: number; lng: number }>;
+		if (PointsService.isCoordinateArray(rawCoords)) {
+			arr = rawCoords;
+		} else if (PointsService.isCoordinate(rawCoords)) {
+			arr = [rawCoords];
+		} else {
+			throw new Error('Invalid coordinates format');
 		}
 
-		const { lat, lng } = point.coordinates;
-		if (typeof lat !== 'number' || typeof lng !== 'number') {
-			throw new Error('Invalid coordinate format');
+		if (arr.length < 1) {
+			throw new Error('Coordinates must contain at least one point');
 		}
-		if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-			throw new Error('Coordinates out of valid range');
-		}
+		(point as PointData).coordinates = arr as { lat: number; lng: number }[];
 
 		// Validate type-specific fields
 		if (point.type === 'stopbar') {
 			if (!point.directionality) {
 				throw new Error('Stopbar must have directionality specified');
-			}
-
-			// For bi-directional stopbars, orientation should not be set
-			if (point.directionality === 'bi-directional') {
-				// Remove orientation if it exists
-				delete point.orientation;
-			} else if (point.directionality === 'uni-directional' && !point.orientation) {
-				throw new Error('Uni-directional stopbar must have orientation specified');
 			}
 
 			if (point.elevated) {
@@ -427,14 +437,25 @@ export class PointsService {
 	}
 
 	private mapPointFromDb(dbPoint: PointRow): Point {
+		let raw: unknown;
+		try {
+			raw = JSON.parse(dbPoint.coordinates);
+		} catch {
+			raw = null;
+		}
+		let coordinates: Array<{ lat: number; lng: number }> = [];
+		if (PointsService.isCoordinateArray(raw)) {
+			coordinates = raw;
+		} else if (PointsService.isCoordinate(raw)) {
+			coordinates = [raw];
+		}
 		return {
 			id: dbPoint.id,
 			airportId: dbPoint.airport_id,
 			type: dbPoint.type,
 			name: dbPoint.name,
-			coordinates: JSON.parse(dbPoint.coordinates),
+			coordinates,
 			directionality: dbPoint.directionality ?? undefined,
-			orientation: dbPoint.orientation ?? undefined,
 			color: dbPoint.color ?? undefined,
 			elevated: dbPoint.elevated === 1 || dbPoint.elevated === true,
 			ihp: dbPoint.ihp === 1 || dbPoint.ihp === true,

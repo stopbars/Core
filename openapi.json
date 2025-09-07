@@ -1202,6 +1202,9 @@
         "security": [
           {
             "VatsimToken": []
+          },
+          {
+            "ApiKeyAuth": []
           }
         ],
         "parameters": [
@@ -1244,6 +1247,9 @@
         "security": [
           {
             "VatsimToken": []
+          },
+          {
+            "ApiKeyAuth": []
           }
         ],
         "parameters": [
@@ -1283,6 +1289,9 @@
         "security": [
           {
             "VatsimToken": []
+          },
+          {
+            "ApiKeyAuth": []
           }
         ],
         "parameters": [
@@ -1328,6 +1337,9 @@
         "security": [
           {
             "VatsimToken": []
+          },
+          {
+            "ApiKeyAuth": []
           }
         ],
         "parameters": [
@@ -2242,6 +2254,9 @@
         "security": [
           {
             "VatsimToken": []
+          },
+          {
+            "ApiKeyAuth": []
           }
         ],
         "requestBody": {
@@ -2284,6 +2299,9 @@
         "security": [
           {
             "VatsimToken": []
+          },
+          {
+            "ApiKeyAuth": []
           }
         ],
         "parameters": [
@@ -2321,6 +2339,9 @@
         "security": [
           {
             "VatsimToken": []
+          },
+          {
+            "ApiKeyAuth": []
           }
         ],
         "parameters": [
@@ -3123,7 +3144,7 @@
       }
     },
     "schemas": {
-      "Coordinates": {
+      "Coordinate": {
         "type": "object",
         "required": [
           "lat",
@@ -3138,6 +3159,13 @@
             "type": "number",
             "description": "Longitude in decimal degrees."
           }
+        }
+      },
+      "Coordinates": {
+        "type": "array",
+        "minItems": 2,
+        "items": {
+          "$ref": "#/components/schemas/Coordinate"
         }
       },
       "PointData": {
@@ -3170,13 +3198,6 @@
             "enum": [
               "bi-directional",
               "uni-directional"
-            ]
-          },
-          "orientation": {
-            "type": "string",
-            "enum": [
-              "left",
-              "right"
             ]
           },
           "color": {
@@ -3254,14 +3275,10 @@
             "type": "string"
           },
           "coordinates": {
-            "type": "object",
-            "properties": {
-              "lat": {
-                "type": "number"
-              },
-              "lng": {
-                "type": "number"
-              }
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "$ref": "#/components/schemas/Coordinate"
             }
           },
           "directionality": {
@@ -3269,13 +3286,6 @@
             "enum": [
               "bi-directional",
               "uni-directional"
-            ]
-          },
-          "orientation": {
-            "type": "string",
-            "enum": [
-              "left",
-              "right"
             ]
           },
           "color": {

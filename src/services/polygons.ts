@@ -113,19 +113,7 @@ export class PolygonService {
 			type = 'other';
 		}
 
-		// Get orientation (left, right, both)
-		let orientation: 'left' | 'right' | 'both' = 'both';
-		if (dbResult.orientation) {
-			const orientationStr = dbResult.orientation.toLowerCase();
-			if (orientationStr.includes('left')) {
-				orientation = 'left';
-			} else if (orientationStr.includes('right')) {
-				orientation = 'right';
-			}
-		} else if (dbResult.directionality === 'uni-directional' || dbResult.directionality === 'uni_directional') {
-			// Default to 'right' orientation for uni-directional without specified orientation
-			orientation = 'right';
-		}
+		// Orientation removed; use directionality only
 
 		// Parse color based on type
 		let color: string;
@@ -146,7 +134,6 @@ export class PolygonService {
 			type,
 			elevated: dbResult.elevated === 1 || dbResult.elevated === true,
 			color,
-			orientation,
 			intensity: 1.0,
 			directionality:
 				dbResult.directionality === 'bi-directional' || dbResult.directionality === 'uni-directional'
@@ -170,14 +157,7 @@ export class PolygonService {
 	/**
 	 * Maps orientation string to expected format
 	 */
-	private mapOrientation(orientation: string | null): 'left' | 'right' | 'both' {
-		if (!orientation) return 'both';
-
-		const lowerOrientation = orientation.toLowerCase();
-		if (lowerOrientation.includes('left')) return 'left';
-		if (lowerOrientation.includes('right')) return 'right';
-		return 'both';
-	} /**
+	/**
 
   /**
    * Generates BARS light locations XML from processed objects
@@ -198,26 +178,27 @@ export class PolygonService {
 			const props = obj.properties;
 			xml += '\t\t<Properties>\n';
 			if (props.color) xml += `\t\t\t<Color>${props.color}</Color>\n`;
-
-			// Only include orientation property for stopbars
-			if (props.orientation && obj.type === 'stopbar') {
-				xml += `\t\t\t<Orientation>${props.orientation}</Orientation>\n`;
-			}
+			if (props.directionality) xml += `\t\t\t<Directionality>${props.directionality}</Directionality>\n`;
 
 			if (props.intensity !== undefined) xml += `\t\t\t<Intensity>${props.intensity}</Intensity>\n`;
 			xml += '\t\t</Properties>\n';
 
 			// Add light points
 			for (const point of obj.points) {
-				// Determine per-light orientation & color (point overrides object)
-				const lightOrientation: 'left' | 'right' | 'both' =
-					(point.properties?.orientation as 'left' | 'right' | 'both' | undefined) ||
-					(obj.properties.orientation as 'left' | 'right' | 'both' | undefined) ||
-					'both';
+				// Determine per-light color only (orientation removed)
 				const lightColor = (point.properties?.color || obj.properties.color || '').toLowerCase();
 				const isElevatedStopbar = obj.type === 'stopbar' && point.properties?.elevated === true;
-				const lightStateId = this.mapLightStateId(lightOrientation, lightColor, isElevatedStopbar);
-				const offStateId = this.mapOffLightStateId(obj.type, lightOrientation, lightColor, isElevatedStopbar);
+				const lightStateId = this.mapLightStateId(
+					obj.properties.directionality === 'bi-directional' ? 'both' : 'right',
+					lightColor,
+					isElevatedStopbar,
+				);
+				const offStateId = this.mapOffLightStateId(
+					obj.type,
+					obj.properties.directionality === 'bi-directional' ? 'both' : 'right',
+					lightColor,
+					isElevatedStopbar,
+				);
 				const lightStateAttr = lightStateId !== undefined ? ` stateId="${lightStateId}"` : '';
 				const offStateAttr = ` offStateId="${offStateId}"`;
 				xml += `\t\t<Light${lightStateAttr}${offStateAttr}>\n`;
@@ -240,14 +221,7 @@ export class PolygonService {
 						if (point.properties.elevated === true) {
 							lightPropsContent += `\t\t\t\t<Elevated>true</Elevated>\n`;
 						}
-						if (
-							point.properties.orientation &&
-							obj.type === 'stopbar' &&
-							!(point.properties.elevated === true && point.properties.orientation === 'both') &&
-							point.properties.orientation !== props.orientation
-						) {
-							lightPropsContent += `\t\t\t\t<Orientation>${point.properties.orientation}</Orientation>\n`;
-						}
+						// orientation removed
 
 						if (lightPropsContent.length > 0) {
 							xml += '\t\t\t<Properties>\n';
@@ -376,21 +350,10 @@ export class PolygonService {
 		const needsElevated =
 			props.elevated === true || (props.elevated !== undefined && objectType !== 'stand' && props.elevated !== objectProps.elevated);
 
-		// Check if orientation needs inclusion
-		// For elevated stopbars with "both" orientation, don't include it
-		const isElevatedStopbarWithBoth = objectType === 'stopbar' && props.elevated === true && props.orientation === 'both';
-
-		const needsOrientation = Boolean(
-			props.orientation &&
-				!isElevatedStopbarWithBoth &&
-				((objectType !== 'stand' && props.orientation !== objectProps.orientation) ||
-					(objectType === 'stand' && props.orientation !== 'right')),
-		);
-
 		// Check if IHP property needs inclusion (differs from object default)
 		const needsIhp = props.ihp !== undefined && props.ihp !== objectProps.ihp;
 
-		return hasDifferentColor || needsElevated || needsOrientation || needsIhp;
+		return hasDifferentColor || needsElevated || needsIhp;
 	}
 	/**
 	 * Process an input XML file and generate BARS light locations XML

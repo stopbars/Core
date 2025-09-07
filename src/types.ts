@@ -153,12 +153,11 @@ export interface Point {
 	airportId: string;
 	type: 'stopbar' | 'lead_on' | 'taxiway' | 'stand';
 	name: string;
-	coordinates: {
+	coordinates: Array<{
 		lat: number;
 		lng: number;
-	};
+	}>;
 	directionality?: 'bi-directional' | 'uni-directional';
-	orientation?: 'left' | 'right';
 	color?: 'yellow' | 'green' | 'green-yellow' | 'green-orange' | 'green-blue';
 	elevated?: boolean;
 	ihp?: boolean;
@@ -191,7 +190,7 @@ export type PointChangeset = {
  *       bearerFormat: API Key
  *       description: User API key passed as Bearer token in Authorization header.
  *   schemas:
- *     Coordinates:
+ *     Coordinate:
  *       type: object
  *       required: [lat, lng]
  *       properties:
@@ -201,6 +200,11 @@ export type PointChangeset = {
  *         lng:
  *           type: number
  *           description: Longitude in decimal degrees.
+ *     Coordinates:
+ *       type: array
+ *       minItems: 2
+ *       items:
+ *         $ref: '#/components/schemas/Coordinate'
  *     PointData:
  *       type: object
  *       required: [type, name, coordinates]
@@ -217,9 +221,6 @@ export type PointChangeset = {
  *         directionality:
  *           type: string
  *           enum: [bi-directional, uni-directional]
- *         orientation:
- *           type: string
- *           enum: [left, right]
  *         color:
  *           type: string
  *           enum: [yellow, green, green-yellow, green-orange, green-blue]
@@ -248,12 +249,11 @@ export type PointChangeset = {
  *         type: { type: string, enum: [stopbar, lead_on, taxiway, stand] }
  *         name: { type: string }
  *         coordinates:
- *           type: object
- *           properties:
- *             lat: { type: number }
- *             lng: { type: number }
+ *           type: array
+ *           minItems: 2
+ *           items:
+ *             $ref: '#/components/schemas/Coordinate'
  *         directionality: { type: string, enum: [bi-directional, uni-directional] }
- *         orientation: { type: string, enum: [left, right] }
  *         color: { type: string, enum: [yellow, green, green-yellow, green-orange, green-blue] }
  *         elevated: { type: boolean }
  *         ihp: { type: boolean }

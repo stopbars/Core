@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import openapiSpec from '../openapi.json';
 import { cors } from 'hono/cors';
 import { PointChangeset, PointData, VatsimUser, UserRecord } from './types';
@@ -172,6 +173,39 @@ app.use('*', async (c, next) => {
 	c.set('clientIp', ip || '0.0.0.0');
 	await next();
 });
+
+async function resolveUserFromVatsimOrApi(
+	c: Context<{ Bindings: Env; Variables: { vatsimUser?: VatsimUser; user?: UserRecord } }>,
+): Promise<{ user: UserRecord | null; vatsimUser?: VatsimUser }> {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	const authz = c.req.header('Authorization') || '';
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+
+	if (vatsimToken) {
+		try {
+			const vUser = await vatsim.getUser(vatsimToken);
+			const user = await auth.getUserByVatsimId(vUser.id);
+			return { user, vatsimUser: vUser };
+		} catch {
+			return { user: null };
+		}
+	}
+
+	if (authz.toLowerCase().startsWith('bearer ')) {
+		const apiKey = authz.slice(7);
+		try {
+			const user = await auth.getUserByApiKey(apiKey);
+			if (user) {
+				return { user, vatsimUser: { id: user.vatsim_id, email: user.email } };
+			}
+		} catch {
+			/* ignore */
+		}
+	}
+
+	return { user: null };
+}
 
 /**
  * @openapi
@@ -1936,23 +1970,19 @@ app.route('/divisions', divisionsApp);
  *       400:
  *         description: Invalid ICAO
  */
-app.get(
-	'/airports/:icao/points',
-	withCache(CacheKeys.fromUrl, 600, 'airports'), // 1296000 - For after beta
-	async (c) => {
-		const airportId = c.req.param('icao');
+app.get('/airports/:icao/points', withCache(CacheKeys.fromUrl, 10, 'airports'), async (c) => {
+	const airportId = c.req.param('icao');
 
-		// Validate ICAO format (exactly 4 uppercase letters/numbers)
-		if (!airportId.match(/^[A-Z0-9]{4}$/)) {
-			return c.text('Invalid airport ICAO format', 400);
-		}
+	// Validate ICAO format (exactly 4 uppercase letters/numbers)
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
 
-		const points = ServicePool.getPoints(c.env);
+	const points = ServicePool.getPoints(c.env);
 
-		const airportPoints = await points.getAirportPoints(airportId);
-		return c.json(airportPoints);
-	},
-);
+	const airportPoints = await points.getAirportPoints(airportId);
+	return c.json(airportPoints);
+});
 
 /**
  * @openapi
@@ -1964,6 +1994,7 @@ app.get(
  *       - Points
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: icao
@@ -1989,15 +2020,7 @@ app.post('/airports/:icao/points', async (c) => {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const { user } = await resolveUserFromVatsimOrApi(c);
 	if (!user) {
 		return c.text('Unauthorized', 401);
 	}
@@ -2020,6 +2043,7 @@ app.post('/airports/:icao/points', async (c) => {
  *       - Points
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: icao
@@ -2043,15 +2067,7 @@ app.post('/airports/:icao/points/batch', async (c) => {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const { user } = await resolveUserFromVatsimOrApi(c);
 	if (!user) {
 		return c.text('Unauthorized', 401);
 	}
@@ -2073,6 +2089,7 @@ app.post('/airports/:icao/points/batch', async (c) => {
  *       - Points
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: icao
@@ -2106,15 +2123,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 		return c.text('Invalid point ID format', 400);
 	}
 
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const { user } = await resolveUserFromVatsimOrApi(c);
 	if (!user) {
 		return c.text('Unauthorized', 401);
 	}
@@ -2122,7 +2131,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
 	const points = ServicePool.getPoints(c.env);
 
 	const updates = (await c.req.json()) as Partial<PointData>;
-	const updatedPoint = await points.updatePoint(pointId, vatsimUser.id, updates);
+	const updatedPoint = await points.updatePoint(pointId, user.vatsim_id, updates);
 	return c.json(updatedPoint);
 });
 
@@ -2136,6 +2145,7 @@ app.put('/airports/:icao/points/:id', async (c) => {
  *       - Points
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: icao
@@ -2163,15 +2173,7 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 		return c.text('Invalid point ID format', 400);
 	}
 
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const { user } = await resolveUserFromVatsimOrApi(c);
 	if (!user) {
 		return c.text('Unauthorized', 401);
 	}
@@ -2179,7 +2181,7 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	const points = ServicePool.getPoints(c.env);
 
 	try {
-		await points.deletePoint(pointId, vatsimUser.id);
+		await points.deletePoint(pointId, user.vatsim_id);
 		return c.body(null, 204);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
@@ -3705,22 +3707,9 @@ const euroscopeApp = new Hono<{
 }>();
 
 euroscopeApp.use('*', async (c, next) => {
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) {
-		return c.text('Unauthorized', 401);
-	}
-
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-
-	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
-
-	if (!user) {
-		return c.text('User not found', 404);
-	}
-
-	c.set('vatsimUser', vatsimUser);
+	const { user, vatsimUser } = await resolveUserFromVatsimOrApi(c);
+	if (!user) return c.text('Unauthorized', 401);
+	c.set('vatsimUser', vatsimUser!);
 	c.set('user', user);
 	await next();
 });
@@ -3735,6 +3724,7 @@ euroscopeApp.use('*', async (c, next) => {
  *       - EuroScope
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -3877,6 +3867,7 @@ euroscopeApp.post('/upload', async (c) => {
  *       - EuroScope
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: icao
@@ -3960,6 +3951,7 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
  *       - EuroScope
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: icao
