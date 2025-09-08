@@ -321,12 +321,13 @@ export class AuthService {
 	async banUser(vatsimId: string, reason: string | null, issuedBy: string, expiresAt?: string | null): Promise<void> {
 		this.dbSession.startSession({ mode: 'first-primary' });
 		const nowIso = new Date().toISOString();
-		if (!/^\d{ 3, 10 } $ /.test(vatsimId)) throw new Error('Invalid VATSIM ID format');
+		const cid = String(vatsimId).trim();
+		if (!/^\d{3,10}$/.test(cid)) throw new Error('Invalid VATSIM ID format');
 		await this.dbSession.executeWrite(
 			`INSERT INTO bans (vatsim_id, reason, issued_by, created_at, expires_at)
 			 VALUES (?, ?, ?, ?, ?)
 			 ON CONFLICT(vatsim_id) DO UPDATE SET reason=excluded.reason, issued_by=excluded.issued_by, created_at=?, expires_at=excluded.expires_at`,
-			[vatsimId, reason ?? null, issuedBy, nowIso, expiresAt ?? null, nowIso],
+			[cid, reason ?? null, issuedBy, nowIso, expiresAt ?? null, nowIso],
 		);
 	}
 

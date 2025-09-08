@@ -54,7 +54,19 @@ export class AirportService {
 				he_ident: string;
 				he_latitude_deg: string;
 				he_longitude_deg: string;
-			}>('SELECT * FROM runways WHERE airport_icao = ?', [uppercaseIcao]);
+			}>(
+				`SELECT 
+					length_ft,
+					width_ft,
+					le_ident,
+					le_latitude_deg,
+					le_longitude_deg,
+					he_ident,
+					he_latitude_deg,
+					he_longitude_deg
+				FROM runways WHERE airport_icao = ?`,
+				[uppercaseIcao],
+			);
 
 			return { ...airportFromDb, runways: runwaysResult.results };
 		}
@@ -118,7 +130,19 @@ export class AirportService {
 					he_ident: string;
 					he_latitude_deg: string;
 					he_longitude_deg: string;
-				}>('SELECT * FROM runways WHERE airport_icao = ?', [uppercaseIcao]);
+				}>(
+					`SELECT 
+						length_ft,
+						width_ft,
+						le_ident,
+						le_latitude_deg,
+						le_longitude_deg,
+						he_ident,
+						he_latitude_deg,
+						he_longitude_deg
+					FROM runways WHERE airport_icao = ?`,
+					[uppercaseIcao],
+				);
 
 				return { ...airport, runways: runwaysResult.results };
 			}
