@@ -1,20 +1,22 @@
-import { Hono } from 'hono';
 import type { Context } from 'hono';
-import openapiSpec from '../openapi.json';
+import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { PointChangeset, PointData, VatsimUser, UserRecord } from './types';
-import { VatsimService } from './services/vatsim';
-import { AuthService } from './services/auth';
-import { StaffRole } from './services/roles';
-import { InstallerProduct } from './services/releases';
+import openapiSpec from '../openapi.json';
 import { Connection } from './network/connection';
-import { UserService } from './services/users';
+import { AuthService } from './services/auth';
+import { CacheKeys, CacheService, withCache } from './services/cache';
 import { DatabaseContextFactory } from './services/database-context';
-import { withCache, CacheKeys, CacheService } from './services/cache';
-import { ServicePool } from './services/service-pool';
-import { sanitizeContributionXml } from './services/xml-sanitizer';
-import { getLightsByObject, type RadarLight } from './services/lights-cache';
 import { HttpError } from './services/errors';
+import { getLightsByObject, type RadarLight } from './services/lights-cache';
+import { rateLimit } from './services/rate-limit';
+import { InstallerProduct } from './services/releases';
+import { StaffRole } from './services/roles';
+import { ServicePool } from './services/service-pool';
+import { UserService } from './services/users';
+import { VatsimService } from './services/vatsim';
+import { sanitizeContributionXml } from './services/xml-sanitizer';
+import { PointChangeset, PointData, UserRecord, VatsimUser } from './types';
+export { RateLimiter } from './services/rate-limit';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
 interface CreateDivisionPayload {
@@ -496,7 +498,7 @@ app.delete('/contact/:id', async (c) => {
  *       403:
  *         description: Forbidden
  */
-app.get('/connect', async (c) => {
+app.get('/connect', rateLimit({ maxRequests: 30 }), async (c) => {
 	const upgradeHeader = c.req.header('Upgrade');
 	if (upgradeHeader !== 'websocket') {
 		return c.json(
@@ -918,7 +920,7 @@ app.get('/auth/account', async (c) => {
  *       200:
  *         description: Updated
  */
-app.put('/auth/display-mode', async (c) => {
+app.put('/auth/display-mode', rateLimit({ maxRequests: 5 }), async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) return c.text('Unauthorized', 401);
 
@@ -1063,7 +1065,7 @@ app.post('/auth/regenerate-api-key', async (c) => {
  *       404:
  *         description: User not found
  */
-app.delete('/auth/delete', async (c) => {
+app.delete('/auth/delete', rateLimit({ maxRequests: 1 }), async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
 		return c.text('Unauthorized', 401);
@@ -2349,7 +2351,7 @@ app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
  *       400:
  *         description: Validation error
  */
-app.post('/supports/generate', async (c) => {
+app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 	try {
 		const formData = await c.req.formData();
 		const xmlFile = formData.get('xmlFile');
@@ -2978,7 +2980,7 @@ contributionsApp.get(
  *       400:
  *         description: Validation error (including duplicate detection when uploaded XML matches an existing pending/approved submission for the same package name)
  */
-contributionsApp.post('/', async (c) => {
+contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
 		return c.text('Unauthorized', 401);
@@ -3259,7 +3261,7 @@ contributionsApp.post('/:id/regenerate', async (c) => {
  *       403: { description: Forbidden }
  *       404: { description: Not found }
  */
-contributionsApp.delete('/:id', async (c) => {
+contributionsApp.delete('/:id', rateLimit({ maxRequests: 1 }), async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
 		return c.text('Unauthorized', 401);

@@ -1,7 +1,7 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "bars-core"
 main = "src/index.ts"
-compatibility_date = "2024-12-18"
+compatibility_date = "2025-09-09"
 compatibility_flags = ["nodejs_compat"]
 account_id = "089721947f7dd0fe58fca4321531d933" # Change this for local testing
 preview_urls = false
@@ -34,6 +34,14 @@ bucket_name = "bars-v2-cdn" # Change this for local testing
 name = "BARS"
 class_name = "BARS"
 
+[[durable_objects.bindings]]
+name = "BARS_RATE_LIMITER"
+class_name = "RateLimiter"
+
 [[migrations]]
 tag = "v1"
-new_classes = ["BARS"]
+new_sqlite_classes = ["BARS"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimiter"]
