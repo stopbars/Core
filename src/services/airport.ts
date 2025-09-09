@@ -31,7 +31,10 @@ export class AirportService {
 	}
 
 	async getAirport(icao: string) {
-		const uppercaseIcao = icao.toUpperCase();
+		const uppercaseIcao = icao.toUpperCase().replace(/[^A-Z0-9]/g, '');
+		if (!/^[A-Z0-9]{4}$/.test(uppercaseIcao)) {
+			return null;
+		}
 
 		// First try to get from database using read-optimized query
 		const airportResult = await this.dbSession.executeRead<{

@@ -1304,16 +1304,25 @@ app.get(
 		try {
 			let data;
 			if (icao) {
+				// Helper to sanitize ICAO: remove non-alphanumerics and uppercase
+				const sanitizeIcao = (code: string) => code.toUpperCase().replace(/[^A-Z0-9]/g, '');
 				// Handle batch requests
 				if (icao.includes(',')) {
-					const icaos = icao.split(',').map((code) => code.trim());
-					if (icaos.some((code) => !code.match(/^[A-Z0-9]{4}$/i))) {
+					const icaos = icao
+						.split(',')
+						.map((code) => sanitizeIcao(code.trim()))
+						.filter(Boolean);
+					if (icaos.length === 0 || icaos.some((code) => !/^[A-Z0-9]{4}$/.test(code))) {
 						return c.text('Invalid ICAO format', 400);
 					}
 					data = await airports.getAirports(icaos);
 				} else {
 					// Single airport request
-					data = await airports.getAirport(icao);
+					const cleanIcao = sanitizeIcao(icao);
+					if (!/^[A-Z0-9]{4}$/.test(cleanIcao)) {
+						return c.text('Invalid ICAO format', 400);
+					}
+					data = await airports.getAirport(cleanIcao);
 					if (!data) {
 						return c.text('Airport not found', 404);
 					}

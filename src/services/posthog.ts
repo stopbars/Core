@@ -1,5 +1,4 @@
 // Lightweight PostHog wrapper: fire-and-forget event capture with automatic { product: 'Core' }.
-// Uses Cloudflare's global waitUntil import (Aug 2025 feature) when available so events aren't dropped.
 
 import { waitUntil as cfWaitUntil } from 'cloudflare:workers';
 
