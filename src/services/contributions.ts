@@ -132,37 +132,22 @@ export class ContributionService {
 		const id = crypto.randomUUID();
 		const now = new Date().toISOString();
 
-		// Get authoritative display name from users table (ignore any client-provided value)
-		const userDisplayResult = await this.dbSession.executeRead<{ display_name: string | null }>(
-			'SELECT display_name FROM users WHERE vatsim_id = ?',
-			[submission.userId],
-		);
-		const authoritativeDisplayName = userDisplayResult.results[0]?.display_name || null;
+		// Insert without snapshot of display name; we'll always resolve via users table when reading
 		await this.dbSession.executeWrite(
 			`
 	  INSERT INTO contributions (
-		id, user_id, user_display_name, airport_icao, 
+		id, user_id, airport_icao, 
 		package_name, submitted_xml, notes,
 		submission_date, status
-	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-			[
-				id,
-				submission.userId,
-				authoritativeDisplayName,
-				submission.airportIcao,
-				submission.packageName,
-				trimmedXml,
-				submission.notes || null,
-				now,
-				'pending',
-			],
+			[id, submission.userId, submission.airportIcao, submission.packageName, trimmedXml, submission.notes || null, now, 'pending'],
 		);
 
 		const contribution: Contribution = {
 			id,
 			userId: submission.userId,
-			userDisplayName: authoritativeDisplayName,
+			userDisplayName: null, // resolved dynamically on retrieval
 			airportIcao: submission.airportIcao,
 			packageName: submission.packageName,
 			submittedXml: trimmedXml,
@@ -187,13 +172,14 @@ export class ContributionService {
 		const result = await this.dbSession.executeRead<Contribution>(
 			`
 	  SELECT 
-		id, user_id as userId, user_display_name as userDisplayName,
-		airport_icao as airportIcao, package_name as packageName,
-		submitted_xml as submittedXml, notes,
-		submission_date as submissionDate, status,
-		rejection_reason as rejectionReason, decision_date as decisionDate
-	  FROM contributions
-	  WHERE id = ?
+		c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+		c.airport_icao as airportIcao, c.package_name as packageName,
+		c.submitted_xml as submittedXml, c.notes,
+		c.submission_date as submissionDate, c.status,
+		c.rejection_reason as rejectionReason, c.decision_date as decisionDate
+	  FROM contributions c
+	  LEFT JOIN users u ON u.vatsim_id = c.user_id
+	  WHERE c.id = ?
 	`,
 			[id],
 		);
@@ -210,14 +196,15 @@ export class ContributionService {
 		const result = await this.dbSession.executeRead<Contribution>(
 			`
 			SELECT 
-				id, user_id as userId, user_display_name as userDisplayName,
-				airport_icao as airportIcao, package_name as packageName,
-				submitted_xml as submittedXml, notes,
-				submission_date as submissionDate, status,
-				rejection_reason as rejectionReason, decision_date as decisionDate
-			FROM contributions
-			WHERE airport_icao = ? AND lower(package_name) = lower(?) AND status = 'approved'
-			ORDER BY datetime(decision_date) DESC
+				c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+				c.airport_icao as airportIcao, c.package_name as packageName,
+				c.submitted_xml as submittedXml, c.notes,
+				c.submission_date as submissionDate, c.status,
+				c.rejection_reason as rejectionReason, c.decision_date as decisionDate
+			FROM contributions c
+			LEFT JOIN users u ON u.vatsim_id = c.user_id
+			WHERE c.airport_icao = ? AND lower(c.package_name) = lower(?) AND c.status = 'approved'
+			ORDER BY datetime(c.decision_date) DESC
 			LIMIT 1
 			`,
 			[airportIcao, packageName],
@@ -260,14 +247,15 @@ export class ContributionService {
 
 		const query = `
 	  SELECT 
-		id, user_id as userId, user_display_name as userDisplayName,
-		airport_icao as airportIcao, package_name as packageName,
-		submitted_xml as submittedXml, notes,
-		submission_date as submissionDate, status,
-		rejection_reason as rejectionReason, decision_date as decisionDate
-	  FROM contributions
+		c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+		c.airport_icao as airportIcao, c.package_name as packageName,
+		c.submitted_xml as submittedXml, c.notes,
+		c.submission_date as submissionDate, c.status,
+		c.rejection_reason as rejectionReason, c.decision_date as decisionDate
+	  FROM contributions c
+	  LEFT JOIN users u ON u.vatsim_id = c.user_id
 	  ${whereClause}
-	  ORDER BY submission_date DESC
+	  ORDER BY c.submission_date DESC
 	  LIMIT ? OFFSET ?
 	`;
 
@@ -606,14 +594,15 @@ export class ContributionService {
 		// Get the detailed contributions list
 		const listQuery = `
 	  SELECT 
-		id, user_id as userId, user_display_name as userDisplayName,
-		airport_icao as airportIcao, package_name as packageName,
-		submitted_xml as submittedXml, notes,
-		submission_date as submissionDate, status,
-		rejection_reason as rejectionReason, decision_date as decisionDate
-	  FROM contributions
+		c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+		c.airport_icao as airportIcao, c.package_name as packageName,
+		c.submitted_xml as submittedXml, c.notes,
+		c.submission_date as submissionDate, c.status,
+		c.rejection_reason as rejectionReason, c.decision_date as decisionDate
+	  FROM contributions c
+	  LEFT JOIN users u ON u.vatsim_id = c.user_id
 	  ${whereClause}
-	  ORDER BY submission_date DESC
+	  ORDER BY c.submission_date DESC
 	  LIMIT ? OFFSET ?
 	`;
 		const listPromise = this.dbSession.executeRead<Contribution>(listQuery, [...params, limit, offset]);
