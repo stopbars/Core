@@ -24,7 +24,7 @@ POSTHOG_HOST = "https://eu.i.posthog.com"
 [[d1_databases]]
 binding = "DB"
 database_name = "bars-db"  # Change this for local testing
-database_id = "0ff8c3d3-bec8-4b1f-8003-691ae35ca396"  # Change this for local testing
+database_id = "ce24bc57-21b8-4397-8cc7-49809ce3976c"  # Change this for local testing
 
 [[r2_buckets]]
 binding = "BARS_STORAGE" # Change this for local testing
