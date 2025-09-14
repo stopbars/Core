@@ -172,7 +172,7 @@ export class ContributionService {
 		const result = await this.dbSession.executeRead<Contribution>(
 			`
 	  SELECT 
-		c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+		c.id, c.user_id as userId, u.display_name as userDisplayName,
 		c.airport_icao as airportIcao, c.package_name as packageName,
 		c.submitted_xml as submittedXml, c.notes,
 		c.submission_date as submissionDate, c.status,
@@ -196,7 +196,7 @@ export class ContributionService {
 		const result = await this.dbSession.executeRead<Contribution>(
 			`
 			SELECT 
-				c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+				c.id, c.user_id as userId, u.display_name as userDisplayName,
 				c.airport_icao as airportIcao, c.package_name as packageName,
 				c.submitted_xml as submittedXml, c.notes,
 				c.submission_date as submissionDate, c.status,
@@ -247,7 +247,7 @@ export class ContributionService {
 
 		const query = `
 	  SELECT 
-		c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+		c.id, c.user_id as userId, u.display_name as userDisplayName,
 		c.airport_icao as airportIcao, c.package_name as packageName,
 		c.submitted_xml as submittedXml, c.notes,
 		c.submission_date as submissionDate, c.status,
@@ -594,7 +594,7 @@ export class ContributionService {
 		// Get the detailed contributions list
 		const listQuery = `
 	  SELECT 
-		c.id, c.user_id as userId, COALESCE(c.user_display_name, u.display_name) as userDisplayName,
+		c.id, c.user_id as userId, u.display_name as userDisplayName,
 		c.airport_icao as airportIcao, c.package_name as packageName,
 		c.submitted_xml as submittedXml, c.notes,
 		c.submission_date as submissionDate, c.status,
