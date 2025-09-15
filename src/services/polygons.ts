@@ -98,13 +98,12 @@ export class PolygonService {
 	private mapBarsRecordFromDb(dbResult: PointRow): BarsDBRecord {
 		// Extract type from database fields - handle both column structures
 		const dbType = dbResult.type || '';
-		const dbDirectionality = dbResult.directionality || '';
 
-		let type: 'stopbar' | 'leadon' | 'stand' | 'taxiway' | 'other';
+		let type: 'stopbar' | 'lead_on' | 'stand' | 'taxiway' | 'other';
 		if (dbType === 'stopbar') {
 			type = 'stopbar';
-		} else if (dbType === 'leadon' || dbType === 'lead_on' || dbDirectionality === 'lead-on' || dbDirectionality === 'lead_on') {
-			type = 'leadon';
+		} else if (dbType === 'lead_on') {
+			type = 'lead_on';
 		} else if (dbType === 'stand') {
 			type = 'stand';
 		} else if (dbType === 'taxiway') {
@@ -144,17 +143,6 @@ export class PolygonService {
 	}
 
 	/**
-	 * Maps directionality to BARS type
-	 */
-	private mapTypeFromDirectionality(type: string, directionality: string): 'stopbar' | 'leadon' | 'stand' | 'other' {
-		if (type === 'stopbar') return 'stopbar';
-		if (type === 'taxiway' && directionality === 'lead-on') return 'leadon';
-		if (type === 'leadon') return 'leadon';
-		if (type === 'stand') return 'stand';
-		return 'other';
-	}
-
-	/**
 	 * Maps orientation string to expected format
 	 */
 	/**
@@ -187,20 +175,16 @@ export class PolygonService {
 
 			// Add light points
 			for (const point of obj.points) {
-				// Determine per-light color only (orientation removed)
 				const lightColor = (point.properties?.color || obj.properties.color || '').toLowerCase();
 				const isElevatedStopbar = obj.type === 'stopbar' && point.properties?.elevated === true;
-				const lightStateId = this.mapLightStateId(
-					obj.properties.directionality === 'bi-directional' ? 'both' : 'right',
-					lightColor,
-					isElevatedStopbar,
-				);
-				const offStateId = this.mapOffLightStateId(
-					obj.type,
-					obj.properties.directionality === 'bi-directional' ? 'both' : 'right',
-					lightColor,
-					isElevatedStopbar,
-				);
+				const isLeadOn = obj.type === 'lead_on' || obj.type === 'leadon';
+				const effectiveOrientation: 'left' | 'right' | 'both' = isLeadOn
+					? 'both'
+					: obj.properties.directionality === 'bi-directional'
+						? 'both'
+						: 'right';
+				const lightStateId = this.mapLightStateId(effectiveOrientation, lightColor, isElevatedStopbar);
+				const offStateId = this.mapOffLightStateId(obj.type, effectiveOrientation, lightColor, isElevatedStopbar);
 				const lightStateAttr = lightStateId !== undefined ? ` stateId="${lightStateId}"` : '';
 				const offStateAttr = ` offStateId="${offStateId}"`;
 				out.push(`\t\t<Light${lightStateAttr}${offStateAttr}>`);
@@ -246,7 +230,7 @@ export class PolygonService {
 
 	/**
 	 * Map an OFF state for a light. Default is 0 for all lights.
-	 * Special handling for lead-on lights so that the lead-off side remains lit when "off":
+	 * Special handling for lead_on lights so that the lead-off side remains lit when "off":
 	 *  - mixed yellow-green (any order) -> uni yellow (3)
 	 *  - pure green -> uni green (2)
 	 *  - elevated stopbars -> 7; all others -> 0 (off)
@@ -260,7 +244,7 @@ export class PolygonService {
 		if (elevatedStopbar) return 7;
 		if (!rawColor) return 0;
 
-		if (objectType === 'leadon' || objectType === 'lead_on') {
+		if (objectType === 'lead_on' || objectType === 'leadon') {
 			const normalized = rawColor
 				.toLowerCase()
 				.split('-')

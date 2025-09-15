@@ -67,7 +67,7 @@ export interface StaffRecord {
 	created_at: string;
 }
 
-export type LightType = 'STOPBAR' | 'LEADON';
+export type LightType = 'STOPBAR' | 'LEAD_ON';
 export type MessageType = LightType;
 export type ClientType = 'controller' | 'pilot' | 'observer';
 

@@ -24,7 +24,7 @@ export interface LightProperties {
 
 export interface BarsDBRecord {
 	id: string;
-	type: 'stopbar' | 'leadon' | 'stand' | 'taxiway' | 'other';
+	type: 'stopbar' | 'lead_on' | 'stand' | 'taxiway' | 'other';
 	elevated?: boolean; // Whether the point should have elevated lights
 	color?: string;
 	intensity?: number;

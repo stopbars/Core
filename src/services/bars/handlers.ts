@@ -2,7 +2,7 @@ import { BarsDBRecord, BarsLightPoint, BarsPolygon, GeoPoint, ProcessedBarsObjec
 import { calculateDestinationPoint, calculateHeading, generateEquidistantPoints, calculateDistance, smoothLine } from './geoUtils';
 
 const STOPBAR_SPACING = 3;
-const LEADON_SPACING = 12;
+const LEAD_ON_SPACING = 12;
 const STAND_SPACING = 15;
 const TAXIWAY_SPACING = 11.25;
 const ELEVATED_LIGHT_INWARD_ANGLE = 140;
@@ -270,15 +270,15 @@ export class StopbarHandler extends BarsTypeHandler {
 }
 
 /**
- * Handler for leadon type BARS
+ * Handler for lead_on type BARS
  */
-export class LeadonHandler extends BarsTypeHandler {
+export class Lead_onHandler extends BarsTypeHandler {
 	generateLightPoints(polygon: BarsPolygon, dbRecord: BarsDBRecord): BarsLightPoint[] {
 		const points = polygon.points;
 		if (points.length < 2) return [];
 
 		// Generate points along the line with 12-meter spacing
-		const lightPoints = generateEquidistantPoints(points, LEADON_SPACING);
+		const lightPoints = generateEquidistantPoints(points, LEAD_ON_SPACING);
 
 		const segments = points.slice(0, -1).map((a, idx) => {
 			const b = points[idx + 1];
@@ -333,7 +333,7 @@ export class LeadonHandler extends BarsTypeHandler {
 			return {
 				...light,
 				properties: {
-					type: 'leadon',
+					type: 'lead_on',
 					color: isYellowGreenUni ? 'yellow-green-uni' : 'green',
 					directionality: isYellowGreenUni ? 'bi-directional' : dbRecord.directionality || 'bi-directional',
 					elevated: false,
@@ -364,10 +364,10 @@ export class TaxiwayHandler extends BarsTypeHandler {
 		const isUniDirectional = dbRecord.directionality === 'uni-directional';
 
 		// Calculate heading for each light - account for hemisphere differences for uni-directional taxiways
-		// For uni-directional taxiways, use right orientation like leadon lights
+		// For uni-directional taxiways, use right orientation like lead_on lights
 		let headingAdjustment = 0;
 
-		// For uni-directional taxiways, handle like leadon/stand lights with hemisphere adjustment
+		// For uni-directional taxiways, handle like lead_on/stand lights with hemisphere adjustment
 		if (isUniDirectional && isInSouthernHemisphere) {
 			headingAdjustment = (headingAdjustment + 180) % 360;
 		}
@@ -479,9 +479,8 @@ export class BarsHandlerFactory {
 		switch (type) {
 			case 'stopbar':
 				return new StopbarHandler();
-			case 'leadon':
-			case 'lead_on': // Handle both naming conventions
-				return new LeadonHandler();
+			case 'lead_on':
+				return new Lead_onHandler();
 			case 'stand':
 				return new StandHandler();
 			case 'taxiway':
