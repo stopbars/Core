@@ -92,15 +92,25 @@ export function generateEquidistantPoints(
 	// Always add the first point
 	result.push({ ...points[0] });
 
+	// Precompute segment lengths and bearings to avoid repeated geodesic calculations
+	const segmentLengths: number[] = new Array(points.length - 1);
+	const segmentBearings: number[] = new Array(points.length - 1);
+	for (let i = 0; i < points.length - 1; i++) {
+		const a = points[i];
+		const b = points[i + 1];
+		segmentLengths[i] = calculateDistance(a, b);
+		segmentBearings[i] = calculateHeading(a, b);
+	}
+
+	// Compute the total path length once before the loop
+	const totalPathLength = segmentLengths.reduce((sum, v) => sum + v, 0);
+
 	let totalDistanceTraveled = 0;
 	let currentSegmentIndex = 0;
 	let currentSegmentStart = points[0];
-	let currentSegmentEnd = points[1];
-	let currentSegmentLength = calculateDistance(currentSegmentStart, currentSegmentEnd);
+	let currentSegmentLength = segmentLengths[0];
+	let currentSegmentBearing = segmentBearings[0];
 	let distanceInCurrentSegment = 0;
-
-	// Compute the total path length once before the loop
-	const totalPathLength = calculateTotalPathLength(points);
 
 	// Keep adding points at exact intervals until we reach the end of the line
 	while (totalDistanceTraveled + interval <= totalPathLength) {
@@ -112,32 +122,18 @@ export function generateEquidistantPoints(
 			distanceInCurrentSegment += currentSegmentLength;
 			currentSegmentIndex++;
 			currentSegmentStart = points[currentSegmentIndex];
-			currentSegmentEnd = points[currentSegmentIndex + 1];
-			currentSegmentLength = calculateDistance(currentSegmentStart, currentSegmentEnd);
+			currentSegmentLength = segmentLengths[currentSegmentIndex];
+			currentSegmentBearing = segmentBearings[currentSegmentIndex];
 		}
 
 		// Calculate the exact position within the current segment
 		const distanceIntoSegment = totalDistanceTraveled - distanceInCurrentSegment;
 
-		// Calculate the bearing for this segment
-		const bearing = calculateHeading(currentSegmentStart, currentSegmentEnd);
-
 		// Place the point using precise geodesic calculation
-		const newPoint = calculateDestinationPoint(currentSegmentStart, distanceIntoSegment, bearing);
+		const newPoint = calculateDestinationPoint(currentSegmentStart, distanceIntoSegment, currentSegmentBearing);
 
 		result.push(newPoint);
 	}
 
 	return result;
-}
-
-/**
- * Helper function to calculate the total length of a path
- */
-function calculateTotalPathLength(points: GeoPoint[]): number {
-	let totalLength = 0;
-	for (let i = 0; i < points.length - 1; i++) {
-		totalLength += calculateDistance(points[i], points[i + 1]);
-	}
-	return totalLength;
 }

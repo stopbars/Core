@@ -22,20 +22,25 @@ export abstract class BarsTypeHandler {
 
 		const result: BarsLightPoint[] = [];
 
+		// Precompute segment headings to avoid repeated geodesic calculations
+		const segmentHeadings: number[] = new Array(points.length - 1);
+		for (let i = 0; i < points.length - 1; i++) {
+			segmentHeadings[i] = calculateHeading(points[i], points[i + 1]);
+		}
+
 		for (let i = 0; i < points.length; i++) {
 			let heading: number;
 
 			if (i === 0) {
-				const nextIndex = Math.min(points.length - 1, 1);
-				heading = calculateHeading(points[0], points[nextIndex]);
+				heading = segmentHeadings[0];
 			} else if (i === points.length - 1) {
-				heading = calculateHeading(points[i - 1], points[i]);
+				heading = segmentHeadings[points.length - 2];
 			} else {
-				const headingFrom = calculateHeading(points[i - 1], points[i]);
-				const headingTo = calculateHeading(points[i], points[i + 1]);
+				const headingFrom = segmentHeadings[i - 1];
+				const headingTo = segmentHeadings[i];
 
 				const diff = Math.abs(headingFrom - headingTo);
-				if (diff > 180) {
+				if (diff >= 180) {
 					const adjustedHeadingTo = headingTo < headingFrom ? headingTo + 360 : headingTo;
 					const adjustedHeadingFrom = headingFrom < headingTo ? headingFrom + 360 : headingFrom;
 					heading = ((adjustedHeadingFrom + adjustedHeadingTo) / 2) % 360;
@@ -223,23 +228,19 @@ export class StopbarHandler extends BarsTypeHandler {
 		);
 
 		// Step 2: Move the lights inward by the defined inward offset (0.3 meters)
-		// Now place them on the OPPOSITE side of the stopbar (flip from previous -90 to +90)
 		const startInwardPoint = calculateDestinationPoint(
 			startElevatedPoint,
 			ELEVATED_LIGHT_INWARD_OFFSET,
-			(baseLineHeading + 90) % 360, // opposite side perpendicular
+			(baseLineHeading - 90 + 360) % 360, // perpendicular to the other side
 		);
 
 		const endInwardPoint = calculateDestinationPoint(
 			endElevatedPoint,
 			ELEVATED_LIGHT_INWARD_OFFSET,
-			(baseLineHeading + 90) % 360, // opposite side perpendicular
+			(baseLineHeading - 90 + 360) % 360,
 		);
-
-		// Step 3: Flip headings 180° so elevated lights face the correct (opposite) way after side switch
-		// Original inward headings: base+angle and base+180-angle. We add 180 to both to flip them.
-		const firstElevatedHeading = (baseLineHeading + ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
-		const lastElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
+		const firstElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 180 + 90) % 360;
+		const lastElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 180) % 360;
 
 		// Add the elevated lights with correct positions and inward headings
 		elevatedLights.push({
@@ -279,19 +280,50 @@ export class LeadonHandler extends BarsTypeHandler {
 		// Generate points along the line with 12-meter spacing
 		const lightPoints = generateEquidistantPoints(points, LEADON_SPACING);
 
-		// Determine if we're in the southern hemisphere by checking the first point's latitude
-		const isInSouthernHemisphere = points[0].lat < 0;
+		const segments = points.slice(0, -1).map((a, idx) => {
+			const b = points[idx + 1];
+			return {
+				a,
+				b,
+				heading: calculateHeading(a, b),
+				length: calculateDistance(a, b),
+			};
+		});
+		let lightsWithHeading: BarsLightPoint[] = lightPoints.map((pt) => {
+			let bestIdx = 0;
+			let bestGap = Number.POSITIVE_INFINITY;
+			for (let i = 0; i < segments.length; i++) {
+				const s = segments[i];
+				const d1 = calculateDistance(pt, s.a);
+				const d2 = calculateDistance(pt, s.b);
+				const gap = Math.abs(d1 + d2 - s.length);
+				if (gap < bestGap) {
+					bestGap = gap;
+					bestIdx = i;
+					if (gap <= 0.5) break;
+				}
+			}
+			const heading = segments.length > 0 ? segments[Math.max(0, Math.min(bestIdx, segments.length - 1))].heading : 0;
+			return { ...pt, heading: ((heading % 360) + 360) % 360 };
+		});
 
-		// Calculate heading for each light - account for hemisphere differences
-		// With orientation removed, default to right-facing along-line adjustment
-		let headingAdjustment = this.getHeadingAdjustmentForRightFacing();
-
-		// In the southern hemisphere, we need to add 180 degrees to correct the direction
-		if (isInSouthernHemisphere) {
-			headingAdjustment = (headingAdjustment + 180) % 360;
+		if (lightsWithHeading.length >= 2) {
+			const sampleCount = Math.min(4, lightsWithHeading.length);
+			let sinSum = 0;
+			let cosSum = 0;
+			for (let i = lightsWithHeading.length - sampleCount; i < lightsWithHeading.length; i++) {
+				const rad = (lightsWithHeading[i].heading * Math.PI) / 180;
+				sinSum += Math.sin(rad);
+				cosSum += Math.cos(rad);
+			}
+			const meanRad = Math.atan2(sinSum / sampleCount, cosSum / sampleCount);
+			let tailMean = (meanRad * 180) / Math.PI;
+			if (tailMean < 0) tailMean += 360;
+			const diffToWest = Math.min(Math.abs(tailMean - 270), 360 - Math.abs(tailMean - 270));
+			if (diffToWest <= 20) {
+				lightsWithHeading = lightsWithHeading.map((p) => ({ ...p, heading: (p.heading + 180) % 360 }));
+			}
 		}
-
-		const lightsWithHeading = this.addHeadingToPoints(lightPoints, headingAdjustment);
 
 		// Add properties to lights, alternating between yellow and yellow-green-uni types
 		return lightsWithHeading.map((light, index): BarsLightPoint => {
@@ -551,46 +583,13 @@ export function deduplicateTaxiwayPoints(objects: ProcessedBarsObject[]): Proces
 		}
 	}
 
-	// Second pass: create new points with averaged headings
-	const mergedPoints: Map<string, BarsLightPoint> = new Map();
+	// Second pass: determine canonical positions per group (preserve original headings per light)
+	// We only "snap" lat/lon to the group's canonical point; heading/properties stay from the source point.
+	const canonicalPositions: Map<string, Pick<BarsLightPoint, 'lat' | 'lon'>> = new Map();
 
 	for (const [key, group] of mergedPointsMap.entries()) {
-		// If there's only one point in the group, no averaging needed
-		if (group.count === 1) {
-			mergedPoints.set(key, { ...group.point });
-			continue;
-		}
-
-		// Calculate average heading (with proper handling of the 0/360 boundary)
-		let sumSin = 0;
-		let sumCos = 0;
-
-		for (const point of group.sourcePoints) {
-			// Convert heading to radians for vector averaging
-			const headingRad = (point.heading * Math.PI) / 180;
-			sumSin += Math.sin(headingRad);
-			sumCos += Math.cos(headingRad);
-		}
-
-		// Calculate the average heading using vector components
-		const averageHeading = ((Math.atan2(sumSin, sumCos) * 180) / Math.PI + 360) % 360;
-
-		// Create the merged point
-		// Use the position of the first point as the canonical position
-		const mergedPoint: BarsLightPoint = {
-			...group.point,
-			heading: averageHeading,
-			// Keep the properties from the first point but ensure type is defined to match LightProperties
-			properties: {
-				type: (group.point.properties?.type || 'taxiway') as string, // Ensure type is never undefined
-				color: group.point.properties?.color,
-				directionality: group.point.properties?.directionality,
-				elevated: group.point.properties?.elevated,
-				intensity: group.point.properties?.intensity,
-			},
-		};
-
-		mergedPoints.set(key, mergedPoint);
+		// Use the first point's position as canonical for stability
+		canonicalPositions.set(key, { lat: group.point.lat, lon: group.point.lon });
 	}
 
 	// Final step: recreate the taxiway objects with deduplicated points
@@ -603,8 +602,14 @@ export function deduplicateTaxiwayPoints(objects: ProcessedBarsObject[]): Proces
 			let found = false;
 			for (const [key, group] of mergedPointsMap.entries()) {
 				if (group.sourcePoints.some((p) => p === point)) {
-					// Use the merged point from that group
-					newPoints.push(mergedPoints.get(key)!);
+					// Use the canonical position for that group, but preserve the original heading and properties
+					const canonical = canonicalPositions.get(key)!;
+					newPoints.push({
+						lat: canonical.lat,
+						lon: canonical.lon,
+						heading: ((point.heading % 360) + 360) % 360,
+						properties: point.properties ? { ...point.properties } : undefined,
+					});
 					found = true;
 					break;
 				}

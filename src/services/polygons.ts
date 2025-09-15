@@ -167,21 +167,23 @@ export class PolygonService {
 			throw new Error('No BARS objects to generate XML');
 		}
 
-		let xml = '<?xml version="1.0" encoding="utf-8"?>\n<BarsLights>\n';
+		const out: string[] = [];
+		out.push('<?xml version="1.0" encoding="utf-8"?>');
+		out.push('<BarsLights>');
 
 		// Add each object
 		for (const obj of processedObjects) {
 			// stateId moved to per-light level (previously on BarsObject)
-			xml += `\t<BarsObject id="${obj.id}" type="${obj.type}">\n`;
+			out.push(`\t<BarsObject id="${obj.id}" type="${obj.type}">`);
 
 			// Add properties
 			const props = obj.properties;
-			xml += '\t\t<Properties>\n';
-			if (props.color) xml += `\t\t\t<Color>${props.color}</Color>\n`;
-			if (props.directionality) xml += `\t\t\t<Directionality>${props.directionality}</Directionality>\n`;
+			out.push('\t\t<Properties>');
+			if (props.color) out.push(`\t\t\t<Color>${props.color}</Color>`);
+			if (props.directionality) out.push(`\t\t\t<Directionality>${props.directionality}</Directionality>`);
 
-			if (props.intensity !== undefined) xml += `\t\t\t<Intensity>${props.intensity}</Intensity>\n`;
-			xml += '\t\t</Properties>\n';
+			if (props.intensity !== undefined) out.push(`\t\t\t<Intensity>${props.intensity}</Intensity>`);
+			out.push('\t\t</Properties>');
 
 			// Add light points
 			for (const point of obj.points) {
@@ -201,9 +203,9 @@ export class PolygonService {
 				);
 				const lightStateAttr = lightStateId !== undefined ? ` stateId="${lightStateId}"` : '';
 				const offStateAttr = ` offStateId="${offStateId}"`;
-				xml += `\t\t<Light${lightStateAttr}${offStateAttr}>\n`;
-				xml += `\t\t\t<Position>${point.lat},${point.lon}</Position>\n`;
-				xml += `\t\t\t<Heading>${point.heading.toFixed(2)}</Heading>\n`;
+				out.push(`\t\t<Light${lightStateAttr}${offStateAttr}>`);
+				out.push(`\t\t\t<Position>${point.lat},${point.lon}</Position>`);
+				out.push(`\t\t\t<Heading>${point.heading.toFixed(2)}</Heading>`);
 
 				// Add point-specific properties if they exist and are needed
 				if (point.properties) {
@@ -211,37 +213,35 @@ export class PolygonService {
 					const needsPropertiesTag = this.lightsNeedsPropertiesTag(point, props, obj.type);
 
 					if (needsPropertiesTag) {
-						let lightPropsContent = '';
+						const lightPropsLines: string[] = [];
 						if (point.properties.color && point.properties.color !== props.color) {
-							lightPropsContent += `\t\t\t\t<Color>${point.properties.color}</Color>\n`;
+							lightPropsLines.push(`\t\t\t\t<Color>${point.properties.color}</Color>`);
 						}
 						if (point.properties.ihp === true && obj.type === 'stopbar' && point.properties.color === 'yellow') {
-							lightPropsContent += `\t\t\t\t<IHP>${point.properties.ihp}</IHP>\n`;
+							lightPropsLines.push(`\t\t\t\t<IHP>${point.properties.ihp}</IHP>`);
 						}
 						if (point.properties.elevated === true) {
-							lightPropsContent += `\t\t\t\t<Elevated>true</Elevated>\n`;
+							lightPropsLines.push(`\t\t\t\t<Elevated>true</Elevated>`);
 						}
 						// orientation removed
 
-						if (lightPropsContent.length > 0) {
-							xml += '\t\t\t<Properties>\n';
-							xml += lightPropsContent;
-							xml += '\t\t\t</Properties>\n';
+						if (lightPropsLines.length > 0) {
+							out.push('\t\t\t<Properties>');
+							for (const line of lightPropsLines) out.push(line);
+							out.push('\t\t\t</Properties>');
 						}
 					}
 				}
 
-				xml += '\t\t</Light>\n';
+				out.push('\t\t</Light>');
 			}
 
-			xml += '\t</BarsObject>\n';
+			out.push('\t</BarsObject>');
 		}
 
-		xml += '</BarsLights>';
+		out.push('</BarsLights>');
 
-		// Stats tracking removed
-
-		return xml;
+		return out.join('\n');
 	}
 
 	/**
