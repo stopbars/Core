@@ -1981,7 +1981,7 @@ app.route('/divisions', divisionsApp);
  *       400:
  *         description: Invalid ICAO
  */
-app.get('/airports/:icao/points', withCache(CacheKeys.fromUrl, 10, 'airports'), async (c) => {
+app.get('/airports/:icao/points', async (c) => {
 	const airportId = c.req.param('icao');
 
 	// Validate ICAO format (exactly 4 uppercase letters/numbers)
