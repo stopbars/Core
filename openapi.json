@@ -666,6 +666,9 @@
           },
           "404": {
             "description": "Airport not found"
+          },
+          "503": {
+            "description": "Temporary upstream data incomplete (bounding box unavailable). Retry later."
           }
         }
       }

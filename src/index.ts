@@ -1294,6 +1294,8 @@ app.delete('/bans/:vatsimId', async (c) => {
  *         description: Invalid parameters
  *       404:
  *         description: Airport not found
+ *       503:
+ *         description: Temporary upstream data incomplete (bounding box unavailable). Retry later.
  */
 app.get(
 	'/airports',
@@ -2392,7 +2394,7 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 		const data = enc.encode(sanitized + '|' + icao.toUpperCase());
 		const hashBuf = await crypto.subtle.digest('SHA-256', data);
 		const hashArr = Array.from(new Uint8Array(hashBuf));
-		const hashHex = hashArr.map(b => b.toString(16).padStart(2, '0')).join('');
+		const hashHex = hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
 		const cacheKey = `supports-gen:${icao.toUpperCase()}:${hashHex}`;
 		const cacheNamespace = 'generation';
 		const cacheTtlSeconds = 86400;

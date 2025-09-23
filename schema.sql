@@ -75,7 +75,11 @@ CREATE TABLE IF NOT EXISTS airports (
   latitude REAL NOT NULL,
   longitude REAL NOT NULL,
   name TEXT NOT NULL,
-  continent TEXT NOT NULL
+  continent TEXT NOT NULL,
+  bbox_min_lat REAL,
+  bbox_min_lon REAL,
+  bbox_max_lat REAL,
+  bbox_max_lon REAL
 );
 
 CREATE TABLE IF NOT EXISTS runways (
