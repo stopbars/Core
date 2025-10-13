@@ -8,7 +8,8 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
 - Node.js 18 or higher
 - Git
-- Wrangler CLI: `npm install -g wrangler`
+- Bun package manager (https://bun.sh/)
+- Wrangler CLI: `bun install -g wrangler`
 - Cloudflare account (for any testing with live services)
 
 ### Development Setup
@@ -26,7 +27,7 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 2. **Install Dependencies**
 
    ```bash
-   npm install
+   bun install
    ```
 
    <br>
@@ -83,7 +84,7 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
 4. **Start Development Server**
    ```bash
-   npm run dev
+   bun run dev
    ```
 
 ## Development Guidelines
@@ -160,7 +161,7 @@ Create a pull request with:
 
 ### Manual Testing
 
-1. Start the development server: `npm run dev`
+1. Start the development server: `bun run dev`
 2. Test API endpoints with curl or Postman
 3. Verify database operations work correctly
 4. Test real-time functionality with WebSocket clients
@@ -190,7 +191,7 @@ For features requiring VATSIM authentication, you'll need:
 
 - Keep type definitions up to date
 - Use proper interfaces for all data structures
-- Run `npm run typegen` after schema changes
+- Run `bun run typegen` after schema changes
 
 ## Getting Help
 

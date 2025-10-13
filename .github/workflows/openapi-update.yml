@@ -25,15 +25,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: 'bun'
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install
 
       - name: Generate OpenAPI spec
         run: |
-          npm run openapi
-          npx prettier --write openapi.json || true
+          bun run openapi
+          bun run prettier --write openapi.json || true
 
       - name: Commit updated spec (if changed)
         run: |

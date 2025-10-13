@@ -22,16 +22,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: 'bun'
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install
 
       - name: Type check
-        run: npx tsc --noEmit
+        run: bun run tsc --noEmit
 
       - name: Generate Wrangler types
-        run: npm run typegen
+        run: bun run typegen
 
       - name: Build project
-        run: npm run build
+        run: bun run build

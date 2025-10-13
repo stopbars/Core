@@ -23,12 +23,12 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install
 
       - name: Generate & verify OpenAPI spec
         run: |
-          npm run openapi
-          npx prettier --write openapi.json || true
+          bun run openapi
+          bun run prettier --write openapi.json || true
           if ! git diff --quiet openapi.json; then
             echo "::error::openapi.json is out of date. Run the OpenAPI Update PR workflow (or re-run it) so the spec is committed before merging to main.";
             echo "Changes detected:";
@@ -36,10 +36,7 @@ jobs:
             exit 1;
           fi
 
-      - name: Prettify code
-        run: npm run prettify
-
       - name: Deploy to Cloudflare Workers
-        run: npx wrangler deploy
+        run: bun run wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
