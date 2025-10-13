@@ -1278,6 +1278,12 @@
         "responses": {
           "201": {
             "description": "Changeset applied"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
           }
         }
       }

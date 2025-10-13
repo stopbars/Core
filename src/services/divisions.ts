@@ -1,4 +1,5 @@
 import { DatabaseSessionService } from './database-session';
+import { HttpError } from './errors';
 import { PostHogService } from './posthog';
 
 interface DivisionMember {
@@ -120,7 +121,7 @@ export class DivisionService {
 	}
 	async requestAirport(divisionId: number, icao: string, requestedBy: string): Promise<DivisionAirport> {
 		const role = await this.getMemberRole(divisionId, requestedBy);
-		if (!role) throw new Error('User is not a member of this division');
+		if (!role) throw new HttpError(403, 'Forbidden: User is not a member of this division');
 
 		const result = await this.dbSession.executeWrite(
 			'INSERT INTO division_airports (division_id, icao, requested_by) VALUES (?, ?, ?) RETURNING *',

@@ -1,6 +1,7 @@
 import { IDService } from './id';
 import { DivisionService } from './divisions';
 import { AuthService } from './auth';
+import { HttpError } from './errors';
 import { Point, PointChangeset, PointData } from '../types';
 import { PostHogService } from './posthog';
 
@@ -130,7 +131,7 @@ export class PointsService {
 		// Check if user has permission for this airport
 		const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, airportId);
 		if (!hasDivisionAccess) {
-			throw new Error('User does not have permission to modify this airport');
+			throw new HttpError(403, 'Forbidden: You do not have permission to modify this airport');
 		}
 
 		// Generate unique BARS ID
@@ -184,13 +185,13 @@ export class PointsService {
 		// Get existing point
 		const point = await this.getPoint(pointId);
 		if (!point) {
-			throw new Error('Point not found');
+			throw new HttpError(404, 'Point not found');
 		}
 
 		// Check permissions
 		const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, point.airportId);
 		if (!hasDivisionAccess) {
-			throw new Error('User does not have permission to modify this point');
+			throw new HttpError(403, 'Forbidden: You do not have permission to modify this point');
 		}
 
 		// Validate updates
@@ -255,13 +256,13 @@ export class PointsService {
 		// Get point to check permissions
 		const point = await this.getPoint(pointId);
 		if (!point) {
-			throw new Error('Point not found');
+			throw new HttpError(404, 'Point not found');
 		}
 
 		// Check basic airport access permissions
 		const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, point.airportId);
 		if (!hasDivisionAccess) {
-			throw new Error('User does not have permission to delete this point');
+			throw new HttpError(403, 'Forbidden: You do not have permission to delete this point');
 		}
 
 		// Delete from database
@@ -276,7 +277,7 @@ export class PointsService {
 	async applyChangeset(airportId: string, userId: string, changeset: PointChangeset): Promise<Point[]> {
 		const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, airportId);
 		if (!hasDivisionAccess) {
-			throw new Error('User does not have permission to apply this changeset');
+			throw new HttpError(403, 'Forbidden: You do not have permission to apply this changeset');
 		}
 
 		const selects = Object.keys(changeset.modify ?? {}).map((id) => this.stmtSelect.bindAll({ id, airportId }));
@@ -285,7 +286,7 @@ export class PointsService {
 				const rows = result.results as unknown as PointRow[] | null;
 				const first = rows && rows[0];
 				if (!first) {
-					throw new Error('Point targeted by modify operation does not exist');
+					throw new HttpError(404, 'Point targeted by modify operation does not exist');
 				}
 				return this.mapPointFromDb(first) as PointData;
 			})
@@ -365,7 +366,7 @@ export class PointsService {
 	private validatePoint(point: PointData) {
 		// Normalize coordinates: accept either legacy single object or array of objects
 		const rawCoords: unknown = (point as unknown as { coordinates?: unknown }).coordinates;
-		if (rawCoords === undefined || rawCoords === null) throw new Error('Point must have coordinates');
+		if (rawCoords === undefined || rawCoords === null) throw new HttpError(400, 'Point must have coordinates');
 
 		let arr: Array<{ lat: number; lng: number }>;
 		if (PointsService.isCoordinateArray(rawCoords)) {
@@ -373,23 +374,23 @@ export class PointsService {
 		} else if (PointsService.isCoordinate(rawCoords)) {
 			arr = [rawCoords];
 		} else {
-			throw new Error('Invalid coordinates format');
+			throw new HttpError(400, 'Invalid coordinates format');
 		}
 
 		if (arr.length < 1) {
-			throw new Error('Coordinates must contain at least one point');
+			throw new HttpError(400, 'Coordinates must contain at least one point');
 		}
 		(point as PointData).coordinates = arr as { lat: number; lng: number }[];
 
 		// Validate type-specific fields
 		if (point.type === 'stopbar') {
 			if (!point.directionality) {
-				throw new Error('Stopbar must have directionality specified');
+				throw new HttpError(400, 'Stopbar must have directionality specified');
 			}
 
 			if (point.elevated) {
 				if (point.directionality !== 'uni-directional') {
-					throw new Error('Stopbar with elevated property must be uni-directional');
+					throw new HttpError(400, 'Stopbar with elevated property must be uni-directional');
 				}
 			}
 
@@ -403,7 +404,7 @@ export class PointsService {
 				}
 
 				if (typeof point.elevated !== 'boolean') {
-					throw new Error('Elevated property must be a boolean when specified');
+					throw new HttpError(400, 'Elevated property must be a boolean when specified');
 				}
 			}
 
@@ -416,23 +417,23 @@ export class PointsService {
 				}
 
 				if (typeof point.ihp !== 'boolean') {
-					throw new Error('IHP property must be a boolean when specified');
+					throw new HttpError(400, 'IHP property must be a boolean when specified');
 				}
 			}
 		}
 		if (point.type === 'taxiway') {
 			if (!point.directionality) {
-				throw new Error('Taxiway must have directionality specified');
+				throw new HttpError(400, 'Taxiway must have directionality specified');
 			}
 
 			if (point.color === undefined) {
-				throw new Error('Taxiway must have color specified');
+				throw new HttpError(400, 'Taxiway must have color specified');
 			}
 		}
 
 		// Validate name
 		if (!point.name || point.name.trim().length === 0) {
-			throw new Error('Point must have a name');
+			throw new HttpError(400, 'Point must have a name');
 		}
 	}
 

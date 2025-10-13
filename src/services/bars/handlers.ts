@@ -50,6 +50,7 @@ export abstract class BarsTypeHandler {
 			}
 
 			heading = (heading + headingAdjustment) % 360;
+			if (heading < 0) heading += 360;
 
 			result.push({
 				...points[i],
@@ -280,50 +281,7 @@ export class Lead_onHandler extends BarsTypeHandler {
 		// Generate points along the line with 12-meter spacing
 		const lightPoints = generateEquidistantPoints(points, LEAD_ON_SPACING);
 
-		const segments = points.slice(0, -1).map((a, idx) => {
-			const b = points[idx + 1];
-			return {
-				a,
-				b,
-				heading: calculateHeading(a, b),
-				length: calculateDistance(a, b),
-			};
-		});
-		let lightsWithHeading: BarsLightPoint[] = lightPoints.map((pt) => {
-			let bestIdx = 0;
-			let bestGap = Number.POSITIVE_INFINITY;
-			for (let i = 0; i < segments.length; i++) {
-				const s = segments[i];
-				const d1 = calculateDistance(pt, s.a);
-				const d2 = calculateDistance(pt, s.b);
-				const gap = Math.abs(d1 + d2 - s.length);
-				if (gap < bestGap) {
-					bestGap = gap;
-					bestIdx = i;
-					if (gap <= 0.5) break;
-				}
-			}
-			const heading = segments.length > 0 ? segments[Math.max(0, Math.min(bestIdx, segments.length - 1))].heading : 0;
-			return { ...pt, heading: ((heading % 360) + 360) % 360 };
-		});
-
-		if (lightsWithHeading.length >= 2) {
-			const sampleCount = Math.min(4, lightsWithHeading.length);
-			let sinSum = 0;
-			let cosSum = 0;
-			for (let i = lightsWithHeading.length - sampleCount; i < lightsWithHeading.length; i++) {
-				const rad = (lightsWithHeading[i].heading * Math.PI) / 180;
-				sinSum += Math.sin(rad);
-				cosSum += Math.cos(rad);
-			}
-			const meanRad = Math.atan2(sinSum / sampleCount, cosSum / sampleCount);
-			let tailMean = (meanRad * 180) / Math.PI;
-			if (tailMean < 0) tailMean += 360;
-			const diffToWest = Math.min(Math.abs(tailMean - 270), 360 - Math.abs(tailMean - 270));
-			if (diffToWest <= 20) {
-				lightsWithHeading = lightsWithHeading.map((p) => ({ ...p, heading: (p.heading + 180) % 360 }));
-			}
-		}
+		const lightsWithHeading = this.addHeadingToPoints(lightPoints);
 
 		// Add properties to lights, alternating between yellow and yellow-green-uni types
 		return lightsWithHeading.map((light, index): BarsLightPoint => {

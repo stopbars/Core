@@ -2,6 +2,7 @@
 import { RoleService, StaffRole } from './roles';
 import { AuthService } from './auth';
 import { PostHogService } from './posthog';
+import { HttpError } from './errors';
 
 import { DatabaseSessionService } from './database-session';
 
@@ -36,7 +37,7 @@ export class UserService {
 		// Check if user has permission
 		const hasPermission = await this.roles.hasPermission(userId, StaffRole.LEAD_DEVELOPER);
 		if (!hasPermission) {
-			throw new Error('Unauthorized: Only lead developers can access user management');
+			throw new HttpError(403, 'Forbidden: Only lead developers can access user management');
 		}
 
 		const offset = (page - 1) * limit;
@@ -94,7 +95,7 @@ export class UserService {
 				total: countResult.results[0]?.count || 0,
 			};
 		} catch {
-			throw new Error('Failed to fetch users');
+			throw new HttpError(500, 'Failed to fetch users');
 		}
 	}
 
@@ -103,7 +104,7 @@ export class UserService {
 		// Check if user has permission
 		const hasPermission = await this.roles.hasPermission(userId, StaffRole.LEAD_DEVELOPER);
 		if (!hasPermission) {
-			throw new Error('Unauthorized: Only lead developers can search users');
+			throw new HttpError(403, 'Forbidden: Only lead developers can search users');
 		}
 
 		try {
@@ -154,7 +155,7 @@ export class UserService {
 				last_login: u.last_login,
 			}));
 		} catch {
-			throw new Error('Failed to search users');
+			throw new HttpError(500, 'Failed to search users');
 		}
 	}
 
@@ -163,7 +164,7 @@ export class UserService {
 		// Check if user has permission
 		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.LEAD_DEVELOPER);
 		if (!hasPermission) {
-			throw new Error('Unauthorized: Only lead developers can delete users');
+			throw new HttpError(403, 'Forbidden: Only lead developers can delete users');
 		}
 
 		try {
@@ -173,12 +174,12 @@ export class UserService {
 			]);
 			const userToDelete = userToDeleteResult.results[0];
 			if (!userToDelete) {
-				throw new Error('User not found');
+				throw new HttpError(404, 'User not found');
 			}
 			// Use the existing delete method in AuthService
 			const deleted = await this.auth.deleteUserAccount(userToDelete.vatsim_id);
 			if (!deleted) {
-				throw new Error('Failed to delete user');
+				throw new HttpError(500, 'Failed to delete user');
 			}
 			try {
 				this.posthog?.track('Admin Deleted User', { userId, requestingUserId });
@@ -188,7 +189,7 @@ export class UserService {
 			return true;
 		} catch (e) {
 			console.error('Failed to delete user', e);
-			throw new Error('Failed to delete user');
+			throw new HttpError(500, 'Failed to delete user');
 		}
 	}
 
@@ -197,7 +198,7 @@ export class UserService {
 		// Check if user has permission
 		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.LEAD_DEVELOPER);
 		if (!hasPermission) {
-			throw new Error('Unauthorized: Only lead developers can refresh user API tokens');
+			throw new HttpError(403, 'Forbidden: Only lead developers can refresh user API tokens');
 		}
 
 		try {
@@ -205,7 +206,7 @@ export class UserService {
 			const userResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [vatsimId]);
 			const user = userResult.results[0];
 			if (!user) {
-				throw new Error('User not found');
+				throw new HttpError(404, 'User not found');
 			}
 			// Use the auth service to regenerate the API key
 			const newApiKey = await this.auth.regenerateApiKey(user.id);
@@ -217,10 +218,8 @@ export class UserService {
 			return newApiKey;
 		} catch (error) {
 			console.error('Error refreshing user API token:', error);
-			if (error instanceof Error && error.message === 'User not found') {
-				throw error;
-			}
-			throw new Error(`Failed to refresh user API token: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			if (error instanceof HttpError) throw error;
+			throw new HttpError(500, `Failed to refresh user API token: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		}
 	}
 }
