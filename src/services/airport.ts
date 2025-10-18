@@ -168,14 +168,25 @@ export class AirportService {
 		const airportFromDb = airportResult.results[0];
 
 		if (airportFromDb) {
-			// Bbox is required; fetch now if missing and surface 503 if still unavailable.
 			if (
 				airportFromDb.bbox_min_lat == null ||
 				airportFromDb.bbox_min_lon == null ||
 				airportFromDb.bbox_max_lat == null ||
 				airportFromDb.bbox_max_lon == null
 			) {
-				await this.fetchAndStoreBoundingBox(uppercaseIcao);
+				try {
+					await this.fetchAndStoreBoundingBox(uppercaseIcao);
+				} catch (err) {
+					try {
+						this.posthog?.track('Airport Bounding Box Unavailable', {
+							source: 'db-cache-miss',
+							icao: uppercaseIcao,
+							error: err instanceof Error ? err.message : String(err),
+						});
+					} catch {
+						/* ignore analytics errors */
+					}
+				}
 				const reread = await this.dbSession.executeRead<{
 					icao: string;
 					latitude: number | null;
@@ -188,14 +199,6 @@ export class AirportService {
 					bbox_max_lon: number | null;
 				}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
 				if (reread.results[0]) Object.assign(airportFromDb, reread.results[0]);
-				if (
-					airportFromDb.bbox_min_lat == null ||
-					airportFromDb.bbox_min_lon == null ||
-					airportFromDb.bbox_max_lat == null ||
-					airportFromDb.bbox_max_lon == null
-				) {
-					throw new HttpError(503, 'Bounding box unavailable');
-				}
 			}
 			const runwaysResult = await this.dbSession.executeRead<{
 				length_ft: string;
@@ -246,8 +249,20 @@ export class AirportService {
 				airport.continent,
 			]);
 
-			// Attempt bbox fetch (mandatory)
-			await this.fetchAndStoreBoundingBox(uppercaseIcao);
+			// Attempt bbox fetch; continue even if unavailable
+			try {
+				await this.fetchAndStoreBoundingBox(uppercaseIcao);
+			} catch (err) {
+				try {
+					this.posthog?.track('Airport Bounding Box Unavailable', {
+						source: 'external-api',
+						icao: uppercaseIcao,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				} catch {
+					/* ignore analytics errors */
+				}
+			}
 
 			// Re-read to include bbox (if stored)
 			const reread = await this.dbSession.executeRead<{
@@ -331,15 +346,6 @@ export class AirportService {
 				});
 			} catch (e) {
 				console.warn('Posthog track failed (Airport Fetched From External API)', e);
-			}
-			// Final check: ensure bbox present after mandatory fetch
-			if (
-				mergedAirport.bbox_min_lat == null ||
-				mergedAirport.bbox_min_lon == null ||
-				mergedAirport.bbox_max_lat == null ||
-				mergedAirport.bbox_max_lon == null
-			) {
-				throw new HttpError(503, 'Bounding box unavailable');
 			}
 			return mergedAirport;
 		} catch (e) {
