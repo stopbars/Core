@@ -597,11 +597,23 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				id: string;
 				name: string;
 			}
+			type DOObject = { id: string; state: unknown; timestamp: number };
+			type AggregatedState = {
+				airport: string;
+				controllers: string[];
+				pilots: string[];
+				objects: DOObject[];
+				offline?: boolean;
+				connections: {
+					controllers: number;
+					pilots: number;
+				};
+			};
 			const activeObjectsResult = await dbContext.db.executeRead<ActiveObjectRow>(
 				"SELECT id, name FROM active_objects WHERE last_updated > datetime('now', '-2 day')",
 			);
 
-			const allStates = await Promise.all(
+			const allStates = await Promise.all<AggregatedState | null>(
 				activeObjectsResult.results.map(async (obj: ActiveObjectRow) => {
 					const id = c.env.BARS.idFromString(obj.id);
 					const durableObj = c.env.BARS.get(id);
@@ -620,7 +632,6 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 							durableObj.fetch(stateRequest),
 							isVatsimRadar ? getLightsByObject(c.env, airportIcao) : Promise.resolve({} as Record<string, RadarLight[]>),
 						]);
-						type DOObject = { id: string; state: unknown; timestamp: number };
 						type DOState = {
 							airport: string;
 							controllers: string[];
@@ -642,13 +653,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-										.filter((o: DOObject) => allowedIds.has(o.id))
-										.map((o: DOObject) => ({
-											id: o.id,
-											state: o.state,
-											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-										}))
+									.filter((o: DOObject) => allowedIds.has(o.id))
+									.map((o: DOObject) => ({
+										id: o.id,
+										state: o.state,
+										timestamp: o.timestamp,
+										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+									}))
 								: [];
 
 							return {
@@ -685,13 +696,19 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 			// Return response with bookmark for consistency
 			if (isVatsimRadar) {
 				// Only include successfully fetched online states (offline excluded above), omitting any offline flag
-				return dbContext.jsonResponse({ states: allStates.filter((s) => Boolean(s)) });
+				return dbContext.jsonResponse({ states: allStates.filter((s): s is AggregatedState => Boolean(s)) });
 			}
 
-			return dbContext.jsonResponse({
-				// Only include airports that are currently online (offline=false) and successfully fetched
-				states: allStates.filter((s) => Boolean(s && (s as { offline?: boolean }).offline === false)),
+			const activeStates = allStates.filter((s): s is AggregatedState => Boolean(s));
+			const visibleStates = activeStates.filter((state) => {
+				const isOffline = state.offline ?? false;
+				if (!isOffline) {
+					return true;
+				}
+				return state.connections.pilots > 0;
 			});
+
+			return dbContext.jsonResponse({ states: visibleStates });
 		} else {
 			const id = c.env.BARS.idFromName(airport);
 			const obj = c.env.BARS.get(id);
@@ -731,13 +748,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-							.filter((o: DOObject) => allowedIds.has(o.id))
-							.map((o: DOObject) => ({
-								id: o.id,
-								state: o.state,
-								timestamp: o.timestamp,
-								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-							}))
+						.filter((o: DOObject) => allowedIds.has(o.id))
+						.map((o: DOObject) => ({
+							id: o.id,
+							state: o.state,
+							timestamp: o.timestamp,
+							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+						}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -2397,21 +2414,21 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 			return c.json({ error: msg }, 400);
 		}
 
-		// const enc = new TextEncoder();
-		// const data = enc.encode(sanitized + '|' + icao.toUpperCase());
-		// const hashBuf = await crypto.subtle.digest('SHA-256', data);
-		// const hashArr = Array.from(new Uint8Array(hashBuf));
-		// const hashHex = hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
-		// const cacheKey = `supports-gen:${icao.toUpperCase()}:${hashHex}`;
-		// const cacheNamespace = 'generation';
-		// const cacheTtlSeconds = 86400;
+		const enc = new TextEncoder();
+		const data = enc.encode(sanitized + '|' + icao.toUpperCase());
+		const hashBuf = await crypto.subtle.digest('SHA-256', data);
+		const hashArr = Array.from(new Uint8Array(hashBuf));
+		const hashHex = hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
+		const cacheKey = `supports-gen:${icao.toUpperCase()}:${hashHex}`;
+		const cacheNamespace = 'generation';
+		const cacheTtlSeconds = 86400;
 
-		// const cacheService = ServicePool.getCache(c.env);
-		// const cached = await cacheService.get<{ supportsXml: string; barsXml: string }>(cacheKey, cacheNamespace).catch(() => null);
-		// if (cached) {
-		// 	c.header('X-Cache-Gen', 'HIT');
-		// 	return c.json(cached);
-		// }
+		const cacheService = ServicePool.getCache(c.env);
+		const cached = await cacheService.get<{ supportsXml: string; barsXml: string }>(cacheKey, cacheNamespace).catch(() => null);
+		if (cached) {
+			c.header('X-Cache-Gen', 'HIT');
+			return c.json(cached);
+		}
 
 		const supportService = ServicePool.getSupport(c.env);
 		const polygonService = ServicePool.getPolygons(c.env);
@@ -2421,7 +2438,7 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 			polygonService.processBarsXML(sanitized, icao),
 		]);
 
-		//cacheService.set(cacheKey, { supportsXml, barsXml }, { ttl: cacheTtlSeconds, namespace: cacheNamespace }).catch(() => { });
+		cacheService.set(cacheKey, { supportsXml, barsXml }, { ttl: cacheTtlSeconds, namespace: cacheNamespace }).catch(() => { });
 		c.header('X-Cache-Gen', 'MISS');
 		return c.json({ supportsXml, barsXml });
 	} catch (error) {
