@@ -2414,21 +2414,21 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 			return c.json({ error: msg }, 400);
 		}
 
-		const enc = new TextEncoder();
-		const data = enc.encode(sanitized + '|' + icao.toUpperCase());
-		const hashBuf = await crypto.subtle.digest('SHA-256', data);
-		const hashArr = Array.from(new Uint8Array(hashBuf));
-		const hashHex = hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
-		const cacheKey = `supports-gen:${icao.toUpperCase()}:${hashHex}`;
-		const cacheNamespace = 'generation';
-		const cacheTtlSeconds = 86400;
+		// const enc = new TextEncoder();
+		// const data = enc.encode(sanitized + '|' + icao.toUpperCase());
+		// const hashBuf = await crypto.subtle.digest('SHA-256', data);
+		// const hashArr = Array.from(new Uint8Array(hashBuf));
+		// const hashHex = hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
+		// const cacheKey = `supports-gen:${icao.toUpperCase()}:${hashHex}`;
+		// const cacheNamespace = 'generation';
+		// const cacheTtlSeconds = 86400;
 
-		const cacheService = ServicePool.getCache(c.env);
-		const cached = await cacheService.get<{ supportsXml: string; barsXml: string }>(cacheKey, cacheNamespace).catch(() => null);
-		if (cached) {
-			c.header('X-Cache-Gen', 'HIT');
-			return c.json(cached);
-		}
+		// const cacheService = ServicePool.getCache(c.env);
+		// const cached = await cacheService.get<{ supportsXml: string; barsXml: string }>(cacheKey, cacheNamespace).catch(() => null);
+		// if (cached) {
+		// 	c.header('X-Cache-Gen', 'HIT');
+		// 	return c.json(cached);
+		// }
 
 		const supportService = ServicePool.getSupport(c.env);
 		const polygonService = ServicePool.getPolygons(c.env);
@@ -2438,7 +2438,7 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 			polygonService.processBarsXML(sanitized, icao),
 		]);
 
-		cacheService.set(cacheKey, { supportsXml, barsXml }, { ttl: cacheTtlSeconds, namespace: cacheNamespace }).catch(() => { });
+		//cacheService.set(cacheKey, { supportsXml, barsXml }, { ttl: cacheTtlSeconds, namespace: cacheNamespace }).catch(() => { });
 		c.header('X-Cache-Gen', 'MISS');
 		return c.json({ supportsXml, barsXml });
 	} catch (error) {
