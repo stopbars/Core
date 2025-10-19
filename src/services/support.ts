@@ -32,10 +32,22 @@ interface AirportData {
 export class SupportService {
 	private airportService: AirportService;
 	private readonly EARTH_RADIUS = 6378137; // Earth radius in meters at equator
+	private readonly cosLatCache = new Map<number, number>();
 
 	constructor(private db: D1Database) {
 		// Pass the required API token parameter
 		this.airportService = new AirportService(db, process.env.AIRPORTDB_API_KEY || '');
+	}
+
+	private getCosineLatitude(lat: number): number {
+		const precisionKey = Math.round(lat * 1e6);
+		const cached = this.cosLatCache.get(precisionKey);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const value = Math.cos((lat * Math.PI) / 180);
+		this.cosLatCache.set(precisionKey, value);
+		return value;
 	}
 
 	private metersToDegreesLat(meters: number): number {
@@ -43,7 +55,8 @@ export class SupportService {
 	}
 
 	private metersToDegreesLon(meters: number, lat: number): number {
-		return meters / ((this.EARTH_RADIUS * Math.cos((lat * Math.PI) / 180) * Math.PI) / 180);
+		const cosLat = this.getCosineLatitude(lat);
+		return meters / ((this.EARTH_RADIUS * cosLat * Math.PI) / 180);
 	}
 
 	/**
@@ -133,8 +146,10 @@ export class SupportService {
 
 		const gridM = 1;
 		const midLat = (minLat + maxLat) * 0.5;
+		const midLatCos = this.getCosineLatitude(midLat);
+		const metersToDegreesLonWithCos = (meters: number, cosLat: number) => meters / ((this.EARTH_RADIUS * cosLat * Math.PI) / 180);
 		const dLat = this.metersToDegreesLat(gridM);
-		const dLon = this.metersToDegreesLon(gridM, midLat);
+		const dLon = metersToDegreesLonWithCos(gridM, midLatCos);
 
 		// pad by half a cell so edges get sampled
 		minLat -= 0.5 * dLat; minLon -= 0.5 * dLon;
@@ -177,13 +192,15 @@ export class SupportService {
 			const meters = s * gridM;
 			const sw = cellCenterToDeg(i0, j0);
 			const latCenter = sw.latC + this.metersToDegreesLat(meters) * 0.5;
-			const lonCenter = sw.lonC + this.metersToDegreesLon(meters, midLat) * 0.5;
+			const lonCenter = sw.lonC + metersToDegreesLonWithCos(meters, midLatCos) * 0.5;
 			out.push({ latitude: latCenter, longitude: lonCenter, width: meters, length: meters, heading: 0 });
 		};
 
 		// state
 		const supports: LightSupport[] = [];
 		const covered: Uint8Array[] = Array.from({ length: rows }, () => new Uint8Array(cols));
+		const scratch: Uint8Array[] = Array.from({ length: rows }, () => new Uint8Array(cols));
+		const candidateCache = new Map<number, Array<{ i0: number; j0: number }>>();
 
 		// allowed sizes in meters, big to small
 		const sizes = [12, 8, 5, 4, 3, 2, 1];
@@ -193,6 +210,23 @@ export class SupportService {
 			// penalty balances toward fewer larger tiles, tweakable
 			const penalty = 0.35; // cells per tile
 			return covCells - penalty * count;
+		};
+
+		const getCandidatesForSize = (s: number) => {
+			let cached = candidateCache.get(s);
+			if (!cached) {
+				const list: Array<{ i0: number; j0: number }> = [];
+				for (let i0 = 0; i0 + s <= rows; i0++) {
+					for (let j0 = 0; j0 + s <= cols; j0++) {
+						if (sumRect(i0, j0, s, s) === s * s) {
+							list.push({ i0, j0 });
+						}
+					}
+				}
+				candidateCache.set(s, list);
+				cached = list;
+			}
+			return cached;
 		};
 
 		// Compute newly covered cells if we place an s by s window at i0, j0
@@ -206,68 +240,72 @@ export class SupportService {
 			return g;
 		};
 
-		// Greedy placement for a fixed size and fixed phase offsets, returns placements and coverage gain
-		const placeForSizePhase = (s: number, offI: number, offJ: number, covIn: Uint8Array[]) => {
-			// work copies
-			const cov = covIn.map(row => row.slice());
-			const placed: Array<{ i0: number, j0: number }> = [];
-
-			// limit candidate set to positions matching the phase, this reduces overlap and speeds selection
-			const candidates: Array<{ i0: number, j0: number }> = [];
-			for (let i0 = offI; i0 + s <= rows; i0++) {
-				if ((i0 - offI) % 1 !== 0) continue;
-				for (let j0 = offJ; j0 + s <= cols; j0++) {
-					if ((j0 - offJ) % 1 !== 0) continue;
-					if (sumRect(i0, j0, s, s) === s * s) candidates.push({ i0, j0 });
+		const markBlock = (grid: Uint8Array[], i0: number, j0: number, s: number) => {
+			for (let i = i0; i < i0 + s; i++) {
+				for (let j = j0; j < j0 + s; j++) {
+					grid[i][j] = 1;
 				}
 			}
+		};
 
-			// greedy loop
+		// Greedy placement for a fixed size and fixed phase offsets, returns placements and coverage gain
+		const placeForSizePhase = (
+			s: number,
+			offI: number,
+			offJ: number,
+			covIn: Uint8Array[],
+			baseCandidates: Array<{ i0: number; j0: number }>,
+		) => {
+			for (let i = 0; i < rows; i++) {
+				scratch[i].set(covIn[i]);
+			}
+
+			const candidates: Array<{ i0: number; j0: number }> = [];
+			for (const candidate of baseCandidates) {
+				if (candidate.i0 < offI || candidate.j0 < offJ) {
+					continue;
+				}
+				candidates.push(candidate);
+			}
+
+			const placed: Array<{ i0: number; j0: number }> = [];
+			let totalGain = 0;
+
 			while (true) {
 				let bestIdx = -1;
 				let bestGain = 0;
 				for (let idx = 0; idx < candidates.length; idx++) {
 					const { i0, j0 } = candidates[idx];
-					// quick reject if any already covered equals s by s then gain cannot beat current best, still we need exact
-					const g = gainAt(i0, j0, s, cov);
+					const g = gainAt(i0, j0, s, scratch);
 					if (g > bestGain) {
 						bestGain = g;
 						bestIdx = idx;
 					}
 				}
-				if (bestIdx < 0 || bestGain === 0) break;
+				if (bestIdx < 0 || bestGain === 0) {
+					break;
+				}
 
 				const { i0, j0 } = candidates[bestIdx];
-				// mark
-				for (let i = i0; i < i0 + s; i++) {
-					for (let j = j0; j < j0 + s; j++) {
-						cov[i][j] = 1;
-					}
-				}
+				markBlock(scratch, i0, j0, s);
 				placed.push({ i0, j0 });
+				totalGain += bestGain;
 
-				// optional pruning, drop any candidate that can no longer add anything
-				// this keeps the loop quick on large masks
 				for (let k = candidates.length - 1; k >= 0; k--) {
 					const c = candidates[k];
-					// fast overlap check, if rectangles overlap and candidate is now fully covered, remove it
 					if (c.i0 < i0 + s && c.i0 + s > i0 && c.j0 < j0 + s && c.j0 + s > j0) {
-						if (gainAt(c.i0, c.j0, s, cov) === 0) {
+						if (gainAt(c.i0, c.j0, s, scratch) === 0) {
 							candidates.splice(k, 1);
 						}
 					}
 				}
 			}
 
-			// compute coverage and score contribution for this phase
-			let newlyCovered = 0;
-			for (let i = 0; i < rows; i++) {
-				for (let j = 0; j < cols; j++) {
-					if (!covIn[i][j] && cov[i][j]) newlyCovered++;
-				}
-			}
-			const sc = scoreOf(newlyCovered, placed.length);
-			return { cov, placed, newlyCovered, score: sc };
+			return {
+				placed,
+				newlyCovered: totalGain,
+				score: scoreOf(totalGain, placed.length),
+			};
 		};
 
 		// Multi phase per size, try a small set of offsets to break aliasing with the boundary
@@ -283,35 +321,28 @@ export class SupportService {
 			const s = sizeM; // 1 m per cell, so s cells
 			if (s > rows || s > cols) continue;
 
-			// quick skip if no fully inside window exists at this size
-			let anyInside = false;
-			for (let i0 = 0; i0 + s <= rows && !anyInside; i0++) {
-				for (let j0 = 0; j0 + s <= cols; j0++) {
-					if (sumRect(i0, j0, s, s) === s * s) { anyInside = true; break; }
-				}
-			}
-			if (!anyInside) continue;
+			const baseCandidates = getCandidatesForSize(s);
+			if (baseCandidates.length === 0) continue;
 
 			const offsI = phaseSet(s);
 			const offsJ = phaseSet(s);
 
-			let best: null | { cov: Uint8Array[], placed: Array<{ i0: number, j0: number }>, score: number } = null;
+			let best: null | { placed: Array<{ i0: number; j0: number }>; score: number } = null;
 
 			for (const oi of offsI) {
 				for (const oj of offsJ) {
-					const trial = placeForSizePhase(s, oi, oj, covered);
+					const trial = placeForSizePhase(s, oi, oj, covered, baseCandidates);
+					if (!trial.placed.length) continue;
 					if (!best || trial.score > best.score) {
-						best = { cov: trial.cov, placed: trial.placed, score: trial.score };
+						best = { placed: trial.placed.slice(), score: trial.score };
 					}
 				}
 			}
 
 			if (best && best.placed.length) {
-				// commit the best phase placements
-				for (let i = 0; i < rows; i++) covered[i] = best.cov[i];
-
-				for (const p of best.placed) {
-					pushSupportFromBlock(p.i0, p.j0, s, supports);
+				for (const placement of best.placed) {
+					markBlock(covered, placement.i0, placement.j0, s);
+					pushSupportFromBlock(placement.i0, placement.j0, s, supports);
 				}
 			}
 		}
@@ -349,7 +380,7 @@ export class SupportService {
 					for (const spt of supports) {
 						// compute if the rectangle is inside this big window in degrees
 						const halfW = this.metersToDegreesLat(spt.width / 2);
-						const halfL = this.metersToDegreesLon(spt.length / 2, midLat);
+						const halfL = metersToDegreesLonWithCos(spt.length / 2, midLatCos);
 						const lat0 = spt.latitude - halfW, lat1 = spt.latitude + halfW;
 						const lon0 = spt.longitude - halfL, lon1 = spt.longitude + halfL;
 						if (!(lat0 >= latMinDeg && lat1 <= latMaxDeg && lon0 >= lonMinDeg && lon1 <= lonMaxDeg)) {
@@ -365,7 +396,7 @@ export class SupportService {
 					const meters = big * gridM;
 					const sw = cellCenterToDeg(i0, j0);
 					const latCenter = sw.latC + this.metersToDegreesLat(meters) * 0.5;
-					const lonCenter = sw.lonC + this.metersToDegreesLon(meters, midLat) * 0.5;
+					const lonCenter = sw.lonC + metersToDegreesLonWithCos(meters, midLatCos) * 0.5;
 
 					kept.push({ latitude: latCenter, longitude: lonCenter, width: meters, length: meters, heading: 0 });
 					supports.length = 0;
