@@ -30,6 +30,7 @@ export interface BarsDBRecord {
 	intensity?: number;
 	directionality?: 'uni-directional' | 'bi-directional';
 	ihp?: boolean; // Whether this is an Intermediate Holding Point or not
+	coordinates?: GeoPoint[]; // Stored division point order for reference
 }
 
 export interface ProcessedBarsObject {

@@ -1,6 +1,6 @@
 import { AirportService } from './airport';
 import { processBarsPolygon, deduplicateTaxiwayPoints } from './bars/handlers';
-import { BarsPolygon, BarsDBRecord, ProcessedBarsObject, BarsLightPoint, LightProperties } from './bars/types';
+import { BarsPolygon, BarsDBRecord, ProcessedBarsObject, BarsLightPoint, LightProperties, GeoPoint } from './bars/types';
 import { calculateDistance } from './bars/geoUtils';
 
 import { DatabaseSessionService } from './database-session';
@@ -128,6 +128,34 @@ export class PolygonService {
 			// Default for other types
 			color = dbResult.color || 'yellow';
 		}
+
+		let coordinates: GeoPoint[] | undefined;
+		if (dbResult.coordinates) {
+			try {
+				const parsed = JSON.parse(dbResult.coordinates);
+				if (Array.isArray(parsed)) {
+					const converted: GeoPoint[] = [];
+					for (const item of parsed) {
+						if (!item) continue;
+						const rawLat = typeof item.lat === 'number' ? item.lat : typeof item.lat === 'string' ? Number(item.lat) : undefined;
+						const rawLonCandidate = item.lon ?? item.lng;
+						const rawLon = typeof rawLonCandidate === 'number'
+							? rawLonCandidate
+							: typeof rawLonCandidate === 'string'
+								? Number(rawLonCandidate)
+								: undefined;
+						if (Number.isFinite(rawLat) && Number.isFinite(rawLon)) {
+							converted.push({ lat: rawLat as number, lon: rawLon as number });
+						}
+					}
+					if (converted.length >= 2) {
+						coordinates = converted;
+					}
+				}
+			} catch {
+				// ignore malformed stored coordinates
+			}
+		}
 		return {
 			id: dbResult.id,
 			type,
@@ -139,7 +167,31 @@ export class PolygonService {
 					? dbResult.directionality
 					: undefined, // normalized
 			ihp: dbResult.ihp === 1 || dbResult.ihp === true, // Add IHP flag
+			coordinates,
 		};
+	}
+
+	private alignPolygonPointOrder(points: GeoPoint[], reference?: GeoPoint[]): GeoPoint[] {
+		if (!reference || reference.length < 2 || points.length < 2) {
+			return points;
+		}
+
+		const firstPoint = points[0];
+		const lastPoint = points[points.length - 1];
+		const firstRef = reference[0];
+		const lastRef = reference[reference.length - 1];
+
+		const sameOrientationDistance =
+			calculateDistance(firstPoint, firstRef) + calculateDistance(lastPoint, lastRef);
+		const flippedOrientationDistance =
+			calculateDistance(firstPoint, lastRef) + calculateDistance(lastPoint, firstRef);
+
+		// If aligning start->start and end->end is significantly worse than the flipped pairing, reverse the order
+		if (flippedOrientationDistance + 1 < sameOrientationDistance) {
+			return [...points].reverse();
+		}
+
+		return points;
 	}
 
 	/**
@@ -405,8 +457,11 @@ export class PolygonService {
 					continue;
 				}
 
+				const orderedPoints = this.alignPolygonPointOrder(polygon.points, dbRecord.coordinates);
+				const polygonForProcessing = orderedPoints === polygon.points ? polygon : { ...polygon, points: orderedPoints };
+
 				// Process the polygon based on its type
-				const processedObject = await processBarsPolygon(polygon, dbRecord);
+				const processedObject = await processBarsPolygon(polygonForProcessing, dbRecord);
 
 				if (processedObject) {
 					processedObjects.push(processedObject);

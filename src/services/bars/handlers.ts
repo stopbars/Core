@@ -20,41 +20,59 @@ export abstract class BarsTypeHandler {
 	protected addHeadingToPoints(points: GeoPoint[], headingAdjustment: number = 0): BarsLightPoint[] {
 		if (points.length < 2) return [];
 
-		const result: BarsLightPoint[] = [];
-
-		// Precompute segment headings to avoid repeated geodesic calculations
-		const segmentHeadings: number[] = new Array(points.length - 1);
+		const segmentHeadings: Array<number | null> = new Array(points.length - 1).fill(null);
 		for (let i = 0; i < points.length - 1; i++) {
-			segmentHeadings[i] = calculateHeading(points[i], points[i + 1]);
+			const heading = calculateHeading(points[i], points[i + 1]);
+			segmentHeadings[i] = Number.isFinite(heading) ? heading : null;
 		}
 
+		const normalizeHeading = (value: number): number => {
+			let normalized = value % 360;
+			if (normalized < 0) normalized += 360;
+			return normalized;
+		};
+
+		const result: BarsLightPoint[] = [];
+		let lastKnownHeading: number | null = null;
+
 		for (let i = 0; i < points.length; i++) {
-			let heading: number;
+			let heading: number | null = null;
 
-			if (i === 0) {
-				heading = segmentHeadings[0];
-			} else if (i === points.length - 1) {
-				heading = segmentHeadings[points.length - 2];
-			} else {
-				const headingFrom = segmentHeadings[i - 1];
-				const headingTo = segmentHeadings[i];
+			// Prefer the segment immediately ahead of this point when available
+			if (i < segmentHeadings.length && segmentHeadings[i] !== null) {
+				heading = segmentHeadings[i];
+			}
 
-				const diff = Math.abs(headingFrom - headingTo);
-				if (diff >= 180) {
-					const adjustedHeadingTo = headingTo < headingFrom ? headingTo + 360 : headingTo;
-					const adjustedHeadingFrom = headingFrom < headingTo ? headingFrom + 360 : headingFrom;
-					heading = ((adjustedHeadingFrom + adjustedHeadingTo) / 2) % 360;
-				} else {
-					heading = (headingFrom + headingTo) / 2;
+			// If no forward segment heading, look backward for the most recent valid heading
+			if (heading === null) {
+				for (let j = Math.min(i - 1, segmentHeadings.length - 1); j >= 0; j--) {
+					if (segmentHeadings[j] !== null) {
+						heading = segmentHeadings[j];
+						break;
+					}
 				}
 			}
 
-			heading = (heading + headingAdjustment) % 360;
-			if (heading < 0) heading += 360;
+			// As a last resort, look forward along the remaining segments
+			if (heading === null) {
+				for (let j = i + 1; j < segmentHeadings.length; j++) {
+					if (segmentHeadings[j] !== null) {
+						heading = segmentHeadings[j];
+						break;
+					}
+				}
+			}
+
+			if (heading === null) {
+				heading = lastKnownHeading ?? 0;
+			}
+
+			const adjustedHeading = normalizeHeading(heading + headingAdjustment);
+			lastKnownHeading = adjustedHeading;
 
 			result.push({
 				...points[i],
-				heading,
+				heading: adjustedHeading,
 			});
 		}
 
@@ -77,15 +95,19 @@ export class StopbarHandler extends BarsTypeHandler {
 
 		// First derive along-line headings without any adjustment
 		const alongHeadings = this.addHeadingToPoints(lightPoints, 0);
-
 		const isBiDirectional = dbRecord.directionality === 'bi-directional' || !dbRecord.directionality;
 
-		const lightsWithHeading: BarsLightPoint[] = alongHeadings.map((p) => {
-			const seg = ((p.heading % 360) + 360) % 360; // along-line heading
-			const perpRight = (seg + 90) % 360; // geometrical right of line
-			const perpLeft = (seg + 270) % 360; // geometrical left of line
-			// uni -> face right edge always
-			// bi  -> keep previous deterministic choice (south/west half) for stability
+		const normalizeHeading = (value: number): number => {
+			let normalized = value % 360;
+			if (normalized < 0) normalized += 360;
+			return normalized;
+		};
+
+		const lightsWithHeading: BarsLightPoint[] = alongHeadings.map((p): BarsLightPoint => {
+			const seg = normalizeHeading(p.heading);
+			const perpRight = normalizeHeading(seg + 90);
+			const perpLeft = normalizeHeading(seg - 90);
+
 			let chosen: number;
 			if (!isBiDirectional) {
 				chosen = perpRight;
@@ -93,7 +115,14 @@ export class StopbarHandler extends BarsTypeHandler {
 				const candidateSouthWest = perpRight >= 180 ? perpRight : perpLeft >= 180 ? perpLeft : perpRight;
 				chosen = candidateSouthWest;
 			}
-			return { ...p, heading: chosen };
+
+			chosen = normalizeHeading(chosen + 180);
+
+			return {
+				lat: p.lat,
+				lon: p.lon,
+				heading: chosen,
+			};
 		});
 
 		// Add properties to base stopbar lights
@@ -114,7 +143,7 @@ export class StopbarHandler extends BarsTypeHandler {
 
 		// IHP lights (inherit chosen heading at center)
 		if (dbRecord.ihp) {
-			const ihpLights = this.generateIHPLights(lightPoints, lightsWithHeading, 0, dbRecord);
+			const ihpLights = this.generateIHPLights(lightPoints, alongHeadings, lightsWithHeading, dbRecord);
 			allLights = [...allLights, ...ihpLights];
 		}
 
@@ -136,8 +165,8 @@ export class StopbarHandler extends BarsTypeHandler {
 	 */
 	private generateIHPLights(
 		points: GeoPoint[],
+		alongHeadings: BarsLightPoint[],
 		lightsWithHeading: BarsLightPoint[],
-		headingAdjustment: number,
 		dbRecord: BarsDBRecord,
 	): BarsLightPoint[] {
 		if (points.length < 2 || lightsWithHeading.length < 2) return [];
@@ -154,11 +183,9 @@ export class StopbarHandler extends BarsTypeHandler {
 
 		// Use heading from the closest stopbar light
 		const centerStopbarLight = lightsWithHeading[centerIndex];
+		const centerAlongHeading = alongHeadings[centerIndex];
 
-		// The stopbar lights point perpendicular to the stopbar line
-		// So the stopbar line direction is 90 degrees off from the light heading
-		const stopbarLightHeading = centerStopbarLight.heading;
-		const stopbarDirection = (stopbarLightHeading - 90) % 360;
+		const stopbarDirection = centerAlongHeading?.heading ?? centerStopbarLight.heading;
 
 		// Randomly decide which side of the stopbar to place the IHP lights
 		// This creates variation in the appearance of IHPs across an airport
@@ -167,7 +194,7 @@ export class StopbarHandler extends BarsTypeHandler {
 
 		// Direction to offset the IHP lights from the stopbar
 		// Either 90 degrees clockwise or 90 degrees counterclockwise from stopbar direction
-		const offsetDirection = placeOnRightSide ? (stopbarDirection + 90) % 360 : (stopbarDirection - 90) % 360;
+		const offsetDirection = placeOnRightSide ? (stopbarDirection + 90) % 360 : (stopbarDirection + 270) % 360;
 
 		// Create the center IHP light
 		// It's offset 0.7m from the center of the stopbar in the offset direction
@@ -185,7 +212,7 @@ export class StopbarHandler extends BarsTypeHandler {
 		[leftIhpPoint, centerIhpPoint, rightIhpPoint].forEach((point) => {
 			ihpLights.push({
 				...point,
-				heading: centerStopbarLight.heading, // Same heading as the stopbar light
+				heading: centerStopbarLight.heading,
 				properties: {
 					type: 'stopbar',
 					color: 'yellow', // IHP lights are always yellow
@@ -281,7 +308,7 @@ export class Lead_onHandler extends BarsTypeHandler {
 		// Generate points along the line with 12-meter spacing
 		const lightPoints = generateEquidistantPoints(points, LEAD_ON_SPACING);
 
-		const lightsWithHeading = this.addHeadingToPoints(lightPoints);
+		const lightsWithHeading = this.addHeadingToPoints(lightPoints, 180);
 
 		// Add properties to lights, alternating between yellow and yellow-green-uni types
 		return lightsWithHeading.map((light, index): BarsLightPoint => {
