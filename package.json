@@ -28,7 +28,7 @@
 	},
 	"dependencies": {
 		"geolib": "^3.3.4",
-		"hono": "^4.9.12",
+		"hono": "^4.10.1",
 		"nanoid": "^5.1.6",
 		"swagger-jsdoc": "^6.2.8"
 	}
