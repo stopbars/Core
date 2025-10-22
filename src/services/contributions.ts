@@ -96,33 +96,18 @@ export class ContributionService {
 				.replace(/>\s+</g, '><');
 		const normalizedXml = normalize(trimmedXml);
 
-		// Compute SHA-256 hash of normalized XML (hex)
-		const encoder = new TextEncoder();
-		const digest = await crypto.subtle.digest('SHA-256', encoder.encode(normalizedXml));
-		const xmlHash = Array.from(new Uint8Array(digest))
-			.map((b) => b.toString(16).padStart(2, '0'))
-			.join('');
-
 		// Prevent duplicate or stolen submissions:
 		const existingForPackage = await this.dbSession.executeRead<{
-			id: string;
-			airport_icao: string;
-			package_name: string;
 			submitted_xml: string;
-			status: 'pending' | 'approved' | 'rejected' | 'outdated';
 		}>(
-			`SELECT id, airport_icao, package_name, submitted_xml, status
+			`SELECT submitted_xml
 			 FROM contributions
 			 WHERE package_name = ? COLLATE NOCASE
 			   AND status IN ('pending','approved')`,
 			[submission.packageName],
 		);
 		for (const row of existingForPackage.results) {
-			const otherHashDigest = await crypto.subtle.digest('SHA-256', encoder.encode(normalize(row.submitted_xml)));
-			const otherHash = Array.from(new Uint8Array(otherHashDigest))
-				.map((b) => b.toString(16).padStart(2, '0'))
-				.join('');
-			if (otherHash === xmlHash) {
+			if (normalize(row.submitted_xml) === normalizedXml) {
 				throw new Error(
 					'Duplicate submission detected: XML matches an existing contribution for the same package. Please submit original work.',
 				);
@@ -394,30 +379,37 @@ export class ContributionService {
 		oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
 		const oneWeekAgoStr = oneWeekAgo.toISOString();
 
-		// Get counts for different statuses
-		const totalResult = await this.dbSession.executeRead<{ count: number }>('SELECT COUNT(*) as count FROM contributions', []);
-		const pendingResult = await this.dbSession.executeRead<{ count: number }>(
-			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['pending'],
-		);
-		const approvedResult = await this.dbSession.executeRead<{ count: number }>(
-			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['approved'],
-		);
-		const rejectedResult = await this.dbSession.executeRead<{ count: number }>(
-			'SELECT COUNT(*) as count FROM contributions WHERE status = ?',
-			['rejected'],
-		);
-		const lastWeekResult = await this.dbSession.executeRead<{ count: number }>(
-			'SELECT COUNT(*) as count FROM contributions WHERE submission_date > ?',
+		const statsResult = await this.dbSession.executeRead<{
+			total: number | null;
+			pending: number | null;
+			approved: number | null;
+			rejected: number | null;
+			lastWeek: number | null;
+		}>(
+			`
+			SELECT
+				COUNT(*) as total,
+				SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+				SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
+				SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected,
+				SUM(CASE WHEN submission_date > ? THEN 1 ELSE 0 END) as lastWeek
+			FROM contributions
+			`,
 			[oneWeekAgoStr],
 		);
+		const row = statsResult.results[0] || {
+			total: 0,
+			pending: 0,
+			approved: 0,
+			rejected: 0,
+			lastWeek: 0,
+		};
 		return {
-			total: totalResult.results[0]?.count || 0,
-			pending: pendingResult.results[0]?.count || 0,
-			approved: approvedResult.results[0]?.count || 0,
-			rejected: rejectedResult.results[0]?.count || 0,
-			lastWeek: lastWeekResult.results[0]?.count || 0,
+			total: row.total || 0,
+			pending: row.pending || 0,
+			approved: row.approved || 0,
+			rejected: row.rejected || 0,
+			lastWeek: row.lastWeek || 0,
 		};
 	}
 	async deleteContribution(id: string, userId: string): Promise<boolean> {
