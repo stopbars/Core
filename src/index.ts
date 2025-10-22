@@ -5183,64 +5183,50 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 		);
 	}
 
-	const healthChecks: Record<string, string> = {};
 	const servicesToCheck = requestedService ? [requestedService] : validServices;
+	const healthChecks = Object.fromEntries(servicesToCheck.map((service) => [service, 'ok'] as const)) as Record<string, string>;
 
-	for (const service of servicesToCheck) {
-		healthChecks[service] = 'ok';
-	}
+	const serviceChecks: Record<(typeof validServices)[number], () => Promise<void>> = {
+		database: async () => {
+			await c.env.DB.prepare('SELECT 1').first();
+		},
+		storage: async () => {
+			const storage = ServicePool.getStorage(c.env);
+			await storage.listFiles(undefined, 1);
+		},
+		vatsim: async () => {
+			const response = await fetch('https://auth.vatsim.net/api/user', {
+				method: 'GET',
+				headers: {
+					Accept: 'application/json',
+					'User-Agent': 'BARS-Health-Check/2.0',
+				},
+			});
 
-	try {
-		if (servicesToCheck.includes('database')) {
-			try {
-				await c.env.DB.prepare('SELECT 1').first();
-			} catch {
-				healthChecks.database = 'outage';
+			if (!response.ok && response.status !== 401) {
+				throw new Error(`VATSIM API returned ${response.status}`);
 			}
-		}
+		},
+		auth: async () => {
+			const auth = ServicePool.getAuth(c.env);
+			await auth.getUserByVatsimId('1658308');
+		},
+	};
 
-		if (servicesToCheck.includes('storage')) {
+	await Promise.all(
+		servicesToCheck.map(async (service) => {
 			try {
-				const storage = ServicePool.getStorage(c.env);
-				await storage.listFiles(undefined, 1);
-			} catch {
-				healthChecks.storage = 'outage';
-			}
-		}
-
-		if (servicesToCheck.includes('vatsim')) {
-			try {
-				const response = await fetch('https://auth.vatsim.net/api/user', {
-					method: 'GET',
-					headers: {
-						Accept: 'application/json',
-						'User-Agent': 'BARS-Health-Check/1.0',
-					},
-					signal: AbortSignal.timeout(5000),
-				});
-
-				if (!response.ok && response.status !== 401) {
-					throw new Error(`VATSIM API returned ${response.status}`);
-				}
+				await serviceChecks[service as (typeof validServices)[number]]();
 			} catch (error) {
-				console.error('VATSIM health check failed:', error);
-				healthChecks.vatsim = 'outage';
+				if (service === 'vatsim') {
+					console.error('VATSIM health check failed:', error);
+				} else {
+					console.error(`${service} health check failed`, error);
+				}
+				healthChecks[service] = 'outage';
 			}
-		}
-
-		if (servicesToCheck.includes('auth')) {
-			try {
-				const auth = ServicePool.getAuth(c.env);
-				await auth.getUserByVatsimId('1658308');
-			} catch {
-				healthChecks.auth = 'outage';
-			}
-		}
-
-		// Stats service removed
-	} catch {
-		console.error('Health check error');
-	}
+		}),
+	);
 
 	const hasOutages = Object.values(healthChecks).some((status) => status === 'outage');
 	const statusCode = hasOutages ? 503 : 200;
