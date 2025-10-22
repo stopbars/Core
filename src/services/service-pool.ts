@@ -81,7 +81,7 @@ export const ServicePool = (() => {
 		},
 		getID(env: Env) {
 			if (!id) {
-				id = new IDService(env.DB);
+				id = new IDService();
 			}
 			return id;
 		},

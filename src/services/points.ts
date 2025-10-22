@@ -49,12 +49,6 @@ export class PointsService {
 		id: string;
 		airportId: string;
 	}>;
-	private stmtInsert: PreparedStatement<
-		{
-			coordinates: string;
-			createdAt: string;
-		} & Omit<Point, 'coordinates' | 'createdAt' | 'updatedAt'>
-	>;
 	private stmtUpdate: PreparedStatement<{
 		id: string;
 		airportId: string;
@@ -88,28 +82,6 @@ export class PointsService {
 				WHERE id = ? AND airport_id = ?;`,
 			['id', 'airportId'],
 		);
-		this.stmtInsert = this.dbSession.prepare(
-			`INSERT
-				INTO points (
-					id, airport_id, type, name, coordinates, directionality,
-					color, elevated, ihp, created_at, updated_at, created_by
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-			[
-				'id',
-				'airportId',
-				'type',
-				'name',
-				'coordinates',
-				'directionality',
-				'color',
-				'elevated',
-				'ihp',
-				'createdAt',
-				'createdAt',
-				'createdBy',
-			],
-		);
 		this.stmtUpdate = this.dbSession.prepare(
 			`UPDATE points
 				SET
@@ -134,16 +106,13 @@ export class PointsService {
 			throw new HttpError(403, 'Forbidden: You do not have permission to modify this airport');
 		}
 
-		// Generate unique BARS ID
-		const barsId = await this.idService.generateBarsId();
-
 		// Validate and normalize point data (coordinates array)
 		this.validatePoint(point);
 
 		const now = new Date().toISOString();
 		const newPoint: Point = {
 			...point,
-			id: barsId,
+			id: '',
 			airportId,
 			createdAt: now,
 			updatedAt: now,
@@ -151,28 +120,38 @@ export class PointsService {
 		};
 
 		// Insert into database
-		await this.dbSession.executeWrite(
-			`
-				INSERT INTO points (
+		for (let attempt = 0; attempt < 8; attempt++) {
+			const barsId = await this.idService.generateBarsId();
+			try {
+				const result = await this.dbSession.executeWrite(`
+			INSERT OR IGNORE INTO points (
 				id, airport_id, type, name, coordinates, directionality,
 				color, elevated, ihp, created_at, updated_at, created_by
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`,
-			[
-				newPoint.id,
-				airportId,
-				newPoint.type,
-				newPoint.name,
-				JSON.stringify(newPoint.coordinates),
-				newPoint.directionality || null,
-				newPoint.color || null,
-				newPoint.elevated || false,
-				newPoint.ihp || false,
-				newPoint.createdAt,
-				newPoint.updatedAt,
-				newPoint.createdBy,
-			],
-		);
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, [
+					barsId,
+					airportId,
+					newPoint.type,
+					newPoint.name,
+					JSON.stringify(newPoint.coordinates),
+					newPoint.directionality || null,
+					newPoint.color || null,
+					newPoint.elevated || false,
+					newPoint.ihp || false,
+					newPoint.createdAt,
+					newPoint.updatedAt,
+					newPoint.createdBy,
+				]);
+
+				if (result.meta?.changes === 1) {
+					newPoint.id = barsId;
+					break;
+				}
+			} catch (e) {
+				// Retry if unique constraint failed (very very rare)
+				console.warn(`Attempt ${attempt + 1} to create point with unique ID failed`, e);
+			}
+		}
 
 		try {
 			this.posthog?.track('Point Created', { airportId, userId, type: point.type });
@@ -303,23 +282,57 @@ export class PointsService {
 
 		const now = new Date().toISOString();
 
-		const createdPoints: Point[] = await Promise.all(
-			(changeset.create ?? []).map(async (data) => ({
+		const createdPoints: Point[] = [];
+		for (const data of changeset.create ?? []) {
+			const point: Point = {
 				...data,
-				id: await this.idService.generateBarsId(),
+				id: '',
 				airportId,
 				createdAt: now,
 				updatedAt: now,
 				createdBy: userId,
-			})),
-		);
+			};
+			let inserted = false;
+			for (let attempt = 0; attempt < 8; attempt++) {
+				const barsId = await this.idService.generateBarsId();
+				try {
+					const result = await this.dbSession.executeWrite(
+						`
+						INSERT OR IGNORE INTO points (
+							id, airport_id, type, name, coordinates, directionality,
+							color, elevated, ihp, created_at, updated_at, created_by
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+						`,
+						[
+							barsId,
+							airportId,
+							point.type,
+							point.name,
+							JSON.stringify(point.coordinates),
+							point.directionality || null,
+							point.color || null,
+							point.elevated || false,
+							point.ihp || false,
+							point.createdAt,
+							point.updatedAt,
+							point.createdBy,
+						],
+					);
 
-		const inserts = createdPoints.map((point) =>
-			this.stmtInsert.bindAll({
-				...point,
-				coordinates: JSON.stringify(point.coordinates),
-			}),
-		);
+					if (result.meta?.changes === 1) {
+						point.id = barsId;
+						createdPoints.push(point);
+						inserted = true;
+						break;
+					}
+				} catch (e) {
+					console.warn(`Attempt ${attempt + 1} to create point with unique ID failed`, e);
+				}
+			}
+			if (!inserted) {
+				throw new HttpError(500, 'Failed to create point with unique ID');
+			}
+		}
 		const updates = modifiedPoints.map((point) =>
 			this.stmtUpdate.bindAll({
 				id: point.id,
@@ -335,7 +348,7 @@ export class PointsService {
 		);
 		const deletes = (changeset.delete ?? []).map((id) => this.stmtDelete.bindAll({ id, airportId }));
 
-		await this.dbSession.executeBatch(inserts.concat(updates).concat(deletes));
+		await this.dbSession.executeBatch(updates.concat(deletes));
 
 		try {
 			this.posthog?.track('Points Changeset Applied', {

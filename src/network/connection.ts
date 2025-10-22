@@ -502,7 +502,7 @@ export class Connection {
 	private async getOfflineStateFromPoints(airport: string): Promise<AirportObject[]> {
 		try {
 			// Create the necessary services to fetch points
-			const idService = new IDService(this.env.DB);
+			const idService = new IDService();
 			const divisions = new DivisionService(this.env.DB);
 			const pointsService = new PointsService(this.env.DB, idService, divisions, this.auth);
 
