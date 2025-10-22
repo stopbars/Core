@@ -51,9 +51,7 @@ export class AuthService {
 		const existingUser = existingUserResult.results[0];
 
 		if (existingUser) {
-			await this.updateUserLastLogin(existingUser.id);
-			await this.syncUserLocationFields(existingUser.id, vatsimUser);
-			const refreshed = await this.getUserByVatsimId(vatsimUser.id);
+			const refreshed = await this.refreshLoginMetadata(existingUser.id, vatsimUser);
 			return { user: refreshed || existingUser, created: false };
 		}
 
@@ -105,7 +103,7 @@ export class AuthService {
 			},
 			vatsimUser,
 		);
-		const norm = (s?: string) => (typeof s === 'string' && s.trim().length > 0 ? s.trim() : null);
+		const { regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName } = this.normalizeLocationFields(vatsimUser);
 		const result = await this.dbSession.executeWrite(
 			'INSERT INTO users (vatsim_id, api_key, email, full_name, display_mode, display_name, region_id, region_name, division_id, division_name, subdivision_id, subdivision_name, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
 			[
@@ -115,12 +113,12 @@ export class AuthService {
 				fullName,
 				displayMode,
 				displayName,
-				norm(vatsimUser.region?.id),
-				norm(vatsimUser.region?.name),
-				norm(vatsimUser.division?.id),
-				norm(vatsimUser.division?.name),
-				norm(vatsimUser.subdivision?.id),
-				norm(vatsimUser.subdivision?.name),
+				regionId,
+				regionName,
+				divisionId,
+				divisionName,
+				subdivisionId,
+				subdivisionName,
 				new Date().toISOString(),
 				new Date().toISOString(),
 			],
@@ -133,14 +131,11 @@ export class AuthService {
 	}
 
 	async syncUserLocationFields(userId: number, vatsimUser: VatsimUser) {
-		// Normalize empty strings to null to avoid wiping existing values
-		const norm = (s?: string) => (typeof s === 'string' && s.trim().length > 0 ? s.trim() : null);
-		const regionId = norm(vatsimUser.region?.id);
-		const regionName = norm(vatsimUser.region?.name);
-		const divisionId = norm(vatsimUser.division?.id);
-		const divisionName = norm(vatsimUser.division?.name);
-		const subdivisionId = norm(vatsimUser.subdivision?.id);
-		const subdivisionName = norm(vatsimUser.subdivision?.name);
+		const { regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName } = this.normalizeLocationFields(vatsimUser);
+
+		if ([regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName].every((value) => value === null)) {
+			return;
+		}
 
 		// Only update when new values are present; do not overwrite with nulls
 		await this.dbSession.executeWrite(
@@ -180,25 +175,33 @@ export class AuthService {
 	}
 
 	async getUserByApiKey(apiKey: string): Promise<UserRecord | null> {
-		// Use unconstrained read for API key lookups (performance optimization)
-		const result = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE api_key = ?', [apiKey]);
-		const user = result.results[0] || null;
-		if (user) {
-			const banned = await this.isVatsimIdBanned(user.vatsim_id);
-			if (banned) return null;
-		}
-		return user;
+		const result = await this.dbSession.executeRead<UserRecord>(
+			`SELECT u.*
+			 FROM users u
+			 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id
+			 WHERE u.api_key = ?
+			   AND (
+			 	b.vatsim_id IS NULL
+			 	OR (b.expires_at IS NOT NULL AND datetime(b.expires_at) < datetime('now'))
+			   )`,
+			[apiKey],
+		);
+		return result.results[0] || null;
 	}
 
 	async getUserByVatsimId(vatsimId: string): Promise<UserRecord | null> {
-		// Use unconstrained read for VATSIM ID lookups
-		const result = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
-		const user = result.results[0] || null;
-		if (user) {
-			const banned = await this.isVatsimIdBanned(user.vatsim_id);
-			if (banned) return null;
-		}
-		return user;
+		const result = await this.dbSession.executeRead<UserRecord>(
+			`SELECT u.*
+			 FROM users u
+			 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id
+			 WHERE u.vatsim_id = ?
+			   AND (
+			 	b.vatsim_id IS NULL
+			 	OR (b.expires_at IS NOT NULL AND datetime(b.expires_at) < datetime('now'))
+			   )`,
+			[vatsimId],
+		);
+		return result.results[0] || null;
 	}
 
 	// Explicitly fetch user without applying ban filter (for account page visibility)
@@ -267,8 +270,47 @@ export class AuthService {
 		}
 	}
 
-	private async updateUserLastLogin(userId: number) {
-		await this.dbSession.executeWrite('UPDATE users SET last_login = ? WHERE id = ?', [new Date().toISOString(), userId]);
+	private async refreshLoginMetadata(userId: number, vatsimUser: VatsimUser): Promise<UserRecord | null> {
+		const timestamp = new Date().toISOString();
+		const { regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName } = this.normalizeLocationFields(vatsimUser);
+		const result = await this.dbSession.executeWrite(
+			`UPDATE users
+			 SET
+			 	last_login = ?,
+			 	region_id = COALESCE(?, region_id),
+			 	region_name = COALESCE(?, region_name),
+			 	division_id = COALESCE(?, division_id),
+			 	division_name = COALESCE(?, division_name),
+			 	subdivision_id = COALESCE(?, subdivision_id),
+			 	subdivision_name = COALESCE(?, subdivision_name)
+			 WHERE id = ?
+			 RETURNING *`,
+			[timestamp, regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName, userId],
+		);
+		const rows = result.results as unknown as UserRecord[] | null;
+		if (rows && rows[0]) {
+			return rows[0] as UserRecord;
+		}
+		return null;
+	}
+
+	private normalizeLocationFields(vatsimUser: VatsimUser): {
+		regionId: string | null;
+		regionName: string | null;
+		divisionId: string | null;
+		divisionName: string | null;
+		subdivisionId: string | null;
+		subdivisionName: string | null;
+	} {
+		const norm = (s?: string) => (typeof s === 'string' && s.trim().length > 0 ? s.trim() : null);
+		return {
+			regionId: norm(vatsimUser.region?.id),
+			regionName: norm(vatsimUser.region?.name),
+			divisionId: norm(vatsimUser.division?.id),
+			divisionName: norm(vatsimUser.division?.name),
+			subdivisionId: norm(vatsimUser.subdivision?.id),
+			subdivisionName: norm(vatsimUser.subdivision?.name),
+		};
 	}
 
 	async regenerateApiKey(userId: number): Promise<string> {
