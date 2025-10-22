@@ -466,6 +466,12 @@ CREATE INDEX IF NOT EXISTS idx_download_ip_hits_last_seen ON download_ip_hits (
   last_seen
 );
 
+CREATE INDEX IF NOT EXISTS idx_download_ip_hits_cleanup ON download_ip_hits (
+  last_seen,
+  product,
+  version
+);
+
 CREATE INDEX IF NOT EXISTS idx_bans_vatsim_id ON bans (
   vatsim_id
 );
