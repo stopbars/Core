@@ -628,10 +628,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 					});
 
 					try {
-						const [response, lightsByObject] = await Promise.all([
-							durableObj.fetch(stateRequest),
-							isVatsimRadar ? getLightsByObject(c.env, airportIcao) : Promise.resolve({} as Record<string, RadarLight[]>),
-						]);
+						const response = await durableObj.fetch(stateRequest);
 						type DOState = {
 							airport: string;
 							controllers: string[];
@@ -649,6 +646,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 							// For VATSIM Radar, mirror 'all' behavior by excluding offline airports entirely
 							if (isOffline) return null as null;
 
+							const lightsByObject = await getLightsByObject(c.env, airportIcao);
 							const allowedIds = new Set(Object.keys(lightsByObject));
 
 							const objects = Array.isArray(state.objects)
