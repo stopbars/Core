@@ -2,10 +2,16 @@ import { AuthResponse, VatsimUser, VatsimUserResponse } from '../types';
 import { HttpError } from './errors';
 
 export class VatsimService {
+	private userCache = new Map<string, { user: VatsimUser; expiresAt: number }>();
+	private readonly userCacheTtlMs: number;
+
 	constructor(
 		private clientId: string,
 		private clientSecret: string,
-	) {}
+		userCacheTtlMs: number = 30000,
+	) {
+		this.userCacheTtlMs = userCacheTtlMs > 0 ? userCacheTtlMs : 0;
+	}
 
 	async getToken(code: string): Promise<AuthResponse> {
 		const res = await fetch('https://auth.vatsim.net/oauth/token', {
@@ -28,6 +34,16 @@ export class VatsimService {
 	}
 
 	async getUser(token: string): Promise<VatsimUser> {
+		if (this.userCacheTtlMs > 0) {
+			const cached = this.userCache.get(token);
+			if (cached) {
+				if (cached.expiresAt > Date.now()) {
+					return cached.user;
+				}
+				this.userCache.delete(token);
+			}
+		}
+
 		const res = await fetch('https://auth.vatsim.net/api/user', {
 			headers: { Authorization: `Bearer ${token}` },
 		});
@@ -54,7 +70,7 @@ export class VatsimService {
 
 		const userData = (await res.json()) as VatsimUserResponse;
 		const vatsim = userData.data.vatsim || {};
-		return {
+		const user: VatsimUser = {
 			id: userData.data.cid,
 			email: userData.data.personal.email,
 			first_name: userData.data.personal.name_first || undefined,
@@ -67,6 +83,21 @@ export class VatsimService {
 					? { id: vatsim.subdivision?.id ?? '', name: vatsim.subdivision?.name ?? '' }
 					: null,
 		};
+
+		if (this.userCacheTtlMs > 0) {
+			if (this.userCache.size > 1024) {
+				const now = Date.now();
+				for (const [cacheToken, entry] of this.userCache) {
+					if (entry.expiresAt <= now) {
+						this.userCache.delete(cacheToken);
+					}
+					if (this.userCache.size <= 512) break;
+				}
+			}
+			this.userCache.set(token, { user, expiresAt: Date.now() + this.userCacheTtlMs });
+		}
+
+		return user;
 	}
 	async getUserStatus(userId: string): Promise<{ cid: string; callsign: string; type: string } | null> {
 		try {

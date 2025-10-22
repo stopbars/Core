@@ -960,7 +960,7 @@ app.put('/auth/display-mode', rateLimit({ maxRequests: 5 }), async (c) => {
 		const vatsimUser = await vatsim.getUser(vatsimToken);
 		const user = await auth.getUserByVatsimId(vatsimUser.id);
 		if (!user) return dbContext.textResponse('User not found', { status: 404 });
-		await auth.updateDisplayMode(user.id, mode);
+		await auth.updateDisplayMode(user.id, mode, user);
 		return dbContext.jsonResponse({ mode });
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : 'Unknown error';

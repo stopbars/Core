@@ -3,6 +3,8 @@ import { VatsimService } from './vatsim';
 import { DatabaseSessionService } from './database-session';
 import { PostHogService } from './posthog';
 
+type DisplayModeUser = Pick<UserRecord, 'id' | 'vatsim_id' | 'full_name' | 'display_mode' | 'display_name'>;
+
 export class AuthService {
 	private dbSession: DatabaseSessionService;
 
@@ -225,30 +227,27 @@ export class AuthService {
 		return fullName; // fallback
 	}
 
-	async updateDisplayMode(userId: number, mode: number) {
+	async updateDisplayMode(userId: number, mode: number, existing?: DisplayModeUser) {
 		if (![0, 1, 2].includes(mode)) throw new Error('Invalid display mode');
 
 		// Use primary for consistency on write
 		this.dbSession.startSession({ mode: 'first-primary' });
 
-		const current = await this.dbSession.executeRead<UserRecord>(
-			'SELECT id, vatsim_id, email, full_name, display_mode, display_name FROM users WHERE id = ?',
-			[userId],
-		);
-		const user = current.results[0];
+		let user: DisplayModeUser | null = null;
+		if (existing && existing.id === userId) {
+			user = existing;
+		} else {
+			const current = await this.dbSession.executeRead<DisplayModeUser>(
+				'SELECT id, vatsim_id, full_name, display_mode, display_name FROM users WHERE id = ?',
+				[userId],
+			);
+			user = current.results[0] ?? null;
+		}
 		if (!user) return;
 
 		if (user.display_mode === mode) return; // nothing to do
 
-		const fullNameParts = (user.full_name || '').trim().split(/\s+/).filter(Boolean);
-		const vatsimUser: VatsimUser = {
-			id: user.vatsim_id,
-			email: user.email,
-			first_name: fullNameParts[0] || '',
-			last_name: fullNameParts.slice(1).join(' '),
-		};
-
-		const displayName = this.computeDisplayName({ ...user, display_mode: mode } as UserRecord, vatsimUser);
+		const displayName = this.computeDisplayName({ ...user, display_mode: mode } as UserRecord);
 
 		await this.dbSession.executeWrite('UPDATE users SET display_mode = ?, display_name = ? WHERE id = ?', [mode, displayName, userId]);
 	}
