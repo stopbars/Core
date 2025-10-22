@@ -5,6 +5,7 @@ import { PointsService } from '../services/points';
 import { IDService } from '../services/id';
 import { DivisionService } from '../services/divisions';
 import { DatabaseContextFactory } from '../services/database-context';
+import { PostHogService } from '../services/posthog';
 
 const MAX_STATE_SIZE = 1000000; // 1MB limit for persisted payloads
 
@@ -105,6 +106,7 @@ export class Connection {
 		pilots: 0,
 		observers: 0,
 	};
+	private posthog: PostHogService;
 	private lastKnownAirport = 'unknown';
 
 	constructor(
@@ -114,6 +116,7 @@ export class Connection {
 		private state: DurableObjectState,
 	) {
 		this.objectId = state.id.toString();
+		this.posthog = new PostHogService(env);
 		this.loadPersistedState();
 	}
 
@@ -159,6 +162,20 @@ export class Connection {
 			case 'observer':
 				this.connectionCounts.observers = Math.max(0, this.connectionCounts.observers + delta);
 				break;
+		}
+	}
+
+	private emitAnalytics(event: string, properties: Record<string, unknown>) {
+		const filtered: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(properties)) {
+			if (value !== undefined) {
+				filtered[key] = value;
+			}
+		}
+		try {
+			this.posthog.track(event, filtered);
+		} catch {
+			// ignore analytics failures
 		}
 	}
 
@@ -499,7 +516,7 @@ export class Connection {
 							}
 							const removed = this.unregisterSocket(socket);
 							if (removed) {
-								await this.trackDisconnection();
+								await this.trackDisconnection(removed, 'banned');
 							}
 							socket.close(1008, 'Banned');
 							clearInterval(interval);
@@ -529,7 +546,7 @@ export class Connection {
 
 						const removed = this.unregisterSocket(socket);
 						if (removed) {
-							await this.trackDisconnection();
+							await this.trackDisconnection(removed, 'vatsim_offline');
 						}
 						socket.close(1000, 'No longer connected to VATSIM');
 						clearInterval(interval);
@@ -560,7 +577,7 @@ export class Connection {
 
 						const removed = this.unregisterSocket(socket);
 						if (removed) {
-							await this.trackDisconnection();
+							await this.trackDisconnection(removed, 'role_changed');
 						}
 						socket.close(1000, 'Role changed on VATSIM');
 						clearInterval(interval);
@@ -704,7 +721,7 @@ export class Connection {
 		this.startHeartbeat(server);
 
 		// Track connection in background to avoid blocking WS upgrade on slow D1
-		this.trackConnection(clientType).catch((err) => {
+		this.trackConnection(clientType, airport).catch((err) => {
 			console.error('trackConnection failed:', err);
 		});
 
@@ -816,7 +833,7 @@ export class Connection {
 					);
 					const removed = this.unregisterSocket(server);
 					if (removed) {
-						await this.trackDisconnection();
+						await this.trackDisconnection(removed, 'banned');
 					}
 					server.close(1008, 'Banned');
 					return;
@@ -858,7 +875,14 @@ export class Connection {
 						};
 
 						await this.broadcastToControllers(broadcastPacket, server);
-						await this.trackMessage(clientType);
+						this.trackMessage({
+							clientType,
+							messageType: 'STOPBAR_CROSSING',
+							airport,
+							meta: {
+								objectId,
+							},
+						});
 						break;
 					}
 
@@ -913,7 +937,21 @@ export class Connection {
 								timestamp,
 							};
 							await this.broadcast(broadcastPacket, server);
-							await this.trackMessage(clientType);
+							const data = ((packet as Packet).data || {}) as Record<string, unknown>;
+							const patchValue = data.patch as unknown;
+							const meta: Record<string, unknown> = {
+								objectId: typeof data.objectId === 'string' ? data.objectId : undefined,
+								updateMode: patchValue !== undefined ? 'patch' : 'state',
+							};
+							if (patchValue && typeof patchValue === 'object' && !Array.isArray(patchValue)) {
+								meta.patchKeys = Object.keys(patchValue as Record<string, unknown>).length;
+							}
+							this.trackMessage({
+								clientType,
+								messageType: 'STATE_UPDATE',
+								airport: socketInfo.airport,
+								meta,
+							});
 						} catch (updateError) {
 							throw new Error(
 								`State update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
@@ -928,7 +966,7 @@ export class Connection {
 						}
 						const removed = this.unregisterSocket(server);
 						if (removed) {
-							await this.trackDisconnection();
+							await this.trackDisconnection(removed, 'client_close');
 						}
 						server.close(1000, 'Client requested disconnection');
 						break;
@@ -988,7 +1026,7 @@ export class Connection {
 				return;
 			}
 			try {
-				await this.trackDisconnection();
+				await this.trackDisconnection(removed, 'close_event');
 			} catch (e) {
 				console.warn('trackDisconnection failed on close (non-fatal):', e);
 			}
@@ -1008,7 +1046,7 @@ export class Connection {
 				return;
 			}
 			try {
-				await this.trackDisconnection();
+				await this.trackDisconnection(removed, 'socket_error');
 			} catch (e) {
 				console.warn('trackDisconnection failed on error (non-fatal):', e);
 			}
@@ -1017,8 +1055,7 @@ export class Connection {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
-	private async trackConnection(_clientType: ClientType) {
-		void _clientType;
+	private async trackConnection(clientType: ClientType, airport: string) {
 		await this.updateActiveConnections(1);
 
 		// Add this object to active_objects table when first connection is made
@@ -1034,9 +1071,19 @@ export class Connection {
 				console.warn('Failed to upsert active_objects on connect (non-fatal):', e instanceof Error ? e.message : e);
 			}
 		}
+
+		this.emitAnalytics('ws_connection_opened', {
+			airport,
+			clientType,
+			socket_count: this.sockets.size,
+			object_id: this.objectId,
+			controllers_online: this.connectionCounts.controllers,
+			pilots_online: this.connectionCounts.pilots,
+			observers_online: this.connectionCounts.observers,
+		});
 	}
 
-	private async trackDisconnection() {
+	private async trackDisconnection(info: { controllerId: string; type: ClientType; airport: string }, reason?: string) {
 		await this.updateActiveConnections(-1);
 
 		// If no more connections, remove from active_objects
@@ -1049,6 +1096,17 @@ export class Connection {
 				console.warn('Failed to delete active_objects on disconnect (non-fatal):', e instanceof Error ? e.message : e);
 			}
 		}
+
+		this.emitAnalytics('ws_connection_closed', {
+			airport: info.airport,
+			clientType: info.type,
+			reason: reason || 'unspecified',
+			socket_count: this.sockets.size,
+			object_id: this.objectId,
+			controllers_online: this.connectionCounts.controllers,
+			pilots_online: this.connectionCounts.pilots,
+			observers_online: this.connectionCounts.observers,
+		});
 	}
 	private getObjectName(): string {
 		// Create a descriptive name with format: airport/controllerCount/pilotCount/observerCount
@@ -1079,9 +1137,20 @@ export class Connection {
 		}
 	}
 
-	private async trackMessage(_clientType: ClientType) {
-		void _clientType;
-		// TODO add posthog tracking of message types
+	private trackMessage(details: {
+		clientType: ClientType;
+		messageType: Packet['type'];
+		airport: string;
+		meta?: Record<string, unknown>;
+	}) {
+		const props: Record<string, unknown> = {
+			airport: details.airport,
+			clientType: details.clientType,
+			messageType: details.messageType,
+			socket_count: this.sockets.size,
+			...details.meta,
+		};
+		this.emitAnalytics('ws_message', props);
 	}
 
 	private async updateActiveConnections(change: number) {
@@ -1233,12 +1302,15 @@ export class Connection {
 			}
 
 			const patch = packet.data.sharedStatePatch as Record<string, unknown>;
+			const patchKeyCount = Object.keys(patch).length;
+			let patchSize = 0;
 
 			// Validate patch structure and size
 			try {
 				const patchString = JSON.stringify(patch);
+				patchSize = patchString.length;
 				const MAX_PATCH_SIZE = 10240; // 10KB limit
-				if (patchString.length > MAX_PATCH_SIZE) {
+				if (patchSize > MAX_PATCH_SIZE) {
 					throw new Error(`Patch size exceeds maximum allowed size of ${MAX_PATCH_SIZE} characters`);
 				}
 			} catch {
@@ -1259,6 +1331,16 @@ export class Connection {
 
 			// Broadcast to all clients (including sender)
 			this.broadcastSharedState(airport, patch, controllerId);
+
+			this.trackMessage({
+				clientType: 'controller',
+				messageType: 'SHARED_STATE_UPDATE',
+				airport,
+				meta: {
+					patchKeys: patchKeyCount,
+					patchSize,
+				},
+			});
 
 			return updatedState;
 		} catch (error) {
