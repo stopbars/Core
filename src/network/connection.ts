@@ -6,6 +6,8 @@ import { IDService } from '../services/id';
 import { DivisionService } from '../services/divisions';
 import { DatabaseContextFactory } from '../services/database-context';
 
+const MAX_STATE_SIZE = 1000000; // 1MB limit for persisted payloads
+
 // Add recursive merge utility function with safety checks
 function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): unknown {
 	// Prevent infinite recursion and overly deep nesting
@@ -28,39 +30,54 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 		return [...source];
 	}
 
-	// Handle objects - merge properties
-	const result: Record<string, unknown> = { ...(target as Record<string, unknown>) };
-
-	// Limit number of properties to prevent memory issues
+	// Handle objects - lazily clone properties when needed
 	const MAX_PROPERTIES = 100;
 	const sourceKeys = Object.keys(source);
 	if (sourceKeys.length > MAX_PROPERTIES) {
 		throw new Error(`Object has too many properties (${sourceKeys.length} > ${MAX_PROPERTIES})`);
 	}
 
-	for (const key in source) {
-		if (Object.prototype.hasOwnProperty.call(source, key)) {
-			// Validate key is safe
-			if (typeof key !== 'string' || key.length > 100) {
-				throw new Error('Invalid property key');
-			}
+	const targetIsObject = target !== null && typeof target === 'object' && !Array.isArray(target);
+	const targetRecord = targetIsObject ? (target as Record<string, unknown>) : undefined;
+	let result: Record<string, unknown>;
+	let cloned = false;
 
-			const sv = (source as Record<string, unknown>)[key];
-			const rv = result[key];
-			if (
-				typeof sv === 'object' &&
-				sv !== null &&
-				!Array.isArray(sv) &&
-				Object.prototype.hasOwnProperty.call(result, key) &&
-				typeof rv === 'object' &&
-				rv !== null
-			) {
-				// Recursively merge nested objects
-				result[key] = recursivelyMergeObjects(rv, sv, depth + 1);
+	if (targetRecord) {
+		result = targetRecord;
+	} else {
+		result = {};
+		cloned = true;
+	}
+
+	const ensureClone = () => {
+		if (!cloned) {
+			result = { ...targetRecord! };
+			cloned = true;
+		}
+	};
+
+	for (const key of sourceKeys) {
+		if (typeof key !== 'string' || key.length > 100) {
+			throw new Error('Invalid property key');
+		}
+
+		const sv = (source as Record<string, unknown>)[key];
+		const rv = targetRecord ? targetRecord[key] : undefined;
+
+		if (sv && typeof sv === 'object' && !Array.isArray(sv)) {
+			if (rv && typeof rv === 'object' && !Array.isArray(rv)) {
+				const merged = recursivelyMergeObjects(rv, sv, depth + 1);
+				if (merged !== rv) {
+					ensureClone();
+					result[key] = merged;
+				}
 			} else {
-				// For primitives, arrays, or non-existent target properties, just replace
-				result[key] = sv as unknown;
+				ensureClone();
+				result[key] = recursivelyMergeObjects({}, sv, depth + 1);
 			}
+		} else {
+			ensureClone();
+			result[key] = sv;
 		}
 	}
 
@@ -83,6 +100,12 @@ export class Connection {
 	private readonly TWO_MINUTES = 120000; // Add constant at class level
 	private objectId: string; // Store the DO's ID
 	private lastActiveObjectsUpdate = 0; // Throttle D1 updates
+	private connectionCounts: Record<'controllers' | 'pilots' | 'observers', number> = {
+		controllers: 0,
+		pilots: 0,
+		observers: 0,
+	};
+	private lastKnownAirport = 'unknown';
 
 	constructor(
 		private env: Env,
@@ -93,87 +116,178 @@ export class Connection {
 		this.objectId = state.id.toString();
 		this.loadPersistedState();
 	}
-	private async loadPersistedState() {
-		const persisted = await this.state.storage.get('airport_states');
-		if (persisted) {
-			this.airportStates = new Map(
-				Object.entries(persisted).map(([airport, state]) => {
-					const airportState = state as AirportState;
+
+	private registerSocket(socket: WebSocket, info: { controllerId: string; type: ClientType; airport: string; lastHeartbeat: number }) {
+		this.sockets.set(socket, info);
+		this.adjustConnectionCount(info.type, 1);
+		this.lastKnownAirport = info.airport;
+	}
+
+	private unregisterSocket(socket: WebSocket) {
+		const info = this.sockets.get(socket);
+		if (!info) {
+			return undefined;
+		}
+
+		this.adjustConnectionCount(info.type, -1);
+		this.sockets.delete(socket);
+		if (this.sockets.size === 0) {
+			this.lastKnownAirport = 'unknown';
+		} else if (info.airport === this.lastKnownAirport) {
+			this.refreshLastKnownAirport();
+		}
+
+		return info;
+	}
+
+	private refreshLastKnownAirport() {
+		for (const entry of this.sockets.values()) {
+			this.lastKnownAirport = entry.airport;
+			return;
+		}
+		this.lastKnownAirport = 'unknown';
+	}
+
+	private adjustConnectionCount(type: ClientType, delta: number) {
+		switch (type) {
+			case 'controller':
+				this.connectionCounts.controllers = Math.max(0, this.connectionCounts.controllers + delta);
+				break;
+			case 'pilot':
+				this.connectionCounts.pilots = Math.max(0, this.connectionCounts.pilots + delta);
+				break;
+			case 'observer':
+				this.connectionCounts.observers = Math.max(0, this.connectionCounts.observers + delta);
+				break;
+		}
+	}
+
+	private deserializeAirportState(airport: string, stored: unknown): AirportState {
+		const airportState = (stored || {}) as {
+			objects?: Record<string, { id: string; state: unknown; controllerId?: string; timestamp: number }>;
+			lastUpdate?: number;
+			controllers?: string[];
+		};
+
+		return {
+			airport,
+			objects: new Map(
+				Object.entries(airportState.objects || {}).map(([id, obj]) => {
+					const rawState = obj.state;
+					let normalizedState: boolean | Record<string, unknown>;
+					if (typeof rawState === 'boolean') {
+						normalizedState = rawState;
+					} else if (rawState && typeof rawState === 'object' && !Array.isArray(rawState)) {
+						normalizedState = rawState as Record<string, unknown>;
+					} else {
+						normalizedState = {};
+					}
+
 					return [
-						airport,
+						id,
 						{
-							airport,
-							objects: new Map(
-								Object.entries(airportState.objects || {}).map(([id, obj]) => [
-									id,
-									{
-										id,
-										state: obj.state,
-										controllerId: obj.controllerId,
-										timestamp: obj.timestamp,
-									},
-								]),
-							),
-							lastUpdate: airportState.lastUpdate || Date.now(),
-							controllers: new Set(airportState.controllers || []),
+							id,
+							state: normalizedState,
+							controllerId: obj.controllerId,
+							timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
 						},
 					];
 				}),
-			);
-		}
+			),
+			lastUpdate: typeof airportState.lastUpdate === 'number' ? airportState.lastUpdate : Date.now(),
+			controllers: new Set(Array.isArray(airportState.controllers) ? airportState.controllers : []),
+		};
+	}
 
-		// Load shared states
-		const sharedStates = await this.state.storage.get('airport_shared_states');
-		if (sharedStates) {
-			this.airportSharedStates = new Map(Object.entries(sharedStates));
+	private async loadPersistedState() {
+		const states = new Map<string, AirportState>();
+		const sharedStates = new Map<string, Record<string, unknown>>();
+		this.airportStates = states;
+		this.airportSharedStates = sharedStates;
+
+		try {
+			const [stateEntries, sharedEntries] = await Promise.all([
+				this.state.storage.list<unknown>({ prefix: 'airport_state:' }),
+				this.state.storage.list<unknown>({ prefix: 'airport_shared_state:' }),
+			]);
+
+			for (const [key, stored] of stateEntries) {
+				const airport = key.slice('airport_state:'.length);
+				if (!airport) continue;
+				states.set(airport, this.deserializeAirportState(airport, stored));
+			}
+
+			for (const [key, stored] of sharedEntries) {
+				const airport = key.slice('airport_shared_state:'.length);
+				if (!airport) continue;
+				if (stored && typeof stored === 'object') {
+					sharedStates.set(airport, stored as Record<string, unknown>);
+				}
+			}
+		} catch (error) {
+			console.error('Failed to load persisted state:', error);
 		}
 	}
-	private async persistState() {
-		try {
-			const serialized = Object.fromEntries(
-				Array.from(this.airportStates.entries()).map(([airport, state]) => [
-					airport,
+
+	private async persistAirportState(airport: string) {
+		const state = this.airportStates.get(airport);
+		const storageKey = `airport_state:${airport}`;
+
+		if (!state) {
+			try {
+				await this.state.storage.delete(storageKey);
+			} catch (error) {
+				console.error(`Failed to delete airport state for ${airport}:`, error);
+			}
+			return;
+		}
+
+		const serialized = {
+			airport: state.airport,
+			objects: Object.fromEntries(
+				Array.from(state.objects.entries()).map(([id, obj]) => [
+					id,
 					{
-						airport: state.airport,
-						objects: Object.fromEntries(
-							Array.from(state.objects.entries()).map(([id, obj]) => [
-								id,
-								{
-									id: obj.id,
-									state: obj.state,
-									controllerId: obj.controllerId,
-									timestamp: obj.timestamp,
-								},
-							]),
-						),
-						lastUpdate: state.lastUpdate,
-						controllers: Array.from(state.controllers),
+						id: obj.id,
+						state: obj.state,
+						controllerId: obj.controllerId,
+						timestamp: obj.timestamp,
 					},
 				]),
-			);
+			),
+			lastUpdate: state.lastUpdate,
+			controllers: Array.from(state.controllers),
+		};
 
-			// Validate serialized data before persisting
+		try {
 			const serializedString = JSON.stringify(serialized);
-			const MAX_STATE_SIZE = 1000000; // 1MB limit
 			if (serializedString.length > MAX_STATE_SIZE) {
-				console.warn(`State size (${serializedString.length}) exceeds maximum (${MAX_STATE_SIZE}), skipping persistence`);
+				console.warn(
+					`State size (${serializedString.length}) exceeds maximum (${MAX_STATE_SIZE}), skipping persistence for ${airport}`,
+				);
 				return;
 			}
 
-			await this.state.storage.put('airport_states', serialized);
+			await this.state.storage.put(storageKey, serialized);
+		} catch (error) {
+			console.error(`Failed to persist airport state for ${airport}:`, error);
+		}
+	}
 
-			// Persist shared states with validation
-			const sharedStatesSerialized = Object.fromEntries(this.airportSharedStates.entries());
-			const sharedStatesString = JSON.stringify(sharedStatesSerialized);
-			if (sharedStatesString.length > MAX_STATE_SIZE) {
-				console.warn(`Shared state size (${sharedStatesString.length}) exceeds maximum (${MAX_STATE_SIZE}), skipping persistence`);
+	private async persistSharedState(airport: string) {
+		const sharedState = this.airportSharedStates.get(airport) ?? {};
+		try {
+			const serializedString = JSON.stringify(sharedState);
+			if (serializedString.length > MAX_STATE_SIZE) {
+				console.warn(
+					`Shared state size (${serializedString.length}) exceeds maximum (${MAX_STATE_SIZE}), skipping persistence for ${airport}`,
+				);
 				return;
 			}
 
-			await this.state.storage.put('airport_shared_states', sharedStatesSerialized);
-		} catch {
-			console.error('Failed to persist state:');
-			// Don't throw here to avoid breaking the calling flow
+			await this.state.storage.put(`airport_shared_state:${airport}`, sharedState);
+		} catch (error) {
+			console.error(`Failed to persist shared state for ${airport}:`, error);
 		}
 	}
 
@@ -184,16 +298,15 @@ export class Connection {
 			return;
 		}
 
-		// Validate packet before broadcasting
+		let packetString: string;
 		try {
-			JSON.stringify(packet);
+			packetString = JSON.stringify(packet);
 		} catch (error) {
 			console.error('Failed to serialize packet for broadcast:', error);
 			return;
 		}
 
 		const promises: Promise<void>[] = [];
-		const packetString = JSON.stringify(packet);
 
 		this.sockets.forEach((client, socket) => {
 			if (socket !== sender && socket.readyState === WebSocket.OPEN && client.airport === airport) {
@@ -307,7 +420,7 @@ export class Connection {
 
 			state.lastUpdate = now;
 
-			await this.persistState();
+			await this.persistAirportState(airport);
 			return now; // Return timestamp for broadcasting
 		} catch {
 			console.error(`State update error for controller ${controllerId}`);
@@ -328,7 +441,7 @@ export class Connection {
 				state.lastUpdate = Date.now();
 			}
 
-			await this.persistState();
+			await this.persistAirportState(socketInfo.airport);
 
 			await this.broadcast(
 				{
@@ -384,8 +497,10 @@ export class Connection {
 							if (socketInfo.type === 'controller') {
 								await this.handleControllerDisconnect(socket);
 							}
-							this.sockets.delete(socket);
-							await this.trackDisconnection();
+							const removed = this.unregisterSocket(socket);
+							if (removed) {
+								await this.trackDisconnection();
+							}
 							socket.close(1008, 'Banned');
 							clearInterval(interval);
 							return;
@@ -412,8 +527,10 @@ export class Connection {
 							await this.handleControllerDisconnect(socket);
 						}
 
-						this.sockets.delete(socket);
-						await this.trackDisconnection();
+						const removed = this.unregisterSocket(socket);
+						if (removed) {
+							await this.trackDisconnection();
+						}
 						socket.close(1000, 'No longer connected to VATSIM');
 						clearInterval(interval);
 						return;
@@ -441,8 +558,10 @@ export class Connection {
 							await this.handleControllerDisconnect(socket);
 						}
 
-						this.sockets.delete(socket);
-						await this.trackDisconnection();
+						const removed = this.unregisterSocket(socket);
+						if (removed) {
+							await this.trackDisconnection();
+						}
 						socket.close(1000, 'Role changed on VATSIM');
 						clearInterval(interval);
 						return;
@@ -495,7 +614,8 @@ export class Connection {
 			// Also clear shared state when no controllers are present for 2 minutes
 			this.airportSharedStates.set(airport, {});
 
-			this.persistState();
+			void this.persistAirportState(airport);
+			void this.persistSharedState(airport);
 		}
 	}
 
@@ -573,7 +693,7 @@ export class Connection {
 		server.accept();
 
 		// Initialize socket info with the airport and heartbeat
-		this.sockets.set(server, {
+		this.registerSocket(server, {
 			controllerId: user.vatsim_id,
 			type: clientType,
 			airport: airport,
@@ -597,7 +717,7 @@ export class Connection {
 		// Handle controller connection
 		if (clientType === 'controller') {
 			state.controllers.add(user.vatsim_id);
-			await this.persistState();
+			await this.persistAirportState(airport);
 
 			// Notify others about new controller
 			await this.broadcast(
@@ -694,8 +814,10 @@ export class Connection {
 							timestamp: Date.now(),
 						}),
 					);
-					this.sockets.delete(server);
-					await this.trackDisconnection();
+					const removed = this.unregisterSocket(server);
+					if (removed) {
+						await this.trackDisconnection();
+					}
 					server.close(1008, 'Banned');
 					return;
 				}
@@ -799,15 +921,18 @@ export class Connection {
 						}
 						break;
 
-					case 'CLOSE':
+					case 'CLOSE': {
 						// Handle graceful disconnection
 						if (clientType === 'controller') {
 							await this.handleControllerDisconnect(server);
 						}
-						this.sockets.delete(server);
-						await this.trackDisconnection();
+						const removed = this.unregisterSocket(server);
+						if (removed) {
+							await this.trackDisconnection();
+						}
 						server.close(1000, 'Client requested disconnection');
 						break;
+					}
 
 					case 'SHARED_STATE_UPDATE':
 						// Handle shared state updates
@@ -850,14 +975,18 @@ export class Connection {
 		});
 
 		server.addEventListener('close', async () => {
-			if (this.sockets.get(server)?.type === 'controller') {
+			const info = this.sockets.get(server);
+			if (info?.type === 'controller') {
 				try {
 					await this.handleControllerDisconnect(server);
 				} catch (e) {
 					console.warn('handleControllerDisconnect failed on close (non-fatal):', e);
 				}
 			}
-			this.sockets.delete(server);
+			const removed = this.unregisterSocket(server);
+			if (!removed) {
+				return;
+			}
 			try {
 				await this.trackDisconnection();
 			} catch (e) {
@@ -866,14 +995,18 @@ export class Connection {
 		});
 
 		server.addEventListener('error', async () => {
-			if (this.sockets.get(server)?.type === 'controller') {
+			const info = this.sockets.get(server);
+			if (info?.type === 'controller') {
 				try {
 					await this.handleControllerDisconnect(server);
 				} catch (e) {
 					console.warn('handleControllerDisconnect failed on error (non-fatal):', e);
 				}
 			}
-			this.sockets.delete(server);
+			const removed = this.unregisterSocket(server);
+			if (!removed) {
+				return;
+			}
 			try {
 				await this.trackDisconnection();
 			} catch (e) {
@@ -919,16 +1052,8 @@ export class Connection {
 	}
 	private getObjectName(): string {
 		// Create a descriptive name with format: airport/controllerCount/pilotCount/observerCount
-		const airport = Array.from(this.sockets.values())[0]?.airport || 'unknown';
-		const counts = Array.from(this.sockets.values()).reduce(
-			(acc, client) => {
-				if (client.type === 'controller') acc.controllers++;
-				else if (client.type === 'pilot') acc.pilots++;
-				else if (client.type === 'observer') acc.observers++;
-				return acc;
-			},
-			{ controllers: 0, pilots: 0, observers: 0 },
-		);
+		const airport = this.lastKnownAirport;
+		const counts = this.connectionCounts;
 		return `${airport}/${counts.controllers}/${counts.pilots}/${counts.observers}`;
 	}
 
@@ -1130,7 +1255,7 @@ export class Connection {
 			this.airportSharedStates.set(airport, updatedState as Record<string, unknown>);
 
 			// Persist to storage
-			this.persistState();
+			void this.persistSharedState(airport);
 
 			// Broadcast to all clients (including sender)
 			this.broadcastSharedState(airport, patch, controllerId);
@@ -1153,15 +1278,21 @@ export class Connection {
 			timestamp: Date.now(),
 		};
 
-		// Broadcast to ALL clients connected to this airport (including the sender)
-		const promises: Promise<void>[] = [];
+		let packetString: string;
+		try {
+			packetString = JSON.stringify(packet);
+		} catch (error) {
+			console.error('Failed to serialize shared state packet:', error);
+			return;
+		}
 
+		const promises: Promise<void>[] = [];
 		this.sockets.forEach((client, socket) => {
 			if (socket.readyState === WebSocket.OPEN && client.airport === airport) {
 				promises.push(
 					new Promise((resolve) => {
 						try {
-							socket.send(JSON.stringify(packet));
+							socket.send(packetString);
 						} catch (error) {
 							console.error(
 								`Failed to send packet over WebSocket: ${error instanceof Error ? error.message : String(error)}`,
