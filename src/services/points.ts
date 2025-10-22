@@ -192,7 +192,7 @@ export class PointsService {
 			}
 		});
 		if (Object.keys(processedUpdates).length === 0) {
-			return this.getPoint(pointId) as Promise<Point>;
+			return point;
 		}
 		const fieldMappings: Record<string, string> = {
 			type: 'type',
@@ -259,8 +259,10 @@ export class PointsService {
 			throw new HttpError(403, 'Forbidden: You do not have permission to apply this changeset');
 		}
 
-		const selects = Object.keys(changeset.modify ?? {}).map((id) => this.stmtSelect.bindAll({ id, airportId }));
-		const modifiedPoints = (await this.dbSession.executeBatch(selects))
+		const modifyEntries = Object.entries(changeset.modify ?? {});
+		const selects = modifyEntries.map(([id]) => this.stmtSelect.bindAll({ id, airportId }));
+		const selectResults = await this.dbSession.executeBatch(selects);
+		const modifiedPoints = selectResults
 			.map((result) => {
 				const rows = result.results as unknown as PointRow[] | null;
 				const first = rows && rows[0];
@@ -269,16 +271,21 @@ export class PointsService {
 				}
 				return this.mapPointFromDb(first) as PointData;
 			})
-			.map((basis, i) => ({
-				...basis,
-				...Object.values(changeset.modify!)[i],
-				id: Object.keys(changeset.modify!)[i],
-			}));
+			.map((basis, index) => {
+				const [id, patch] = modifyEntries[index];
+				return {
+					...basis,
+					...patch,
+					id,
+				};
+			});
 
-		([] as PointData[])
-			.concat(changeset.create ?? [])
-			.concat(modifiedPoints)
-			.forEach((point) => this.validatePoint(point));
+		for (const point of changeset.create ?? []) {
+			this.validatePoint(point);
+		}
+		for (const point of modifiedPoints) {
+			this.validatePoint(point);
+		}
 
 		const now = new Date().toISOString();
 
