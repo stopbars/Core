@@ -1163,6 +1163,7 @@ export class Connection {
 		if (request.headers.get('X-Request-Type') === 'get_state') {
 			const url = new URL(request.url);
 			const airport = url.searchParams.get('airport');
+			const forceOffline = url.searchParams.get('offline') === 'true';
 
 			if (!airport) {
 				return new Response(
@@ -1171,6 +1172,23 @@ export class Connection {
 					}),
 					{
 						status: 400,
+						headers: {
+							'Content-Type': 'application/json',
+							'Access-Control-Allow-Origin': '*',
+						},
+					},
+				);
+			}
+
+			if (forceOffline) {
+				const objects = await this.getOfflineStateFromPoints(airport);
+				return new Response(
+					JSON.stringify({
+						airport,
+						objects,
+						offline: true,
+					}),
+					{
 						headers: {
 							'Content-Type': 'application/json',
 							'Access-Control-Allow-Origin': '*',

@@ -556,6 +556,12 @@ app.get('/connect', rateLimit({ maxRequests: 30 }), async (c) => {
  *         required: true
  *         description: ICAO (4 chars) or `all`. Use `vatsimradar` for VATSIM Radar format.
  *         schema: { type: string }
+ *       - in: query
+ *         name: offline
+ *         required: false
+ *         description: Force offline state response regardless of connected controllers
+ *         schema:
+ *           type: boolean
  *     responses:
  *       200:
  *         description: State returned
@@ -564,6 +570,7 @@ app.get('/connect', rateLimit({ maxRequests: 30 }), async (c) => {
  */
 app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 	const airport = c.req.query('airport');
+	const offlineRequested = c.req.query('offline') === 'true';
 	const isVatsimRadar = (airport || '').toLowerCase() === 'vatsimradar';
 	if (!airport) {
 		return c.json(
@@ -720,7 +727,12 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				);
 			}
 
-			const stateRequest = new Request(`https://internal/state?airport=${airport}`, {
+			const stateUrl = new URL('https://internal/state');
+			stateUrl.searchParams.set('airport', airport);
+			if (offlineRequested) {
+				stateUrl.searchParams.set('offline', 'true');
+			}
+			const stateRequest = new Request(stateUrl.toString(), {
 				method: 'GET',
 				headers: new Headers({
 					'X-Request-Type': 'get_state',
