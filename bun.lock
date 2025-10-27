@@ -5,22 +5,22 @@
       "name": "bars-core",
       "dependencies": {
         "geolib": "^3.3.4",
-        "hono": "^4.9.12",
+        "hono": "^4.10.3",
         "nanoid": "^5.1.6",
         "swagger-jsdoc": "^6.2.8",
       },
       "devDependencies": {
-        "@eslint/js": "^9.37.0",
-        "@types/node": "^24.7.2",
+        "@eslint/js": "^9.38.0",
+        "@types/node": "^24.9.1",
         "@types/swagger-jsdoc": "^6.0.4",
-        "eslint": "^9.37.0",
+        "eslint": "^9.38.0",
         "globals": "^16.4.0",
         "jiti": "^2.6.1",
         "prettier": "^3.6.2",
         "ts-node": "^10.9.2",
         "typescript": "^5.9.3",
-        "typescript-eslint": "^8.46.0",
-        "wrangler": "^4.42.2",
+        "typescript-eslint": "^8.46.2",
+        "wrangler": "^4.44.0",
       },
     },
   },
@@ -347,7 +347,7 @@
 
     "has-flag": ["has-flag@4.0.0", "", {}, "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="],
 
-    "hono": ["hono@4.10.2", "", {}, "sha512-p6fyzl+mQo6uhESLxbF5WlBOAJMDh36PljwlKtP5V1v09NxlqGru3ShK+4wKhSuhuYf8qxMmrivHOa/M7q0sMg=="],
+    "hono": ["hono@4.10.3", "", {}, "sha512-2LOYWUbnhdxdL8MNbNg9XZig6k+cZXm5IjHn2Aviv7honhBMOHb+jxrKIeJRZJRmn+htUCKhaicxwXuUDlchRA=="],
 
     "ignore": ["ignore@5.3.2", "", {}, "sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g=="],
 
