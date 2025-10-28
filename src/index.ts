@@ -1856,7 +1856,7 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
  *       404:
  *         description: Division not found
  */
-divisionsApp.get('/:id/airports', withCache(CacheKeys.fromParams('id'), 600, 'divisions'), async (c) => {
+divisionsApp.get('/:id/airports', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const divisions = ServicePool.getDivisions(c.env);
 	const vatsim = ServicePool.getVatsim(c.env);
