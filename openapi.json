@@ -340,6 +340,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "offline",
+            "required": false,
+            "description": "Force offline state response regardless of connected controllers",
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
