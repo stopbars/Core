@@ -53,7 +53,7 @@ export class SupportService {
 	}
 
 	private metersToDegreesLonFromCos(meters: number, cosLat: number): number {
-		return meters * this.metersToDegreesBase / cosLat;
+		return (meters * this.metersToDegreesBase) / cosLat;
 	}
 
 	private metersToDegreesLon(meters: number, lat: number): number {
@@ -141,8 +141,10 @@ export class SupportService {
 		const onSeg = (lat: number, lon: number, ax: number, ay: number, bx: number, by: number): boolean => {
 			const cross = (bx - ax) * (lat - ay) - (by - ay) * (lon - ax);
 			if (Math.abs(cross) > EPS) return false;
-			const minx = Math.min(ax, bx) - EPS, maxx = Math.max(ax, bx) + EPS;
-			const miny = Math.min(ay, by) - EPS, maxy = Math.max(ay, by) + EPS;
+			const minx = Math.min(ax, bx) - EPS,
+				maxx = Math.max(ax, bx) + EPS;
+			const miny = Math.min(ay, by) - EPS,
+				maxy = Math.max(ay, by) + EPS;
 			return lon >= minx && lon <= maxx && lat >= miny && lat <= maxy;
 		};
 
@@ -157,7 +159,7 @@ export class SupportService {
 			for (let i = 0; i < vertexCount; i++) {
 				const yi = ys[i];
 				const yj = yi + edgeDy[i];
-				if ((yi > lat) !== (yj > lat)) {
+				if (yi > lat !== yj > lat) {
 					const xi = xs[i];
 					const candidateLon = xi + edgeDx[i] * (lat - yi) * edgeInvDy[i];
 					if (lon < candidateLon) {
@@ -168,7 +170,10 @@ export class SupportService {
 			return inside;
 		};
 
-		let minLat = ys[0], minLon = xs[0], maxLat = ys[0], maxLon = xs[0];
+		let minLat = ys[0],
+			minLon = xs[0],
+			maxLat = ys[0],
+			maxLon = xs[0];
 		for (let i = 1; i < vertexCount; i++) {
 			const lat = ys[i];
 			const lon = xs[i];
@@ -187,8 +192,10 @@ export class SupportService {
 		const dLon = gridM * degPerMeterLonMid;
 
 		// pad by half a cell so edges get sampled
-		minLat -= 0.5 * dLat; minLon -= 0.5 * dLon;
-		maxLat += 0.5 * dLat; maxLon += 0.5 * dLon;
+		minLat -= 0.5 * dLat;
+		minLon -= 0.5 * dLon;
+		maxLat += 0.5 * dLat;
+		maxLon += 0.5 * dLon;
 
 		const rows = Math.max(1, Math.ceil((maxLat - minLat) / dLat));
 		const cols = Math.max(1, Math.ceil((maxLon - minLon) / dLon));
@@ -213,7 +220,8 @@ export class SupportService {
 			}
 		}
 		const sumRect = (i0: number, j0: number, h: number, w: number) => {
-			const i1 = i0 + h, j1 = j0 + w;
+			const i1 = i0 + h,
+				j1 = j0 + w;
 			return sat[i1][j1] - sat[i0][j1] - sat[i1][j0] + sat[i0][j0];
 		};
 
@@ -348,7 +356,7 @@ export class SupportService {
 			// try four phases, 0, floor(s/2), and two quarter positions, keeps compute modest
 			const p = new Set<number>([0, Math.floor(s / 2), Math.floor(s / 4), Math.floor((3 * s) / 4)]);
 			// clamp into range
-			return Array.from(p).map(v => Math.min(Math.max(v, 0), Math.max(s - 1, 0)));
+			return Array.from(p).map((v) => Math.min(Math.max(v, 0), Math.max(s - 1, 0)));
 		};
 
 		// main loop, largest to smallest
@@ -397,7 +405,10 @@ export class SupportService {
 					let allCovered = true;
 					for (let i = i0; i < i0 + big && allCovered; i++) {
 						for (let j = j0; j < j0 + big; j++) {
-							if (!covered[i][j]) { allCovered = false; break; }
+							if (!covered[i][j]) {
+								allCovered = false;
+								break;
+							}
 						}
 					}
 					if (!allCovered) continue;
@@ -405,8 +416,8 @@ export class SupportService {
 					// unmark the area and re mark with the larger block, and adjust supports list
 					// to keep it simple, we will remove any supports that lie wholly inside the big window,
 					// then add a single big support
-					const latMinDeg = minLat + (i0) * dLat;
-					const lonMinDeg = minLon + (j0) * dLon;
+					const latMinDeg = minLat + i0 * dLat;
+					const lonMinDeg = minLon + j0 * dLon;
 					const latMaxDeg = minLat + (i0 + big) * dLat;
 					const lonMaxDeg = minLon + (j0 + big) * dLon;
 
@@ -416,8 +427,10 @@ export class SupportService {
 						// compute if the rectangle is inside this big window in degrees
 						const halfW = spt.width * degPerMeterLat * 0.5;
 						const halfL = spt.length * degPerMeterLonMid * 0.5;
-						const lat0 = spt.latitude - halfW, lat1 = spt.latitude + halfW;
-						const lon0 = spt.longitude - halfL, lon1 = spt.longitude + halfL;
+						const lat0 = spt.latitude - halfW,
+							lat1 = spt.latitude + halfW;
+						const lon0 = spt.longitude - halfL,
+							lon1 = spt.longitude + halfL;
 						if (!(lat0 >= latMinDeg && lat1 <= latMaxDeg && lon0 >= lonMinDeg && lon1 <= lonMaxDeg)) {
 							kept.push(spt);
 						}

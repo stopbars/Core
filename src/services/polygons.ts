@@ -75,13 +75,7 @@ export class PolygonService {
 	 * Batch fetch BARS records to avoid repeated round-trips
 	 */
 	private async getBarsRecordsFromDB(ids: string[]): Promise<Map<string, BarsDBRecord>> {
-		const unique = Array.from(
-			new Set(
-				ids
-					.filter((id) => id)
-					.map((id) => (id.startsWith('BARS_') ? id : `BARS_${id}`)),
-			),
-		);
+		const unique = Array.from(new Set(ids.filter((id) => id).map((id) => (id.startsWith('BARS_') ? id : `BARS_${id}`))));
 
 		const records = new Map<string, BarsDBRecord>();
 		if (unique.length === 0) {
@@ -152,13 +146,15 @@ export class PolygonService {
 					const converted: GeoPoint[] = [];
 					for (const item of parsed) {
 						if (!item) continue;
-						const rawLat = typeof item.lat === 'number' ? item.lat : typeof item.lat === 'string' ? Number(item.lat) : undefined;
+						const rawLat =
+							typeof item.lat === 'number' ? item.lat : typeof item.lat === 'string' ? Number(item.lat) : undefined;
 						const rawLonCandidate = item.lon ?? item.lng;
-						const rawLon = typeof rawLonCandidate === 'number'
-							? rawLonCandidate
-							: typeof rawLonCandidate === 'string'
-								? Number(rawLonCandidate)
-								: undefined;
+						const rawLon =
+							typeof rawLonCandidate === 'number'
+								? rawLonCandidate
+								: typeof rawLonCandidate === 'string'
+									? Number(rawLonCandidate)
+									: undefined;
 						if (Number.isFinite(rawLat) && Number.isFinite(rawLon)) {
 							converted.push({ lat: rawLat as number, lon: rawLon as number });
 						}
@@ -196,10 +192,8 @@ export class PolygonService {
 		const firstRef = reference[0];
 		const lastRef = reference[reference.length - 1];
 
-		const sameOrientationDistance =
-			calculateDistance(firstPoint, firstRef) + calculateDistance(lastPoint, lastRef);
-		const flippedOrientationDistance =
-			calculateDistance(firstPoint, lastRef) + calculateDistance(lastPoint, firstRef);
+		const sameOrientationDistance = calculateDistance(firstPoint, firstRef) + calculateDistance(lastPoint, lastRef);
+		const flippedOrientationDistance = calculateDistance(firstPoint, lastRef) + calculateDistance(lastPoint, firstRef);
 
 		// If aligning start->start and end->end is significantly worse than the flipped pairing, reverse the order
 		if (flippedOrientationDistance + 1 < sameOrientationDistance) {

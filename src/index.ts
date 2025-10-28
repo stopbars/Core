@@ -659,13 +659,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -759,13 +759,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-						.filter((o: DOObject) => allowedIds.has(o.id))
-						.map((o: DOObject) => ({
-							id: o.id,
-							state: o.state,
-							timestamp: o.timestamp,
-							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-						}))
+							.filter((o: DOObject) => allowedIds.has(o.id))
+							.map((o: DOObject) => ({
+								id: o.id,
+								state: o.state,
+								timestamp: o.timestamp,
+								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+							}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
