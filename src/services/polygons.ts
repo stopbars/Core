@@ -72,25 +72,40 @@ export class PolygonService {
 	}
 
 	/**
-	 * Gets a BARS record from the database by ID
-	 */ async getBarsRecordFromDB(id: string): Promise<BarsDBRecord | null> {
-		try {
-			const barsId = id.startsWith('BARS_') ? id : `BARS_${id}`;
-			const result = await this.dbSession.executeRead<PointRow>(
-				`
-		SELECT id, type, airport_id, directionality, orientation, color, elevated, ihp, name, coordinates
-		FROM points 
-		WHERE id = ?
-	  `,
-				[barsId],
-			);
-			if (!result.results[0]) {
-				return null;
-			}
-			return this.mapBarsRecordFromDb(result.results[0]);
-		} catch {
-			return null;
+	 * Batch fetch BARS records to avoid repeated round-trips
+	 */
+	private async getBarsRecordsFromDB(ids: string[]): Promise<Map<string, BarsDBRecord>> {
+		const unique = Array.from(
+			new Set(
+				ids
+					.filter((id) => id)
+					.map((id) => (id.startsWith('BARS_') ? id : `BARS_${id}`)),
+			),
+		);
+
+		const records = new Map<string, BarsDBRecord>();
+		if (unique.length === 0) {
+			return records;
 		}
+
+		const chunkSize = 64;
+		const baseQuery =
+			'SELECT id, type, airport_id, directionality, orientation, color, elevated, ihp, name, coordinates FROM points WHERE id IN (';
+
+		for (let i = 0; i < unique.length; i += chunkSize) {
+			const chunk = unique.slice(i, i + chunkSize);
+			const placeholders = chunk.map(() => '?').join(', ');
+			try {
+				const result = await this.dbSession.executeRead<PointRow>(`${baseQuery}${placeholders})`, chunk);
+				for (const row of result.results) {
+					records.set(row.id, this.mapBarsRecordFromDb(row));
+				}
+			} catch {
+				// Ignore chunk failures to mirror legacy behaviour
+			}
+		}
+
+		return records;
 	}
 	/**
 	 * Maps database result to BarsDBRecord
@@ -444,15 +459,16 @@ export class PolygonService {
 				}
 			}
 
+			// Preload all referenced BARS records up-front to avoid per-polygon queries
+			const barsIds = polygons.map((polygon) => (polygon.id.startsWith('BARS_') ? polygon.id : `BARS_${polygon.id}`));
+			const barsRecords = await this.getBarsRecordsFromDB(barsIds);
+
 			// Process each polygon to generate BARS light locations
 			const processedObjects: ProcessedBarsObject[] = [];
 
 			for (const polygon of polygons) {
-				// Extract BARS ID from the displayName (format: "BARS_XXXX")
-				const barsId = polygon.id.replace('BARS_', '');
-
-				// Look up the BARS ID in the database
-				const dbRecord = await this.getBarsRecordFromDB(barsId);
+				const barsId = polygon.id.startsWith('BARS_') ? polygon.id : `BARS_${polygon.id}`;
+				const dbRecord = barsRecords.get(barsId);
 				if (!dbRecord) {
 					continue;
 				}

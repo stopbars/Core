@@ -33,8 +33,10 @@ export class SupportService {
 	private airportService: AirportService;
 	private readonly EARTH_RADIUS = 6378137; // Earth radius in meters at equator
 	private readonly cosLatCache = new Map<number, number>();
+	private readonly metersToDegreesBase: number;
 
 	constructor(private db: D1Database) {
+		this.metersToDegreesBase = 180 / (this.EARTH_RADIUS * Math.PI);
 		// Pass the required API token parameter
 		this.airportService = new AirportService(db, process.env.AIRPORTDB_API_KEY || '');
 	}
@@ -50,13 +52,12 @@ export class SupportService {
 		return value;
 	}
 
-	private metersToDegreesLat(meters: number): number {
-		return meters / ((this.EARTH_RADIUS * Math.PI) / 180);
+	private metersToDegreesLonFromCos(meters: number, cosLat: number): number {
+		return meters * this.metersToDegreesBase / cosLat;
 	}
 
 	private metersToDegreesLon(meters: number, lat: number): number {
-		const cosLat = this.getCosineLatitude(lat);
-		return meters / ((this.EARTH_RADIUS * cosLat * Math.PI) / 180);
+		return this.metersToDegreesLonFromCos(meters, this.getCosineLatitude(lat));
 	}
 
 	/**
@@ -111,45 +112,79 @@ export class SupportService {
 	 */
 	private calculateLightSupports(polygon: Polygon): LightSupport[] {
 		const EPS = 1e-12;
+		const vertices = polygon.vertices;
+		const vertexCount = vertices.length;
+		if (!vertexCount) {
+			return [];
+		}
 
-		const onSeg = (p: PolygonVertex, a: PolygonVertex, b: PolygonVertex): boolean => {
-			const cross = (b.lon - a.lon) * (p.lat - a.lat) - (b.lat - a.lat) * (p.lon - a.lon);
-			if (Math.abs(cross) > 1e-12) return false;
-			const minx = Math.min(a.lon, b.lon) - EPS, maxx = Math.max(a.lon, b.lon) + EPS;
-			const miny = Math.min(a.lat, b.lat) - EPS, maxy = Math.max(a.lat, b.lat) + EPS;
-			return p.lon >= minx && p.lon <= maxx && p.lat >= miny && p.lat <= maxy;
+		// Precompute polygon data for point-in-polygon checks.
+		const xs = new Float64Array(vertexCount);
+		const ys = new Float64Array(vertexCount);
+		const edgeDx = new Float64Array(vertexCount);
+		const edgeDy = new Float64Array(vertexCount);
+		const edgeInvDy = new Float64Array(vertexCount);
+		for (let i = 0; i < vertexCount; i++) {
+			const v = vertices[i];
+			xs[i] = v.lon;
+			ys[i] = v.lat;
+		}
+		for (let i = 0; i < vertexCount; i++) {
+			const next = i + 1 === vertexCount ? 0 : i + 1;
+			const dx = xs[next] - xs[i];
+			const dy = ys[next] - ys[i];
+			edgeDx[i] = dx;
+			edgeDy[i] = dy;
+			edgeInvDy[i] = dy !== 0 ? 1 / dy : 0;
+		}
+
+		const onSeg = (lat: number, lon: number, ax: number, ay: number, bx: number, by: number): boolean => {
+			const cross = (bx - ax) * (lat - ay) - (by - ay) * (lon - ax);
+			if (Math.abs(cross) > EPS) return false;
+			const minx = Math.min(ax, bx) - EPS, maxx = Math.max(ax, bx) + EPS;
+			const miny = Math.min(ay, by) - EPS, maxy = Math.max(ay, by) + EPS;
+			return lon >= minx && lon <= maxx && lat >= miny && lat <= maxy;
 		};
 
-		const pointInPoly = (pt: PolygonVertex, vs: PolygonVertex[]): boolean => {
-			for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-				if (onSeg(pt, vs[j], vs[i])) return true;
+		const pointInPoly = (lat: number, lon: number): boolean => {
+			for (let i = 0; i < vertexCount; i++) {
+				const next = i + 1 === vertexCount ? 0 : i + 1;
+				if (onSeg(lat, lon, xs[i], ys[i], xs[next], ys[next])) {
+					return true;
+				}
 			}
 			let inside = false;
-			for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-				const xi = vs[i].lon, yi = vs[i].lat;
-				const xj = vs[j].lon, yj = vs[j].lat;
-				const hit = (yi > pt.lat) !== (yj > pt.lat)
-					&& pt.lon < ((xj - xi) * (pt.lat - yi)) / (yj - yi + 0.0) + xi;
-				if (hit) inside = !inside;
+			for (let i = 0; i < vertexCount; i++) {
+				const yi = ys[i];
+				const yj = yi + edgeDy[i];
+				if ((yi > lat) !== (yj > lat)) {
+					const xi = xs[i];
+					const candidateLon = xi + edgeDx[i] * (lat - yi) * edgeInvDy[i];
+					if (lon < candidateLon) {
+						inside = !inside;
+					}
+				}
 			}
 			return inside;
 		};
 
-		// bounds
-		let minLat = Infinity, minLon = Infinity, maxLat = -Infinity, maxLon = -Infinity;
-		for (const v of polygon.vertices) {
-			if (v.lat < minLat) minLat = v.lat;
-			if (v.lon < minLon) minLon = v.lon;
-			if (v.lat > maxLat) maxLat = v.lat;
-			if (v.lon > maxLon) maxLon = v.lon;
+		let minLat = ys[0], minLon = xs[0], maxLat = ys[0], maxLon = xs[0];
+		for (let i = 1; i < vertexCount; i++) {
+			const lat = ys[i];
+			const lon = xs[i];
+			if (lat < minLat) minLat = lat;
+			if (lon < minLon) minLon = lon;
+			if (lat > maxLat) maxLat = lat;
+			if (lon > maxLon) maxLon = lon;
 		}
 
 		const gridM = 1;
 		const midLat = (minLat + maxLat) * 0.5;
 		const midLatCos = this.getCosineLatitude(midLat);
-		const metersToDegreesLonWithCos = (meters: number, cosLat: number) => meters / ((this.EARTH_RADIUS * cosLat * Math.PI) / 180);
-		const dLat = this.metersToDegreesLat(gridM);
-		const dLon = metersToDegreesLonWithCos(gridM, midLatCos);
+		const degPerMeterLat = this.metersToDegreesBase;
+		const degPerMeterLonMid = this.metersToDegreesBase / midLatCos;
+		const dLat = gridM * degPerMeterLat;
+		const dLon = gridM * degPerMeterLonMid;
 
 		// pad by half a cell so edges get sampled
 		minLat -= 0.5 * dLat; minLon -= 0.5 * dLon;
@@ -164,7 +199,7 @@ export class SupportService {
 			const latC = minLat + (i + 0.5) * dLat;
 			for (let j = 0; j < cols; j++) {
 				const lonC = minLon + (j + 0.5) * dLon;
-				inside[i][j] = pointInPoly({ lat: latC, lon: lonC }, polygon.vertices) ? 1 : 0;
+				inside[i][j] = pointInPoly(latC, lonC) ? 1 : 0;
 			}
 		}
 
@@ -191,8 +226,8 @@ export class SupportService {
 		const pushSupportFromBlock = (i0: number, j0: number, s: number, out: LightSupport[]) => {
 			const meters = s * gridM;
 			const sw = cellCenterToDeg(i0, j0);
-			const latCenter = sw.latC + this.metersToDegreesLat(meters) * 0.5;
-			const lonCenter = sw.lonC + metersToDegreesLonWithCos(meters, midLatCos) * 0.5;
+			const latCenter = sw.latC + meters * degPerMeterLat * 0.5;
+			const lonCenter = sw.lonC + meters * degPerMeterLonMid * 0.5;
 			out.push({ latitude: latCenter, longitude: lonCenter, width: meters, length: meters, heading: 0 });
 		};
 
@@ -379,8 +414,8 @@ export class SupportService {
 					const kept: LightSupport[] = [];
 					for (const spt of supports) {
 						// compute if the rectangle is inside this big window in degrees
-						const halfW = this.metersToDegreesLat(spt.width / 2);
-						const halfL = metersToDegreesLonWithCos(spt.length / 2, midLatCos);
+						const halfW = spt.width * degPerMeterLat * 0.5;
+						const halfL = spt.length * degPerMeterLonMid * 0.5;
 						const lat0 = spt.latitude - halfW, lat1 = spt.latitude + halfW;
 						const lon0 = spt.longitude - halfL, lon1 = spt.longitude + halfL;
 						if (!(lat0 >= latMinDeg && lat1 <= latMaxDeg && lon0 >= lonMinDeg && lon1 <= lonMaxDeg)) {
@@ -395,8 +430,8 @@ export class SupportService {
 					// place the big one
 					const meters = big * gridM;
 					const sw = cellCenterToDeg(i0, j0);
-					const latCenter = sw.latC + this.metersToDegreesLat(meters) * 0.5;
-					const lonCenter = sw.lonC + metersToDegreesLonWithCos(meters, midLatCos) * 0.5;
+					const latCenter = sw.latC + meters * degPerMeterLat * 0.5;
+					const lonCenter = sw.lonC + meters * degPerMeterLonMid * 0.5;
 
 					kept.push({ latitude: latCenter, longitude: lonCenter, width: meters, length: meters, heading: 0 });
 					supports.length = 0;
@@ -464,6 +499,7 @@ export class SupportService {
 			// Add light supports
 			let supportCount = 1;
 			let exclusionRectangles = ''; // Store exclusion rectangles separately
+			const exclusionCosCache = new Map<number, number>();
 
 			// Helper function to calculate exclusion rectangle coordinates
 			const calculateExclusionCoords = (center: { latitude: number; longitude: number }, width: number, length: number) => {
@@ -473,8 +509,14 @@ export class SupportService {
 				const bufferedLength = length * bufferFactor;
 
 				// Convert width/length from meters to degrees
-				const halfWidthDeg = this.metersToDegreesLat(bufferedWidth / 2);
-				const halfLengthDeg = this.metersToDegreesLon(bufferedLength / 2, center.latitude);
+				const halfWidthDeg = bufferedWidth * 0.5 * this.metersToDegreesBase;
+				const cacheKey = Math.round(center.latitude * 1e6);
+				let cosLat = exclusionCosCache.get(cacheKey);
+				if (cosLat === undefined) {
+					cosLat = this.getCosineLatitude(center.latitude);
+					exclusionCosCache.set(cacheKey, cosLat);
+				}
+				const halfLengthDeg = this.metersToDegreesLonFromCos(bufferedLength * 0.5, cosLat);
 
 				return {
 					latMin: center.latitude - halfWidthDeg,

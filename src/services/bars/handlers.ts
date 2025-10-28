@@ -516,102 +516,107 @@ export const POINT_MERGE_THRESHOLD = 2.0;
  * @returns The processed BARS objects with deduplicated points
  */
 export function deduplicateTaxiwayPoints(objects: ProcessedBarsObject[]): ProcessedBarsObject[] {
-	// Extract all taxiway objects
 	const taxiwayObjects = objects.filter((obj) => obj.type === 'taxiway');
 	const otherObjects = objects.filter((obj) => obj.type !== 'taxiway');
 
-	// If we don't have any taxiway objects, return the original array
 	if (taxiwayObjects.length === 0) return objects;
 
-	// Flatten all taxiway points into a single array for processing
-	let allTaxiwayPoints: BarsLightPoint[] = [];
-	taxiwayObjects.forEach((obj) => {
-		allTaxiwayPoints = [...allTaxiwayPoints, ...obj.points];
-	});
+	const allTaxiwayPoints: BarsLightPoint[] = taxiwayObjects.flatMap((obj) => obj.points);
+	if (allTaxiwayPoints.length === 0) return objects;
 
-	// Create a map to track merged points and their connections
-	const mergedPointsMap: Map<
-		string,
-		{
-			point: BarsLightPoint;
-			count: number;
-			sourcePoints: BarsLightPoint[];
-		}
-	> = new Map();
+	const METERS_PER_DEGREE_LAT = 111_320;
+	const cellSize = Math.max(POINT_MERGE_THRESHOLD, 1);
+	const neighborOffsets: Array<[number, number]> = [
+		[0, 0],
+		[0, -1],
+		[0, 1],
+		[-1, 0],
+		[1, 0],
+		[-1, -1],
+		[-1, 1],
+		[1, -1],
+		[1, 1],
+	];
 
-	// First pass: group points by location within threshold
+	type MergeGroup = {
+		anchorLat: number;
+		anchorLon: number;
+		points: BarsLightPoint[];
+	};
+
+	const buckets = new Map<string, MergeGroup[]>();
+	const pointToGroup = new Map<BarsLightPoint, MergeGroup>();
+
+	const toCellKey = (x: number, y: number): string => `${x}:${y}`;
+	const toMeters = (point: BarsLightPoint): { x: number; y: number } => {
+		const latRadians = (point.lat * Math.PI) / 180;
+		const lonScale = Math.max(Math.cos(latRadians), 0.000001) * METERS_PER_DEGREE_LAT;
+		return {
+			x: point.lon * lonScale,
+			y: point.lat * METERS_PER_DEGREE_LAT,
+		};
+	};
+
 	for (const point of allTaxiwayPoints) {
-		let foundExistingGroup = false;
+		const { x, y } = toMeters(point);
+		const cellX = Math.floor(x / cellSize);
+		const cellY = Math.floor(y / cellSize);
+		let targetGroup: MergeGroup | undefined;
 
-		// Check if this point belongs to an existing group
-		for (const [, group] of mergedPointsMap.entries()) {
-			const distance = calculateDistance({ lat: point.lat, lon: point.lon }, { lat: group.point.lat, lon: group.point.lon });
+		for (const [dx, dy] of neighborOffsets) {
+			const bucketKey = toCellKey(cellX + dx, cellY + dy);
+			const groupList = buckets.get(bucketKey);
+			if (!groupList) continue;
 
-			if (distance <= POINT_MERGE_THRESHOLD) {
-				// Add this point to the existing group
-				group.sourcePoints.push(point);
-				group.count++;
-				foundExistingGroup = true;
-				break;
-			}
-		}
-
-		// If no existing group was found, create a new one
-		if (!foundExistingGroup) {
-			const key = `${point.lat.toFixed(7)},${point.lon.toFixed(7)}`;
-			mergedPointsMap.set(key, {
-				point: { ...point },
-				count: 1,
-				sourcePoints: [point],
-			});
-		}
-	}
-
-	// Second pass: determine canonical positions per group (preserve original headings per light)
-	// We only "snap" lat/lon to the group's canonical point; heading/properties stay from the source point.
-	const canonicalPositions: Map<string, Pick<BarsLightPoint, 'lat' | 'lon'>> = new Map();
-
-	for (const [key, group] of mergedPointsMap.entries()) {
-		// Use the first point's position as canonical for stability
-		canonicalPositions.set(key, { lat: group.point.lat, lon: group.point.lon });
-	}
-
-	// Final step: recreate the taxiway objects with deduplicated points
-	const deduplicatedTaxiwayObjects = taxiwayObjects.map((obj) => {
-		// Map each point in this object to its deduplicated version
-		const newPoints: BarsLightPoint[] = [];
-
-		for (const point of obj.points) {
-			// Find which group this point belongs to
-			let found = false;
-			for (const [key, group] of mergedPointsMap.entries()) {
-				if (group.sourcePoints.some((p) => p === point)) {
-					// Use the canonical position for that group, but preserve the original heading and properties
-					const canonical = canonicalPositions.get(key)!;
-					newPoints.push({
-						lat: canonical.lat,
-						lon: canonical.lon,
-						heading: ((point.heading % 360) + 360) % 360,
-						properties: point.properties ? { ...point.properties } : undefined,
-					});
-					found = true;
+			for (const group of groupList) {
+				if (calculateDistance(point, { lat: group.anchorLat, lon: group.anchorLon }) <= POINT_MERGE_THRESHOLD) {
+					targetGroup = group;
 					break;
 				}
 			}
 
-			// If for some reason we didn't find a match (shouldn't happen), use the original
-			if (!found) {
-				newPoints.push({ ...point });
+			if (targetGroup) break;
+		}
+
+		if (!targetGroup) {
+			targetGroup = {
+				anchorLat: point.lat,
+				anchorLon: point.lon,
+				points: [],
+			};
+			const key = toCellKey(cellX, cellY);
+			const list = buckets.get(key);
+			if (list) {
+				list.push(targetGroup);
+			} else {
+				buckets.set(key, [targetGroup]);
 			}
 		}
 
-		// Return the object with deduplicated points
+		targetGroup.points.push(point);
+		pointToGroup.set(point, targetGroup);
+	}
+
+	const deduplicatedTaxiwayObjects = taxiwayObjects.map((obj) => {
+		const points = obj.points.map((point) => {
+			const group = pointToGroup.get(point);
+			if (!group) {
+				return { ...point };
+			}
+
+			return {
+				lat: group.anchorLat,
+				lon: group.anchorLon,
+				heading: ((point.heading % 360) + 360) % 360,
+				properties: point.properties ? { ...point.properties } : undefined,
+			};
+		});
+
 		return {
 			...obj,
-			points: newPoints,
+			points,
 		};
 	});
 
-	// Return the combined array of deduplicated taxiway objects and other objects
 	return [...deduplicatedTaxiwayObjects, ...otherObjects];
 }

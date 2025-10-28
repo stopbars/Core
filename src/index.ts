@@ -143,6 +143,7 @@ app.use(
 		origin: '*',
 		allowHeaders: ['Content-Type', 'Authorization', 'X-Vatsim-Token', 'Upgrade', 'X-Client-Type'],
 		allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+		exposeHeaders: ['Server-Timing'],
 	}),
 );
 
@@ -2443,10 +2444,32 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 		const supportService = ServicePool.getSupport(c.env);
 		const polygonService = ServicePool.getPolygons(c.env);
 
-		const [supportsXml, barsXml] = await Promise.all([
-			supportService.generateLightSupportsXML(sanitized, icao),
-			polygonService.processBarsXML(sanitized, icao),
-		]);
+		const totalStart = performance.now();
+		let supportsDuration = 0;
+		let barsDuration = 0;
+
+		const supportsPromise = (async () => {
+			const start = performance.now();
+			const result = await supportService.generateLightSupportsXML(sanitized, icao);
+			supportsDuration = performance.now() - start;
+			return result;
+		})();
+
+		const barsPromise = (async () => {
+			const start = performance.now();
+			const result = await polygonService.processBarsXML(sanitized, icao);
+			barsDuration = performance.now() - start;
+			return result;
+		})();
+
+		const [supportsXml, barsXml] = await Promise.all([supportsPromise, barsPromise]);
+		const totalDuration = performance.now() - totalStart;
+
+		const serverTiming: string[] = [];
+		serverTiming.push(`supports;dur=${supportsDuration.toFixed(2)}`);
+		serverTiming.push(`bars;dur=${barsDuration.toFixed(2)}`);
+		serverTiming.push(`total;dur=${totalDuration.toFixed(2)}`);
+		c.header('Server-Timing', serverTiming.join(', '));
 
 		//cacheService.set(cacheKey, { supportsXml, barsXml }, { ttl: cacheTtlSeconds, namespace: cacheNamespace }).catch(() => { });
 		c.header('X-Cache-Gen', 'MISS');
