@@ -164,24 +164,125 @@ export class DivisionService {
 		return airport;
 	}
 
-	async getDivisionAirports(divisionId: number): Promise<DivisionAirport[]> {
-		const result = await this.dbSession.executeRead<DivisionAirport>('SELECT * FROM division_airports WHERE division_id = ?', [
-			divisionId,
-		]);
-		return result.results;
-	}
+	async getDivisionAirports(divisionId: number): Promise<DivisionAirport[] | null> {
+		type DivisionAirportRow = {
+			division_exists: number | null;
+			id: number | null;
+			division_id: number | null;
+			icao: string | null;
+			status: 'pending' | 'approved' | 'rejected' | null;
+			requested_by: string | null;
+			approved_by?: string | null;
+			created_at: string | null;
+			updated_at: string | null;
+		};
 
-	async getDivisionMembers(divisionId: number): Promise<(DivisionMember & { display_name: string })[]> {
-		// Use cached display_name; fallback to vatsim_id if null
-		const result = await this.dbSession.executeRead<DivisionMember & { display_name: string }>(
-			`SELECT dm.id, dm.division_id, dm.vatsim_id, dm.role, dm.created_at,
-			COALESCE(u.display_name, dm.vatsim_id) AS display_name
-			FROM division_members dm
-			LEFT JOIN users u ON u.vatsim_id = dm.vatsim_id
-			WHERE dm.division_id = ?`,
+		const result = await this.dbSession.executeRead<DivisionAirportRow>(
+			`SELECT
+				d.id AS division_exists,
+				da.id,
+				da.division_id,
+				da.icao,
+				da.status,
+				da.requested_by,
+				da.approved_by,
+				da.created_at,
+				da.updated_at
+			FROM divisions d
+			LEFT JOIN division_airports da ON da.division_id = d.id
+			WHERE d.id = ?
+			ORDER BY da.created_at DESC`,
 			[divisionId],
 		);
-		return result.results;
+
+		if (result.results.length === 0) {
+			return null;
+		}
+
+		return result.results
+			.filter((row): row is DivisionAirportRow & {
+				id: number;
+				division_id: number;
+				icao: string;
+				status: 'pending' | 'approved' | 'rejected';
+				requested_by: string;
+				created_at: string;
+				updated_at: string;
+			} =>
+				row.id !== null &&
+				row.division_id !== null &&
+				row.icao !== null &&
+				row.status !== null &&
+				row.requested_by !== null &&
+				row.created_at !== null &&
+				row.updated_at !== null,
+			)
+			.map((row) => ({
+				id: row.id,
+				division_id: row.division_id,
+				icao: row.icao,
+				status: row.status,
+				requested_by: row.requested_by,
+				approved_by: row.approved_by ?? undefined,
+				created_at: row.created_at,
+				updated_at: row.updated_at,
+			}));
+	}
+
+	async getDivisionMembers(divisionId: number): Promise<(DivisionMember & { display_name: string })[] | null> {
+		type DivisionMemberRow = {
+			division_exists: number | null;
+			id: number | null;
+			division_id: number | null;
+			vatsim_id: string | null;
+			role: 'nav_head' | 'nav_member' | null;
+			created_at: string | null;
+			display_name: string | null;
+		};
+
+		const result = await this.dbSession.executeRead<DivisionMemberRow>(
+			`SELECT
+					d.id AS division_exists,
+					dm.id,
+					dm.division_id,
+					dm.vatsim_id,
+					dm.role,
+					dm.created_at,
+					COALESCE(u.display_name, dm.vatsim_id) AS display_name
+				FROM divisions d
+				LEFT JOIN division_members dm ON dm.division_id = d.id
+				LEFT JOIN users u ON u.vatsim_id = dm.vatsim_id
+				WHERE d.id = ?
+				ORDER BY dm.created_at DESC`,
+			[divisionId],
+		);
+
+		if (result.results.length === 0) {
+			return null;
+		}
+
+		return result.results
+			.filter((row): row is DivisionMemberRow & {
+				id: number;
+				division_id: number;
+				vatsim_id: string;
+				role: 'nav_head' | 'nav_member';
+				created_at: string;
+				display_name: string | null;
+			} =>
+				row.id !== null &&
+				row.division_id !== null &&
+				row.role !== null &&
+				row.vatsim_id !== null &&
+				row.created_at !== null)
+			.map((row) => ({
+				id: row.id,
+				division_id: row.division_id,
+				vatsim_id: row.vatsim_id,
+				role: row.role,
+				created_at: row.created_at,
+				display_name: row.display_name ?? row.vatsim_id,
+			}));
 	}
 
 	async getAllDivisions(): Promise<Division[]> {

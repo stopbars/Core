@@ -1713,13 +1713,11 @@ divisionsApp.get('/:id/members', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const divisions = ServicePool.getDivisions(c.env);
 
-	// Verify division exists
-	const division = await divisions.getDivision(divisionId);
-	if (!division) {
+	const members = await divisions.getDivisionMembers(divisionId);
+	if (!members) {
 		return c.text('Division not found', 404);
 	}
 
-	const members = await divisions.getDivisionMembers(divisionId);
 	return c.json(members);
 });
 
@@ -1864,13 +1862,11 @@ divisionsApp.get('/:id/airports', async (c) => {
 	if (!vatsimToken) return c.text('Unauthorized', 401);
 	await vatsim.getUser(vatsimToken);
 
-	// Verify division exists
-	const division = await divisions.getDivision(divisionId);
-	if (!division) {
+	const airports = await divisions.getDivisionAirports(divisionId);
+	if (!airports) {
 		return c.text('Division not found', 404);
 	}
 
-	const airports = await divisions.getDivisionAirports(divisionId);
 	return c.json(airports);
 });
 
