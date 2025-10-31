@@ -2788,7 +2788,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Stats returned (single product when specified, otherwise array of all)"
+            "description": "Stats returned (single product when specified, otherwise array of all including combinedTotal sum)"
           }
         }
       }

@@ -659,13 +659,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-										.filter((o: DOObject) => allowedIds.has(o.id))
-										.map((o: DOObject) => ({
-											id: o.id,
-											state: o.state,
-											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-										}))
+									.filter((o: DOObject) => allowedIds.has(o.id))
+									.map((o: DOObject) => ({
+										id: o.id,
+										state: o.state,
+										timestamp: o.timestamp,
+										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+									}))
 								: [];
 
 							return {
@@ -759,13 +759,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-							.filter((o: DOObject) => allowedIds.has(o.id))
-							.map((o: DOObject) => ({
-								id: o.id,
-								state: o.state,
-								timestamp: o.timestamp,
-								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-							}))
+						.filter((o: DOObject) => allowedIds.has(o.id))
+						.map((o: DOObject) => ({
+							id: o.id,
+							state: o.state,
+							timestamp: o.timestamp,
+							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+						}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -4745,15 +4745,17 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
  *           enum: [Pilot-Client, vatSys-Plugin, EuroScope-Plugin, Installer, SimConnect.NET]
  *     responses:
  *       200:
- *         description: Stats returned (single product when specified, otherwise array of all)
+ *         description: Stats returned (single product when specified, otherwise array of all including combinedTotal sum)
  */
+
 app.get('/downloads/stats', withCache(CacheKeys.fromUrl, 300, 'installer'), async (c) => {
 	const product = c.req.query('product') as InstallerProduct | undefined;
 	const downloads = ServicePool.getDownloads(c.env);
 	if (!product) {
 		// No product specified -> return stats for all products
 		const all = await downloads.getAllStats();
-		return c.json({ products: all });
+		const combinedTotal = all.reduce((sum, item) => sum + item.total, 0);
+		return c.json({ products: all, combinedTotal });
 	}
 	const VALID: InstallerProduct[] = ['Pilot-Client', 'vatSys-Plugin', 'EuroScope-Plugin', 'Installer', 'SimConnect.NET'];
 	if (!VALID.includes(product)) return c.json({ error: 'invalid product' }, 400);
