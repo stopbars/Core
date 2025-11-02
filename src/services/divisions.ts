@@ -200,22 +200,25 @@ export class DivisionService {
 		}
 
 		return result.results
-			.filter((row): row is DivisionAirportRow & {
-				id: number;
-				division_id: number;
-				icao: string;
-				status: 'pending' | 'approved' | 'rejected';
-				requested_by: string;
-				created_at: string;
-				updated_at: string;
-			} =>
-				row.id !== null &&
-				row.division_id !== null &&
-				row.icao !== null &&
-				row.status !== null &&
-				row.requested_by !== null &&
-				row.created_at !== null &&
-				row.updated_at !== null,
+			.filter(
+				(
+					row,
+				): row is DivisionAirportRow & {
+					id: number;
+					division_id: number;
+					icao: string;
+					status: 'pending' | 'approved' | 'rejected';
+					requested_by: string;
+					created_at: string;
+					updated_at: string;
+				} =>
+					row.id !== null &&
+					row.division_id !== null &&
+					row.icao !== null &&
+					row.status !== null &&
+					row.requested_by !== null &&
+					row.created_at !== null &&
+					row.updated_at !== null,
 			)
 			.map((row) => ({
 				id: row.id,
@@ -262,19 +265,18 @@ export class DivisionService {
 		}
 
 		return result.results
-			.filter((row): row is DivisionMemberRow & {
-				id: number;
-				division_id: number;
-				vatsim_id: string;
-				role: 'nav_head' | 'nav_member';
-				created_at: string;
-				display_name: string | null;
-			} =>
-				row.id !== null &&
-				row.division_id !== null &&
-				row.role !== null &&
-				row.vatsim_id !== null &&
-				row.created_at !== null)
+			.filter(
+				(
+					row,
+				): row is DivisionMemberRow & {
+					id: number;
+					division_id: number;
+					vatsim_id: string;
+					role: 'nav_head' | 'nav_member';
+					created_at: string;
+					display_name: string | null;
+				} => row.id !== null && row.division_id !== null && row.role !== null && row.vatsim_id !== null && row.created_at !== null,
+			)
 			.map((row) => ({
 				id: row.id,
 				division_id: row.division_id,

@@ -117,11 +117,21 @@ export class CacheService {
  * @param cacheKeyFn - Function to generate cache key from request
  * @param ttl - Time to live in seconds
  * @param namespace - Cache namespace
+ * @param shouldBypass - Optional predicate to skip caching for a request
  */
-export function withCache(cacheKeyFn: (req: Request) => string, ttl: number = 60, namespace: string = 'default') {
+export function withCache(
+	cacheKeyFn: (req: Request) => string,
+	ttl: number = 60,
+	namespace: string = 'default',
+	shouldBypass?: (req: Request) => boolean,
+) {
 	return async (c: import('hono').Context<{ Bindings: Env }>, next: () => Promise<void>) => {
 		// Skip caching for non-GET requests
 		if (c.req.method !== 'GET') {
+			return next();
+		}
+
+		if (shouldBypass?.(c.req.raw)) {
 			return next();
 		}
 

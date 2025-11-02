@@ -1794,6 +1794,22 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "simple",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "When true, returns only contribution id, airport ICAO, and package name."
+          },
+          {
+            "in": "query",
+            "name": "summary",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Include aggregate counts for contribution statuses when true."
           }
         ],
         "responses": {
@@ -1873,49 +1889,6 @@
         "responses": {
           "200": {
             "description": "Package stats returned"
-          }
-        }
-      }
-    },
-    "/contributions/user": {
-      "get": {
-        "summary": "Get current user's contributions",
-        "tags": [
-          "Contributions"
-        ],
-        "security": [
-          {
-            "VatsimToken": []
-          }
-        ],
-        "parameters": [
-          {
-            "in": "query",
-            "name": "status",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "page",
-            "schema": {
-              "type": "integer",
-              "minimum": 1
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "minimum": 1
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Contributions returned"
           }
         }
       }

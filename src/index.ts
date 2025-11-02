@@ -19,6 +19,23 @@ import { PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
+const getHighResTime =
+	typeof performance !== 'undefined' && typeof performance.now === 'function' ? () => performance.now() : () => Date.now();
+
+const formatServerTiming = (durationMs: number): string => {
+	const normalized = durationMs < 0 ? 0 : durationMs;
+	return normalized.toFixed(2);
+};
+
+const applyServerTimingHeader = (headers: Headers, durationMs: number) => {
+	const metric = `total;dur=${formatServerTiming(durationMs)}`;
+	if (headers.has('Server-Timing')) {
+		headers.append('Server-Timing', metric);
+	} else {
+		headers.set('Server-Timing', metric);
+	}
+};
+
 interface CreateDivisionPayload {
 	name: string;
 	headVatsimId: string;
@@ -73,28 +90,52 @@ const app = new Hono<{
 		vatsim?: VatsimService;
 		userService?: UserService;
 		clientIp?: string;
+		serverTimingStart?: number;
 	};
 }>();
 
 // Global error handler to turn expected HttpErrors into clean responses
-app.onError((err) => {
+
+app.onError((err, c) => {
+	let response: Response;
 	if (err instanceof HttpError) {
 		const body = err.expose ? { error: err.message } : { error: 'Upstream service error' };
-		return new Response(JSON.stringify(body), {
+		response = new Response(JSON.stringify(body), {
 			status: err.status,
 			headers: { 'content-type': 'application/json; charset=utf-8' },
 		});
+	} else {
+		try {
+			console.error('Unhandled error:', err instanceof Error ? err.name : String(err));
+		} catch (e) {
+			// ignore logging failures
+			void e;
+		}
+		response = new Response(JSON.stringify({ error: 'Internal Server Error' }), {
+			status: 500,
+			headers: { 'content-type': 'application/json; charset=utf-8' },
+		});
 	}
+
+	const start = c?.get('serverTimingStart');
+	if (typeof start === 'number') {
+		applyServerTimingHeader(response.headers, getHighResTime() - start);
+	}
+
+	return response;
+});
+
+app.use('*', async (c, next) => {
+	const start = getHighResTime();
+	c.set('serverTimingStart', start);
 	try {
-		console.error('Unhandled error:', err instanceof Error ? err.name : String(err));
-	} catch (e) {
-		// ignore logging failures
-		void e;
+		await next();
+	} finally {
+		const res = c.res;
+		if (res) {
+			applyServerTimingHeader(res.headers, getHighResTime() - start);
+		}
 	}
-	return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
-		status: 500,
-		headers: { 'content-type': 'application/json; charset=utf-8' },
-	});
 });
 
 app.use('*', async (c, next) => {
@@ -659,13 +700,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -759,13 +800,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-						.filter((o: DOObject) => allowedIds.has(o.id))
-						.map((o: DOObject) => ({
-							id: o.id,
-							state: o.state,
-							timestamp: o.timestamp,
-							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-						}))
+							.filter((o: DOObject) => allowedIds.has(o.id))
+							.map((o: DOObject) => ({
+								id: o.id,
+								state: o.state,
+								timestamp: o.timestamp,
+								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+							}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -2958,31 +2999,89 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *       - in: query
  *         name: user
  *         schema: { type: string }
+ *       - in: query
+ *         name: simple
+ *         schema:
+ *           type: boolean
+ *         description: When true, returns only contribution id, airport ICAO, and package name.
+ *       - in: query
+ *         name: summary
+ *         schema:
+ *           type: boolean
+ *         description: Include aggregate counts for contribution statuses when true.
  *     responses:
  *       200:
  *         description: Contributions listed
  */
-contributionsApp.get('/', async (c) => {
-	const contributions = ServicePool.getContributions(c.env);
+contributionsApp.get(
+	'/',
+	withCache(CacheKeys.fromUrl, 60, 'contributions', (req) => {
+		const url = new URL(req.url);
+		return (url.searchParams.get('summary') || 'false').toLowerCase() === 'true';
+	}),
+	async (c) => {
+		const contributions = ServicePool.getContributions(c.env);
 
-	// Parse query parameters for filtering
-	const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
-	const airportIcao = c.req.query('airport') || undefined;
-	const userId = c.req.query('user') || undefined;
-	const page = 1; // Default to page 1 for user contributions
-	const limit = Number.MAX_SAFE_INTEGER;
+		// Parse query parameters for filtering
+		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
+		const airportIcao = c.req.query('airport') || undefined;
+		const userId = c.req.query('user') || undefined;
+		const simple = (c.req.query('simple') || 'false').toLowerCase() === 'true';
+		const includeSummary = (c.req.query('summary') || 'false').toLowerCase() === 'true';
 
-	// Get contributions with filters
-	const result = await contributions.listContributions({
-		status,
-		airportIcao,
-		userId,
-		page,
-		limit,
-	});
+		if (simple && includeSummary) {
+			return c.json({ error: 'summary cannot be combined with simple view' }, 400);
+		}
 
-	return c.json(result);
-});
+		if (simple) {
+			const result = await contributions.listContributionsSimple({
+				status,
+				airportIcao,
+				userId,
+			});
+			return c.json({
+				contributions: result.contributions,
+				total: result.total,
+				simple: true,
+			});
+		}
+
+		const result = await contributions.listContributions({
+			status,
+			airportIcao,
+			userId,
+		});
+
+		if (!includeSummary) {
+			return c.json(result);
+		}
+
+		const summary = result.contributions.reduce(
+			(acc, item) => {
+				switch (item.status) {
+					case 'approved':
+						acc.approved += 1;
+						break;
+					case 'pending':
+						acc.pending += 1;
+						break;
+					case 'rejected':
+						acc.rejected += 1;
+						break;
+					case 'outdated':
+						acc.outdated += 1;
+						break;
+					default:
+						break;
+				}
+				return acc;
+			},
+			{ total: result.total, approved: 0, pending: 0, rejected: 0, outdated: 0 },
+		);
+
+		return c.json({ ...result, summary });
+	},
+);
 
 /**
  * @openapi
@@ -3086,67 +3185,6 @@ contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 		return c.json({ error: message }, 400);
 	}
 });
-
-/**
- * @openapi
- * /contributions/user:
- *   get:
- *     summary: Get current user's contributions
- *     tags:
- *       - Contributions
- *     security:
- *       - VatsimToken: []
- *     parameters:
- *       - in: query
- *         name: status
- *         schema: { type: string }
- *       - in: query
- *         name: page
- *         schema: { type: integer, minimum: 1 }
- *       - in: query
- *         name: limit
- *         schema: { type: integer, minimum: 1 }
- *     responses:
- *       200:
- *         description: Contributions returned
- */
-contributionsApp.get(
-	'/user',
-	withCache((req) => CacheKeys.withUser(CacheKeys.fromUrl(req))(req), 60, 'auth'),
-	async (c) => {
-		const vatsimToken = c.req.header('X-Vatsim-Token');
-		if (!vatsimToken) {
-			return c.text('Unauthorized', 401);
-		}
-
-		const vatsim = ServicePool.getVatsim(c.env);
-		const auth = ServicePool.getAuth(c.env);
-
-		const vatsimUser = await vatsim.getUser(vatsimToken);
-		const user = await auth.getUserByVatsimId(vatsimUser.id);
-
-		if (!user) {
-			return c.text('User not found', 404);
-		}
-
-		// Parse query parameters
-		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'all') || 'all';
-		// Support optional pagination while preserving existing defaults
-		const pageParam = Number(c.req.query('page') || '1');
-		const limitParam = Number(c.req.query('limit') || String(Number.MAX_SAFE_INTEGER));
-		const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1; // Default to page 1
-		const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : Number.MAX_SAFE_INTEGER;
-
-		const contributions = ServicePool.getContributions(c.env);
-		const result = await contributions.getUserContributions(user.vatsim_id, {
-			status,
-			page,
-			limit,
-		});
-
-		return c.json(result);
-	},
-);
 
 /**
  * @openapi

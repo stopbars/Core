@@ -35,8 +35,6 @@ export interface ContributionDecision {
 }
 
 export interface ContributionListOptions {
-	page?: number;
-	limit?: number;
 	status?: 'pending' | 'approved' | 'rejected' | 'outdated' | 'all';
 	airportIcao?: string;
 	userId?: string;
@@ -45,9 +43,6 @@ export interface ContributionListOptions {
 export interface ContributionListResult {
 	contributions: Contribution[];
 	total: number;
-	page: number;
-	limit: number;
-	totalPages: number;
 }
 
 import { DatabaseSessionService } from './database-session';
@@ -197,13 +192,8 @@ export class ContributionService {
 		return result.results[0] || null;
 	}
 
-	/**
-	 * List contributions with filtering and pagination
-	 * @param options Filter and pagination options
-	 * @returns Paginated list of contributions
-	 */
 	async listContributions(options: ContributionListOptions): Promise<ContributionListResult> {
-		const { page = 1, limit = 10, status = 'all', airportIcao, userId } = options;
+		const { status = 'all', airportIcao, userId } = options;
 		const whereConditions = [];
 		const params = [];
 
@@ -223,13 +213,6 @@ export class ContributionService {
 		}
 
 		const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-		const countQuery = `SELECT COUNT(*) as total FROM contributions ${whereClause}`;
-		const countResult = await this.dbSession.executeRead<{ total: number }>(countQuery, params);
-		const total = countResult.results[0]?.total || 0;
-
-		const offset = (page - 1) * limit;
-		const totalPages = Math.ceil(total / limit);
-
 		const query = `
 	  SELECT 
 		c.id, c.user_id as userId, u.display_name as userDisplayName,
@@ -241,16 +224,63 @@ export class ContributionService {
 	  LEFT JOIN users u ON u.vatsim_id = c.user_id
 	  ${whereClause}
 	  ORDER BY c.submission_date DESC
-	  LIMIT ? OFFSET ?
 	`;
 
-		const contributionsResult = await this.dbSession.executeRead<Contribution>(query, [...params, limit, offset]);
+		const contributionsResult = await this.dbSession.executeRead<Contribution>(query, params);
+		const total = contributionsResult.results.length;
 		return {
 			contributions: contributionsResult.results,
 			total,
-			page,
-			limit,
-			totalPages,
+		};
+	}
+
+	async listContributionsSimple(options: ContributionListOptions): Promise<{
+		contributions: Array<{
+			id: string;
+			airportIcao: string;
+			packageName: string;
+		}>;
+		total: number;
+	}> {
+		const { status = 'all', airportIcao, userId } = options;
+		const whereConditions = [];
+		const params = [];
+
+		if (status !== 'all') {
+			whereConditions.push('status = ?');
+			params.push(status);
+		}
+
+		if (airportIcao) {
+			whereConditions.push('airport_icao = ?');
+			params.push(airportIcao);
+		}
+
+		if (userId) {
+			whereConditions.push('user_id = ?');
+			params.push(userId);
+		}
+
+		const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+		const query = `
+		SELECT 
+			c.id,
+			c.airport_icao as airportIcao,
+			c.package_name as packageName
+		FROM contributions c
+		${whereClause}
+		ORDER BY c.submission_date DESC
+		`;
+
+		const contributionsResult = await this.dbSession.executeRead<{
+			id: string;
+			airportIcao: string;
+			packageName: string;
+		}>(query, params);
+
+		return {
+			contributions: contributionsResult.results,
+			total: contributionsResult.results.length,
 		};
 	}
 
@@ -525,101 +555,7 @@ export class ContributionService {
 			throw new Error(`Failed to regenerate: ${msg}`);
 		}
 	}
-	/**
-	 * Get user contributions with detailed list and summary statistics
-	 * @param userId The user ID to get contributions for
-	 * @param options Optional filtering and pagination options
-	 * @returns User contributions data with detailed list and summary
-	 */
-	async getUserContributions(
-		userId: string,
-		options: {
-			status?: 'pending' | 'approved' | 'rejected' | 'all';
-			page?: number;
-			limit?: number;
-		} = {},
-	): Promise<{
-		contributions: Contribution[];
-		summary: {
-			total: number;
-			approved: number;
-			pending: number;
-			rejected: number;
-		};
-		pagination: {
-			page: number;
-			limit: number;
-			totalPages: number;
-		};
-	}> {
-		const { status = 'all', page = 1, limit = 10 } = options;
 
-		// Build WHERE and pagination first; we'll run summary and list queries in parallel
-		const whereConditions = ['user_id = ?'];
-		const params: (string | number)[] = [userId];
-		if (status !== 'all') {
-			whereConditions.push('status = ?');
-			params.push(status);
-		}
-		const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
-		const offset = (page - 1) * limit;
-
-		// Get summary counts
-		const summaryPromise = this.dbSession.executeRead<{
-			total: number;
-			approved: number;
-			pending: number;
-			rejected: number;
-		}>(
-			`
-	  SELECT 
-		COUNT(*) as total,
-		SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
-		SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-		SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
-	  FROM contributions
-	  WHERE user_id = ?
-	`,
-			[userId],
-		);
-
-		// Get the detailed contributions list
-		const listQuery = `
-	  SELECT 
-		c.id, c.user_id as userId, u.display_name as userDisplayName,
-		c.airport_icao as airportIcao, c.package_name as packageName,
-		c.submitted_xml as submittedXml, c.notes,
-		c.submission_date as submissionDate, c.status,
-		c.rejection_reason as rejectionReason, c.decision_date as decisionDate
-	  FROM contributions c
-	  LEFT JOIN users u ON u.vatsim_id = c.user_id
-	  ${whereClause}
-	  ORDER BY c.submission_date DESC
-	  LIMIT ? OFFSET ?
-	`;
-		const listPromise = this.dbSession.executeRead<Contribution>(listQuery, [...params, limit, offset]);
-
-		const [summaryResult, contributionsResult] = await Promise.all([summaryPromise, listPromise]);
-		const summaryRow = summaryResult.results[0] || { total: 0, approved: 0, pending: 0, rejected: 0 };
-		const summary = {
-			total: summaryRow.total || 0,
-			approved: summaryRow.approved || 0,
-			pending: summaryRow.pending || 0,
-			rejected: summaryRow.rejected || 0,
-		};
-
-		// Calculate pagination (uses summary.total and limit)
-		const totalPages = Math.ceil(summary.total / limit);
-		return {
-			contributions: contributionsResult.results,
-			summary,
-			pagination: {
-				page,
-				limit,
-				totalPages,
-			},
-		};
-	}
 	async getTopPackages(): Promise<
 		Array<{
 			packageName: string;
