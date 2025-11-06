@@ -120,15 +120,16 @@ export class PointsService {
 		};
 
 		// Insert into database
+		let inserted = false;
 		for (let attempt = 0; attempt < 8; attempt++) {
 			const barsId = await this.idService.generateBarsId();
 			try {
-				const result = await this.dbSession.executeWrite(
+				await this.dbSession.executeWrite(
 					`
-			INSERT OR IGNORE INTO points (
-				id, airport_id, type, name, coordinates, directionality,
-				color, elevated, ihp, created_at, updated_at, created_by
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO points (
+			id, airport_id, type, name, coordinates, directionality,
+			color, elevated, ihp, created_at, updated_at, created_by
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 					[
 						barsId,
@@ -146,14 +147,18 @@ export class PointsService {
 					],
 				);
 
-				if (result.meta?.changes === 1) {
-					newPoint.id = barsId;
-					break;
-				}
+				newPoint.id = barsId;
+				inserted = true;
+				break;
 			} catch (e) {
-				// Retry if unique constraint failed (very very rare)
+				if (!this.isUniqueConstraintError(e)) {
+					throw e;
+				}
 				console.warn(`Attempt ${attempt + 1} to create point with unique ID failed`, e);
 			}
+		}
+		if (!inserted) {
+			throw new HttpError(500, 'Failed to create point with unique ID');
 		}
 
 		try {
@@ -306,9 +311,9 @@ export class PointsService {
 			for (let attempt = 0; attempt < 8; attempt++) {
 				const barsId = await this.idService.generateBarsId();
 				try {
-					const result = await this.dbSession.executeWrite(
+					await this.dbSession.executeWrite(
 						`
-						INSERT OR IGNORE INTO points (
+						INSERT INTO points (
 							id, airport_id, type, name, coordinates, directionality,
 							color, elevated, ihp, created_at, updated_at, created_by
 						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -329,13 +334,14 @@ export class PointsService {
 						],
 					);
 
-					if (result.meta?.changes === 1) {
-						point.id = barsId;
-						createdPoints.push(point);
-						inserted = true;
-						break;
-					}
+					point.id = barsId;
+					createdPoints.push(point);
+					inserted = true;
+					break;
 				} catch (e) {
+					if (!this.isUniqueConstraintError(e)) {
+						throw e;
+					}
 					console.warn(`Attempt ${attempt + 1} to create point with unique ID failed`, e);
 				}
 			}
@@ -384,6 +390,14 @@ export class PointsService {
 	async getAirportPoints(airportId: string): Promise<Point[]> {
 		const results = await this.dbSession.executeRead<PointRow>('SELECT * FROM points WHERE airport_id = ?', [airportId]);
 		return results.results.map((r) => this.mapPointFromDb(r));
+	}
+
+	private isUniqueConstraintError(error: unknown): boolean {
+		if (!(error instanceof Error)) {
+			return false;
+		}
+		const msg = error.message.toLowerCase();
+		return msg.includes('unique constraint failed') || msg.includes('constraint failed') || msg.includes('sqlite_constraint');
 	}
 
 	private validatePoint(point: PointData) {
