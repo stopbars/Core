@@ -2,7 +2,7 @@ import { BarsDBRecord, BarsLightPoint, BarsPolygon, GeoPoint, ProcessedBarsObjec
 import { calculateDestinationPoint, calculateHeading, generateEquidistantPoints, calculateDistance, smoothLine } from './geoUtils';
 
 const STOPBAR_SPACING = 3;
-const LEAD_ON_SPACING = 12;
+const LEAD_ON_SPACING = 11.25;
 const STAND_SPACING = 15;
 const TAXIWAY_SPACING = 11.25;
 const ELEVATED_LIGHT_INWARD_ANGLE = 140;
