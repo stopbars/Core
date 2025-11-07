@@ -79,18 +79,14 @@ export function smoothLine(points: GeoPoint[], segments = 5): GeoPoint[] {
 }
 
 /**
- * Generates points along a line at exactly equal intervals
+ * Generates points along a line at exactly equal intervals, centered across the full path length
  */
 export function generateEquidistantPoints(
 	points: GeoPoint[],
 	interval: number, // interval in meters
 ): GeoPoint[] {
 	if (points.length < 2) return points;
-
-	const result: GeoPoint[] = [];
-
-	// Always add the first point
-	result.push({ ...points[0] });
+	if (interval <= 0) return points.map((p) => ({ ...p }));
 
 	// Precompute segment lengths and bearings to avoid repeated geodesic calculations
 	const segmentLengths: number[] = new Array(points.length - 1);
@@ -104,35 +100,50 @@ export function generateEquidistantPoints(
 
 	// Compute the total path length once before the loop
 	const totalPathLength = segmentLengths.reduce((sum, v) => sum + v, 0);
+	if (totalPathLength === 0) {
+		return [{ ...points[0] }];
+	}
 
-	let totalDistanceTraveled = 0;
-	let currentSegmentIndex = 0;
-	let currentSegmentStart = points[0];
-	let currentSegmentLength = segmentLengths[0];
-	let currentSegmentBearing = segmentBearings[0];
-	let distanceInCurrentSegment = 0;
+	const pointCount = Math.max(1, Math.floor(totalPathLength / interval) + 1);
+	const totalSpan = (pointCount - 1) * interval;
+	let startOffset = (totalPathLength - totalSpan) / 2;
+	if (startOffset < 0) startOffset = 0;
 
-	// Keep adding points at exact intervals until we reach the end of the line
-	while (totalDistanceTraveled + interval <= totalPathLength) {
-		totalDistanceTraveled += interval;
-
-		// Find the segment where the next point should be placed
-		while (distanceInCurrentSegment + currentSegmentLength <= totalDistanceTraveled && currentSegmentIndex < points.length - 2) {
-			// Move to the next segment
-			distanceInCurrentSegment += currentSegmentLength;
-			currentSegmentIndex++;
-			currentSegmentStart = points[currentSegmentIndex];
-			currentSegmentLength = segmentLengths[currentSegmentIndex];
-			currentSegmentBearing = segmentBearings[currentSegmentIndex];
+	const getPointAtDistance = (distance: number): GeoPoint => {
+		if (distance <= 0) {
+			return { ...points[0] };
 		}
 
-		// Calculate the exact position within the current segment
-		const distanceIntoSegment = totalDistanceTraveled - distanceInCurrentSegment;
+		let remaining = distance;
+		let segmentIndex = 0;
 
-		// Place the point using precise geodesic calculation
-		const newPoint = calculateDestinationPoint(currentSegmentStart, distanceIntoSegment, currentSegmentBearing);
+		while (segmentIndex < segmentLengths.length) {
+			const length = segmentLengths[segmentIndex];
+			if (remaining <= length) {
+				return calculateDestinationPoint(points[segmentIndex], remaining, segmentBearings[segmentIndex]);
+			}
+			remaining -= length;
+			segmentIndex++;
+		}
 
-		result.push(newPoint);
+		return { ...points[points.length - 1] };
+	};
+
+	const result: GeoPoint[] = [];
+	const EPSILON = 1e-6;
+
+	for (let i = 0; i < pointCount; i++) {
+		const targetDistance = startOffset + i * interval;
+		if (targetDistance > totalPathLength + EPSILON) {
+			break;
+		}
+
+		const clampedDistance = Math.min(targetDistance, totalPathLength);
+		result.push(getPointAtDistance(clampedDistance));
+	}
+
+	if (result.length === 0) {
+		result.push({ ...points[points.length - 1] });
 	}
 
 	return result;
