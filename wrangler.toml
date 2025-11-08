@@ -1,13 +1,14 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "bars-core"
 main = "src/index.ts"
-compatibility_date = "2025-09-09"
+compatibility_date = "2025-11-07"
 compatibility_flags = ["nodejs_compat"]
 account_id = "089721947f7dd0fe58fca4321531d933" # Change this for local testing
 preview_urls = false
 
 [observability]
 enabled = true
+traces = {enabled = true}
 
 [placement]
 mode = "smart"
