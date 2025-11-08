@@ -1,11 +1,10 @@
 import { IDService } from './id';
 import { DivisionService } from './divisions';
-import { AuthService } from './auth';
 import { HttpError } from './errors';
 import { Point, PointChangeset, PointData } from '../types';
 import { PostHogService } from './posthog';
 
-import { DatabaseSessionService, PreparedStatement } from './database-session';
+import { DatabaseSessionService, PreparedStatement, DatabaseSerializable } from './database-session';
 
 type PointRow = {
 	id: string;
@@ -49,28 +48,14 @@ export class PointsService {
 		id: string;
 		airportId: string;
 	}>;
-	private stmtUpdate: PreparedStatement<{
+	private stmtCheckPointId: PreparedStatement<{
 		id: string;
-		airportId: string;
-		// properties here are required-nullable instead of optional as in `Point`
-		type: Point['type'];
-		name: string;
-		coordinates: string;
-		directionality: null | Required<Point>['directionality'];
-		color: null | Required<Point>['color'];
-		elevated: null | boolean;
-		ihp: null | boolean;
-	}>;
-	private stmtDelete: PreparedStatement<{
-		id: string;
-		airportId: string;
 	}>;
 
 	constructor(
 		private db: D1Database,
 		private idService: IDService,
 		private divisions: DivisionService,
-		private auth: AuthService,
 		private posthog?: PostHogService,
 	) {
 		this.dbSession = new DatabaseSessionService(db);
@@ -82,21 +67,7 @@ export class PointsService {
 				WHERE id = ? AND airport_id = ?;`,
 			['id', 'airportId'],
 		);
-		this.stmtUpdate = this.dbSession.prepare(
-			`UPDATE points
-				SET
-					type           = ?,
-					name           = ?,
-					coordinates    = ?,
-					directionality = ?,
-					color          = ?,
-					elevated       = ?,
-					ihp            = ?,
-					updated_at     = CURRENT_TIMESTAMP
-				WHERE id = ? AND airport_id = ?;`,
-			['type', 'name', 'coordinates', 'directionality', 'color', 'elevated', 'ihp', 'id', 'airportId'],
-		);
-		this.stmtDelete = this.dbSession.prepare('DELETE FROM points WHERE id = ? AND airport_id = ?;', ['id', 'airportId']);
+		this.stmtCheckPointId = this.dbSession.prepare('SELECT id FROM points WHERE id = ? LIMIT 1;', ['id']);
 	}
 
 	async createPoint(airportId: string, userId: string, point: PointData): Promise<Point> {
@@ -110,56 +81,38 @@ export class PointsService {
 		this.validatePoint(point);
 
 		const now = new Date().toISOString();
+		const [barsId] = await this.generatePointIds(1);
 		const newPoint: Point = {
 			...point,
-			id: '',
+			id: barsId,
 			airportId,
 			createdAt: now,
 			updatedAt: now,
 			createdBy: userId,
 		};
 
-		// Insert into database
-		let inserted = false;
-		for (let attempt = 0; attempt < 8; attempt++) {
-			const barsId = await this.idService.generateBarsId();
-			try {
-				await this.dbSession.executeWrite(
-					`
-		INSERT INTO points (
-			id, airport_id, type, name, coordinates, directionality,
-			color, elevated, ihp, created_at, updated_at, created_by
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-					[
-						barsId,
-						airportId,
-						newPoint.type,
-						newPoint.name,
-						JSON.stringify(newPoint.coordinates),
-						newPoint.directionality || null,
-						newPoint.color || null,
-						newPoint.elevated || false,
-						newPoint.ihp || false,
-						newPoint.createdAt,
-						newPoint.updatedAt,
-						newPoint.createdBy,
-					],
-				);
-
-				newPoint.id = barsId;
-				inserted = true;
-				break;
-			} catch (e) {
-				if (!this.isUniqueConstraintError(e)) {
-					throw e;
-				}
-				console.warn(`Attempt ${attempt + 1} to create point with unique ID failed`, e);
-			}
-		}
-		if (!inserted) {
-			throw new HttpError(500, 'Failed to create point with unique ID');
-		}
+		await this.dbSession.executeWrite(
+			`
+	INSERT INTO points (
+		id, airport_id, type, name, coordinates, directionality,
+		color, elevated, ihp, created_at, updated_at, created_by
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+			[
+				newPoint.id,
+				airportId,
+				newPoint.type,
+				newPoint.name,
+				JSON.stringify(newPoint.coordinates),
+				newPoint.directionality ?? null,
+				newPoint.color ?? null,
+				newPoint.elevated ?? false,
+				newPoint.ihp ?? false,
+				newPoint.createdAt,
+				newPoint.updatedAt,
+				newPoint.createdBy,
+			],
+		);
 
 		try {
 			this.posthog?.track('Point Created', { airportId, userId, type: point.type });
@@ -270,109 +223,157 @@ export class PointsService {
 		const modifyEntries = Object.entries(changeset.modify ?? {});
 		const selects = modifyEntries.map(([id]) => this.stmtSelect.bindAll({ id, airportId }));
 		const selectResults = await this.dbSession.executeBatch(selects);
-		const modifiedPoints = selectResults
-			.map((result) => {
-				const rows = result.results as unknown as PointRow[] | null;
-				const first = rows && rows[0];
-				if (!first) {
-					throw new HttpError(404, 'Point targeted by modify operation does not exist');
-				}
-				return this.mapPointFromDb(first) as PointData;
-			})
-			.map((basis, index) => {
-				const [id, patch] = modifyEntries[index];
-				return {
-					...basis,
-					...patch,
-					id,
-				};
-			});
+		const modifyContexts = modifyEntries.map(([id, patch], index) => {
+			const rows = selectResults[index]?.results as unknown as PointRow[] | null;
+			const first = rows && rows[0];
+			if (!first) {
+				throw new HttpError(404, 'Point targeted by modify operation does not exist');
+			}
+			const basePoint = this.mapPointFromDb(first);
+			const merged: PointData = {
+				type: patch.type ?? basePoint.type,
+				name: patch.name ?? basePoint.name,
+				coordinates: patch.coordinates ?? basePoint.coordinates,
+				directionality: Object.prototype.hasOwnProperty.call(patch, 'directionality')
+					? (patch.directionality ?? undefined)
+					: basePoint.directionality,
+				color: Object.prototype.hasOwnProperty.call(patch, 'color') ? (patch.color ?? undefined) : basePoint.color,
+				elevated: Object.prototype.hasOwnProperty.call(patch, 'elevated') ? (patch.elevated ?? undefined) : basePoint.elevated,
+				ihp: Object.prototype.hasOwnProperty.call(patch, 'ihp') ? (patch.ihp ?? undefined) : basePoint.ihp,
+			};
+			this.validatePoint(merged);
+			return { id, patch, merged };
+		});
 
 		for (const point of changeset.create ?? []) {
 			this.validatePoint(point);
 		}
-		for (const point of modifiedPoints) {
-			this.validatePoint(point);
-		}
 
 		const now = new Date().toISOString();
-
 		const createdPoints: Point[] = [];
-		for (const data of changeset.create ?? []) {
-			const point: Point = {
-				...data,
-				id: '',
-				airportId,
-				createdAt: now,
-				updatedAt: now,
-				createdBy: userId,
-			};
-			let inserted = false;
-			for (let attempt = 0; attempt < 8; attempt++) {
-				const barsId = await this.idService.generateBarsId();
-				try {
-					await this.dbSession.executeWrite(
-						`
-						INSERT INTO points (
-							id, airport_id, type, name, coordinates, directionality,
-							color, elevated, ihp, created_at, updated_at, created_by
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-						`,
-						[
-							barsId,
-							airportId,
-							point.type,
-							point.name,
-							JSON.stringify(point.coordinates),
-							point.directionality || null,
-							point.color || null,
-							point.elevated || false,
-							point.ihp || false,
-							point.createdAt,
-							point.updatedAt,
-							point.createdBy,
-						],
-					);
+		const statements: Array<{ query: string; params: DatabaseSerializable[] }> = [];
+		const createData = changeset.create ?? [];
+		if (createData.length > 0) {
+			const ids = await this.generatePointIds(createData.length);
+			const valueFragments: string[] = [];
+			const valueParams: DatabaseSerializable[] = [];
+			createData.forEach((data, index) => {
+				const point: Point = {
+					...data,
+					id: ids[index],
+					airportId,
+					createdAt: now,
+					updatedAt: now,
+					createdBy: userId,
+				};
+				createdPoints.push(point);
+				valueFragments.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+				valueParams.push(
+					point.id,
+					airportId,
+					point.type,
+					point.name,
+					JSON.stringify(point.coordinates),
+					point.directionality ?? null,
+					point.color ?? null,
+					point.elevated ?? false,
+					point.ihp ?? false,
+					point.createdAt,
+					point.updatedAt,
+					point.createdBy,
+				);
+			});
+			statements.push({
+				query: `INSERT INTO points (
+					id, airport_id, type, name, coordinates, directionality,
+					color, elevated, ihp, created_at, updated_at, created_by
+				) VALUES ${valueFragments.join(', ')}`,
+				params: valueParams,
+			});
+		}
 
-					point.id = barsId;
-					createdPoints.push(point);
-					inserted = true;
-					break;
-				} catch (e) {
-					if (!this.isUniqueConstraintError(e)) {
-						throw e;
+		if (modifyContexts.length > 0) {
+			const columnConfigs: Array<{
+				key: keyof PointData;
+				column: string;
+				value: (context: { patch: Partial<PointData>; merged: PointData }) => DatabaseSerializable;
+			}> = [
+				{ key: 'type', column: 'type', value: ({ merged }) => merged.type },
+				{ key: 'name', column: 'name', value: ({ merged }) => merged.name },
+				{ key: 'coordinates', column: 'coordinates', value: ({ merged }) => JSON.stringify(merged.coordinates) },
+				{ key: 'directionality', column: 'directionality', value: ({ patch }) => patch.directionality ?? null },
+				{ key: 'color', column: 'color', value: ({ patch }) => patch.color ?? null },
+				{ key: 'elevated', column: 'elevated', value: ({ patch }) => patch.elevated ?? null },
+				{ key: 'ihp', column: 'ihp', value: ({ patch }) => patch.ihp ?? null },
+			];
+
+			const updateTargets = new Map<string, Array<{ id: string; value: DatabaseSerializable }>>(
+				columnConfigs.map((config) => [config.column, []]),
+			);
+
+			for (const context of modifyContexts) {
+				const { id, patch, merged } = context;
+				for (const config of columnConfigs) {
+					const patchValue = patch[config.key];
+					if (!Object.prototype.hasOwnProperty.call(patch, config.key) || patchValue === undefined) {
+						continue;
 					}
-					console.warn(`Attempt ${attempt + 1} to create point with unique ID failed`, e);
+					updateTargets.get(config.column)?.push({ id, value: config.value({ patch, merged }) });
 				}
 			}
-			if (!inserted) {
-				throw new HttpError(500, 'Failed to create point with unique ID');
+
+			const caseClauses: string[] = [];
+			const updateParams: DatabaseSerializable[] = [];
+			for (const [column, entries] of updateTargets) {
+				if (!entries || entries.length === 0) {
+					continue;
+				}
+				const clauseParts: string[] = [`${column} = CASE id`];
+				for (const entry of entries) {
+					clauseParts.push('WHEN ? THEN ?');
+					updateParams.push(entry.id, entry.value);
+				}
+				clauseParts.push(`ELSE ${column} END`);
+				caseClauses.push(clauseParts.join(' '));
+			}
+
+			if (caseClauses.length > 0) {
+				caseClauses.push('updated_at = ?');
+				updateParams.push(now);
+
+				const modifyIds = modifyContexts.map((context) => context.id);
+				const idPlaceholders = modifyIds.map(() => '?').join(', ');
+				updateParams.push(airportId, ...modifyIds);
+
+				statements.push({
+					query: `UPDATE points
+					SET ${caseClauses.join(', ')}
+					WHERE airport_id = ? AND id IN (${idPlaceholders})`,
+					params: updateParams,
+				});
 			}
 		}
-		const updates = modifiedPoints.map((point) =>
-			this.stmtUpdate.bindAll({
-				id: point.id,
-				airportId,
-				type: point.type ?? null,
-				name: point.name ?? null,
-				coordinates: JSON.stringify(point.coordinates),
-				directionality: point.directionality ?? null,
-				color: point.color ?? null,
-				elevated: point.elevated ?? null,
-				ihp: point.ihp ?? null,
-			}),
-		);
-		const deletes = (changeset.delete ?? []).map((id) => this.stmtDelete.bindAll({ id, airportId }));
 
-		await this.dbSession.executeBatch(updates.concat(deletes));
+		const deleteIds = changeset.delete ?? [];
+		if (deleteIds.length > 0) {
+			const deletePlaceholders = deleteIds.map(() => '?').join(', ');
+			statements.push({
+				query: `DELETE FROM points WHERE airport_id = ? AND id IN (${deletePlaceholders})`,
+				params: [airportId, ...deleteIds],
+			});
+		}
+
+		if (statements.length > 0) {
+			await this.dbSession.executeBatch(statements);
+		}
 
 		try {
 			this.posthog?.track('Points Changeset Applied', {
 				airportId,
 				userId,
 				created: createdPoints.length,
-				modified: modifiedPoints.length,
-				deleted: (changeset.delete ?? []).length,
+				modified: modifyContexts.length,
+				deleted: deleteIds.length,
 			});
 		} catch (e) {
 			console.warn('Posthog track failed (Points Changeset Applied)', e);
@@ -392,12 +393,41 @@ export class PointsService {
 		return results.results.map((r) => this.mapPointFromDb(r));
 	}
 
-	private isUniqueConstraintError(error: unknown): boolean {
-		if (!(error instanceof Error)) {
-			return false;
+	private async generatePointIds(count: number): Promise<string[]> {
+		if (count <= 0) {
+			return [];
 		}
-		const msg = error.message.toLowerCase();
-		return msg.includes('unique constraint failed') || msg.includes('constraint failed') || msg.includes('sqlite_constraint');
+
+		const allocatedIds = new Set<string>();
+		let attempts = 0;
+		const maxAttempts = 3;
+
+		while (allocatedIds.size < count && attempts < maxAttempts) {
+			attempts += 1;
+			const needed = count - allocatedIds.size;
+			const generated = await this.idService.generateBarsIds(needed);
+			const candidateSet = new Set(generated.filter((candidate) => !allocatedIds.has(candidate)));
+			if (candidateSet.size === 0) {
+				continue;
+			}
+
+			const candidates = Array.from(candidateSet);
+			const statements = candidates.map((id) => this.stmtCheckPointId.bindAll({ id }));
+			const results = await this.dbSession.executeBatch(statements);
+
+			results.forEach((result, index) => {
+				const rows = (result.results as unknown as Array<{ id: string }> | null) ?? [];
+				if (rows.length === 0) {
+					allocatedIds.add(candidates[index]);
+				}
+			});
+		}
+
+		if (allocatedIds.size < count) {
+			throw new HttpError(500, 'Failed to allocate unique point IDs');
+		}
+
+		return Array.from(allocatedIds);
 	}
 
 	private validatePoint(point: PointData) {

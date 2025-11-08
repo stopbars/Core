@@ -87,7 +87,7 @@ export const ServicePool = (() => {
 		},
 		getPoints(env: Env) {
 			if (!points) {
-				points = new PointsService(env.DB, this.getID(), this.getDivisions(env), this.getAuth(env), this.getPostHog(env));
+				points = new PointsService(env.DB, this.getID(), this.getDivisions(env), this.getPostHog(env));
 			}
 			return points;
 		},

@@ -641,7 +641,7 @@ export class Connection {
 			// Create the necessary services to fetch points
 			const idService = new IDService();
 			const divisions = new DivisionService(this.env.DB);
-			const pointsService = new PointsService(this.env.DB, idService, divisions, this.auth);
+			const pointsService = new PointsService(this.env.DB, idService, divisions);
 
 			// Fetch all points for this airport
 			const airportPoints = await pointsService.getAirportPoints(airport);
