@@ -255,8 +255,6 @@ export class PointsService {
 		const createData = changeset.create ?? [];
 		if (createData.length > 0) {
 			const ids = await this.generatePointIds(createData.length);
-			const valueFragments: string[] = [];
-			const valueParams: DatabaseSerializable[] = [];
 			createData.forEach((data, index) => {
 				const point: Point = {
 					...data,
@@ -267,28 +265,26 @@ export class PointsService {
 					createdBy: userId,
 				};
 				createdPoints.push(point);
-				valueFragments.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-				valueParams.push(
-					point.id,
-					airportId,
-					point.type,
-					point.name,
-					JSON.stringify(point.coordinates),
-					point.directionality ?? null,
-					point.color ?? null,
-					point.elevated ?? false,
-					point.ihp ?? false,
-					point.createdAt,
-					point.updatedAt,
-					point.createdBy,
-				);
-			});
-			statements.push({
-				query: `INSERT INTO points (
-					id, airport_id, type, name, coordinates, directionality,
-					color, elevated, ihp, created_at, updated_at, created_by
-				) VALUES ${valueFragments.join(', ')}`,
-				params: valueParams,
+				statements.push({
+					query: `INSERT INTO points (
+						id, airport_id, type, name, coordinates, directionality,
+						color, elevated, ihp, created_at, updated_at, created_by
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					params: [
+						point.id,
+						airportId,
+						point.type,
+						point.name,
+						JSON.stringify(point.coordinates),
+						point.directionality ?? null,
+						point.color ?? null,
+						point.elevated ?? false,
+						point.ihp ?? false,
+						point.createdAt,
+						point.updatedAt,
+						point.createdBy,
+					],
+				});
 			});
 		}
 
