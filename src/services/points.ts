@@ -401,6 +401,11 @@ export class PointsService {
 	}
 
 	private validatePoint(point: PointData) {
+		const allowedTypes: Array<Point['type']> = ['stopbar', 'lead_on', 'taxiway', 'stand'];
+		if (!point.type || !allowedTypes.includes(point.type)) {
+			throw new HttpError(400, 'Point must have a valid type');
+		}
+
 		// Normalize coordinates: accept either legacy single object or array of objects
 		const rawCoords: unknown = (point as unknown as { coordinates?: unknown }).coordinates;
 		if (rawCoords === undefined || rawCoords === null) throw new HttpError(400, 'Point must have coordinates');
