@@ -4,7 +4,7 @@
 import { DatabaseSessionService } from './database-session';
 
 export class NotamService {
-	constructor(private db: D1Database) { }
+	constructor(private db: D1Database) {}
 	/**
 	 * Get the current global NOTAM
 	 */ async getGlobalNotam(): Promise<{ content: string; type: string } | null> {

@@ -59,7 +59,7 @@ interface ContributorsData {
 export class GitHubService {
 	private readonly GITHUB_ORG = 'stopbars';
 
-	constructor() { }
+	constructor() {}
 
 	/**
 	 * Get all public repositories for the organization
@@ -150,7 +150,7 @@ export class GitHubService {
 						console.error(`Error fetching ${repoInfo.full_name}:`, err);
 						return null;
 					}
-				})
+				}),
 			);
 
 			batchResults.forEach((result) => {

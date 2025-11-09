@@ -12,7 +12,7 @@ interface CacheOptions {
 export class CacheService {
 	private namespaceVersionCache = new Map<string, number>();
 
-	constructor(private env: Env) { }
+	constructor(private env: Env) {}
 
 	private versionMetaKey(namespace: string): Request {
 		return new Request(`https://cache.stopbars/__version/${namespace}`);
@@ -246,39 +246,39 @@ export const CacheKeys = {
 	 */
 	fromParams:
 		(...params: string[]) =>
-			(req: Request): string => {
-				const url = new URL(req.url);
-				const path = url.pathname.replace(/[^A-Za-z0-9/_-]/g, '');
-				const safeValues = params
-					.map((p) => url.searchParams.get(p) || '')
-					.map((v) => v.replace(/[^A-Za-z0-9._-]/g, '')) // whitelist chars
-					.join('-');
-				return `${path}-${safeValues}`;
-			},
+		(req: Request): string => {
+			const url = new URL(req.url);
+			const path = url.pathname.replace(/[^A-Za-z0-9/_-]/g, '');
+			const safeValues = params
+				.map((p) => url.searchParams.get(p) || '')
+				.map((v) => v.replace(/[^A-Za-z0-9._-]/g, '')) // whitelist chars
+				.join('-');
+			return `${path}-${safeValues}`;
+		},
 
 	/**
 	 * Generate cache key with user context (for authenticated endpoints)
 	 */
 	withUser:
 		(baseKey: string) =>
-			(req: Request): string => {
-				// Prefer explicit X-Vatsim-Token; fall back to Bearer token from Authorization
-				let token = req.headers.get('X-Vatsim-Token') || '';
-				if (!token) {
-					const authz = req.headers.get('Authorization') || '';
-					if (authz.toLowerCase().startsWith('bearer ')) {
-						token = authz.slice(7);
-					}
+		(req: Request): string => {
+			// Prefer explicit X-Vatsim-Token; fall back to Bearer token from Authorization
+			let token = req.headers.get('X-Vatsim-Token') || '';
+			if (!token) {
+				const authz = req.headers.get('Authorization') || '';
+				if (authz.toLowerCase().startsWith('bearer ')) {
+					token = authz.slice(7);
 				}
-				if (!token) {
-					return `${baseKey}-user-anonymous`;
-				}
-				// Synchronous non-cryptographic hash (djb2) to avoid leaking token bytes
-				let hash = 5381;
-				for (let i = 0; i < token.length; i++) {
-					hash = ((hash << 5) + hash) ^ token.charCodeAt(i);
-				}
-				const userHash = (hash >>> 0).toString(16).padStart(8, '0');
-				return `${baseKey}-user-${userHash}`;
-			},
+			}
+			if (!token) {
+				return `${baseKey}-user-anonymous`;
+			}
+			// Synchronous non-cryptographic hash (djb2) to avoid leaking token bytes
+			let hash = 5381;
+			for (let i = 0; i < token.length; i++) {
+				hash = ((hash << 5) + hash) ^ token.charCodeAt(i);
+			}
+			const userHash = (hash >>> 0).toString(16).padStart(8, '0');
+			return `${baseKey}-user-${userHash}`;
+		},
 };

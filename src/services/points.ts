@@ -294,22 +294,22 @@ export class PointsService {
 				column: string;
 				resolver: (context: { patch: Partial<PointData>; merged: PointData }) => DatabaseSerializable;
 			}> = [
-					{ key: 'type', column: 'type', resolver: ({ merged }) => merged.type },
-					{ key: 'name', column: 'name', resolver: ({ merged }) => merged.name },
-					{ key: 'coordinates', column: 'coordinates', resolver: ({ merged }) => JSON.stringify(merged.coordinates) },
-					{
-						key: 'directionality',
-						column: 'directionality',
-						resolver: ({ patch, merged }) => (patch.directionality === null ? null : (merged.directionality ?? null)),
-					},
-					{ key: 'color', column: 'color', resolver: ({ patch, merged }) => (patch.color === null ? null : (merged.color ?? null)) },
-					{
-						key: 'elevated',
-						column: 'elevated',
-						resolver: ({ patch, merged }) => (patch.elevated === null ? null : (merged.elevated ?? null)),
-					},
-					{ key: 'ihp', column: 'ihp', resolver: ({ patch, merged }) => (patch.ihp === null ? null : (merged.ihp ?? null)) },
-				];
+				{ key: 'type', column: 'type', resolver: ({ merged }) => merged.type },
+				{ key: 'name', column: 'name', resolver: ({ merged }) => merged.name },
+				{ key: 'coordinates', column: 'coordinates', resolver: ({ merged }) => JSON.stringify(merged.coordinates) },
+				{
+					key: 'directionality',
+					column: 'directionality',
+					resolver: ({ patch, merged }) => (patch.directionality === null ? null : (merged.directionality ?? null)),
+				},
+				{ key: 'color', column: 'color', resolver: ({ patch, merged }) => (patch.color === null ? null : (merged.color ?? null)) },
+				{
+					key: 'elevated',
+					column: 'elevated',
+					resolver: ({ patch, merged }) => (patch.elevated === null ? null : (merged.elevated ?? null)),
+				},
+				{ key: 'ihp', column: 'ihp', resolver: ({ patch, merged }) => (patch.ihp === null ? null : (merged.ihp ?? null)) },
+			];
 
 			for (const context of modifyContexts) {
 				const { id, patch, merged } = context;
