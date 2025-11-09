@@ -59,7 +59,7 @@ interface ContributorsData {
 export class GitHubService {
 	private readonly GITHUB_ORG = 'stopbars';
 
-	constructor() {}
+	constructor() { }
 
 	/**
 	 * Get all public repositories for the organization
@@ -136,16 +136,29 @@ export class GitHubService {
 
 		// Get all organization repositories
 		const orgRepos = await this.getOrganizationRepositories();
+		const publicRepos = orgRepos.filter((repo) => !repo.private);
+		const concurrency = 10;
 
-		// Fetch contributors from each repository
-		for (const repoInfo of orgRepos) {
-			try {
-				// Skip private repositories (should already be filtered but double-check)
-				if (repoInfo.private) {
-					continue;
+		for (let i = 0; i < publicRepos.length; i += concurrency) {
+			const batch = publicRepos.slice(i, i + concurrency);
+			const batchResults = await Promise.all(
+				batch.map(async (repoInfo) => {
+					try {
+						const repoContributors = await this.getRepositoryContributors(repoInfo.full_name);
+						return { repoInfo, repoContributors };
+					} catch (err) {
+						console.error(`Error fetching ${repoInfo.full_name}:`, err);
+						return null;
+					}
+				})
+			);
+
+			batchResults.forEach((result) => {
+				if (!result) {
+					return;
 				}
 
-				const repoContributors = await this.getRepositoryContributors(repoInfo.full_name);
+				const { repoInfo, repoContributors } = result;
 
 				repoData.push({
 					name: repoInfo.name,
@@ -159,35 +172,32 @@ export class GitHubService {
 					updatedAt: repoInfo.updated_at,
 				});
 
-				// Merge contributors (avoid duplicates)
 				repoContributors.forEach((contributor) => {
-					if (contributor.type === 'User') {
-						// Exclude bots
-						if (allContributors.has(contributor.id)) {
-							// Add contributions from this repo
-							const existing = allContributors.get(contributor.id)!;
-							existing.contributions += contributor.contributions;
-							existing.repositories.push({
+					if (contributor.type !== 'User') {
+						return;
+					}
+
+					if (allContributors.has(contributor.id)) {
+						const existing = allContributors.get(contributor.id)!;
+						existing.contributions += contributor.contributions;
+						existing.repositories.push({
+							name: repoInfo.name,
+							contributions: contributor.contributions,
+						});
+						return;
+					}
+
+					allContributors.set(contributor.id, {
+						...contributor,
+						repositories: [
+							{
 								name: repoInfo.name,
 								contributions: contributor.contributions,
-							});
-						} else {
-							// New contributor
-							allContributors.set(contributor.id, {
-								...contributor,
-								repositories: [
-									{
-										name: repoInfo.name,
-										contributions: contributor.contributions,
-									},
-								],
-							});
-						}
-					}
+							},
+						],
+					});
 				});
-			} catch (err) {
-				console.error(`Error fetching ${repoInfo.full_name}:`, err);
-			}
+			});
 		}
 
 		// Convert Map to Array and sort by contributions
