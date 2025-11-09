@@ -1,3 +1,5 @@
+const namespaceVersionHints = new Map<string, number>();
+
 interface CacheOptions {
 	ttl?: number; // Time to live in seconds
 	namespace?: string;
@@ -8,13 +10,33 @@ interface CacheOptions {
  * More efficient than KV for short-lived cached data
  */
 export class CacheService {
-	constructor(private env: Env) {}
+	private namespaceVersionCache = new Map<string, number>();
+
+	constructor(private env: Env) { }
 
 	private versionMetaKey(namespace: string): Request {
 		return new Request(`https://cache.stopbars/__version/${namespace}`);
 	}
 
-	private async getNamespaceVersion(namespace: string): Promise<number> {
+	private getCachedNamespaceVersion(namespace: string): number | undefined {
+		const local = this.namespaceVersionCache.get(namespace);
+		if (local !== undefined) {
+			return local;
+		}
+		const hinted = namespaceVersionHints.get(namespace);
+		if (hinted !== undefined) {
+			this.namespaceVersionCache.set(namespace, hinted);
+		}
+		return hinted;
+	}
+
+	private rememberNamespaceVersion(namespace: string, version: number): number {
+		this.namespaceVersionCache.set(namespace, version);
+		namespaceVersionHints.set(namespace, version);
+		return version;
+	}
+
+	private async fetchNamespaceVersion(namespace: string): Promise<number> {
 		const cache = caches.default;
 		const res = await cache.match(this.versionMetaKey(namespace));
 		if (!res) return 1;
@@ -25,6 +47,17 @@ export class CacheService {
 		} catch {
 			return 1;
 		}
+	}
+
+	private async resolveNamespaceVersion(namespace: string, forceRefresh = false): Promise<number> {
+		if (!forceRefresh) {
+			const cached = this.getCachedNamespaceVersion(namespace);
+			if (cached !== undefined) {
+				return cached;
+			}
+		}
+		const fresh = await this.fetchNamespaceVersion(namespace);
+		return this.rememberNamespaceVersion(namespace, fresh);
 	}
 
 	private async setNamespaceVersion(namespace: string, version: number): Promise<void> {
@@ -38,11 +71,12 @@ export class CacheService {
 			},
 		});
 		await cache.put(this.versionMetaKey(namespace), res);
+		this.rememberNamespaceVersion(namespace, version);
 	}
 
 	/** Bump and return the new version for a namespace. */
 	async bumpNamespaceVersion(namespace: string): Promise<number> {
-		const current = await this.getNamespaceVersion(namespace);
+		const current = await this.resolveNamespaceVersion(namespace, true);
 		const next = current + 1;
 		await this.setNamespaceVersion(namespace, next);
 		return next;
@@ -54,23 +88,39 @@ export class CacheService {
 	 * @returns Cached data or null if not found
 	 */
 	async get<T>(key: string, namespace = 'default'): Promise<T | null> {
-		// Versioned cache key with namespace
-		const ver = await this.getNamespaceVersion(namespace);
-		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
-
-		// Try to get from cache
 		const cache = caches.default;
-		const cachedResponse = await cache.match(cacheKey);
+		const matchWithVersion = async (version: number): Promise<T | null> => {
+			const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${version}/${key}`);
+			const cachedResponse = await cache.match(cacheKey);
 
-		if (!cachedResponse) {
+			if (!cachedResponse) {
+				return null;
+			}
+
+			try {
+				return await cachedResponse.json();
+			} catch {
+				return null;
+			}
+		};
+
+		const hintedVersion = this.getCachedNamespaceVersion(namespace);
+		if (hintedVersion !== undefined) {
+			const hintedHit = await matchWithVersion(hintedVersion);
+			if (hintedHit !== null) {
+				return hintedHit;
+			}
+
+			const refreshedVersion = await this.resolveNamespaceVersion(namespace, true);
+			if (refreshedVersion !== hintedVersion) {
+				return await matchWithVersion(refreshedVersion);
+			}
+
 			return null;
 		}
 
-		try {
-			return await cachedResponse.json();
-		} catch {
-			return null;
-		}
+		const ver = await this.resolveNamespaceVersion(namespace);
+		return await matchWithVersion(ver);
 	}
 
 	/**
@@ -83,7 +133,7 @@ export class CacheService {
 		const { ttl = 60, namespace = 'default' } = options;
 
 		// Versioned cache key with namespace
-		const ver = await this.getNamespaceVersion(namespace);
+		const ver = await this.resolveNamespaceVersion(namespace);
 		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
 
 		// Create response with the data
@@ -105,7 +155,7 @@ export class CacheService {
 	 * @param namespace - Cache namespace
 	 */
 	async delete(key: string, namespace = 'default'): Promise<void> {
-		const ver = await this.getNamespaceVersion(namespace);
+		const ver = await this.resolveNamespaceVersion(namespace);
 		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
 		const cache = caches.default;
 		await cache.delete(cacheKey);
@@ -196,39 +246,39 @@ export const CacheKeys = {
 	 */
 	fromParams:
 		(...params: string[]) =>
-		(req: Request): string => {
-			const url = new URL(req.url);
-			const path = url.pathname.replace(/[^A-Za-z0-9/_-]/g, '');
-			const safeValues = params
-				.map((p) => url.searchParams.get(p) || '')
-				.map((v) => v.replace(/[^A-Za-z0-9._-]/g, '')) // whitelist chars
-				.join('-');
-			return `${path}-${safeValues}`;
-		},
+			(req: Request): string => {
+				const url = new URL(req.url);
+				const path = url.pathname.replace(/[^A-Za-z0-9/_-]/g, '');
+				const safeValues = params
+					.map((p) => url.searchParams.get(p) || '')
+					.map((v) => v.replace(/[^A-Za-z0-9._-]/g, '')) // whitelist chars
+					.join('-');
+				return `${path}-${safeValues}`;
+			},
 
 	/**
 	 * Generate cache key with user context (for authenticated endpoints)
 	 */
 	withUser:
 		(baseKey: string) =>
-		(req: Request): string => {
-			// Prefer explicit X-Vatsim-Token; fall back to Bearer token from Authorization
-			let token = req.headers.get('X-Vatsim-Token') || '';
-			if (!token) {
-				const authz = req.headers.get('Authorization') || '';
-				if (authz.toLowerCase().startsWith('bearer ')) {
-					token = authz.slice(7);
+			(req: Request): string => {
+				// Prefer explicit X-Vatsim-Token; fall back to Bearer token from Authorization
+				let token = req.headers.get('X-Vatsim-Token') || '';
+				if (!token) {
+					const authz = req.headers.get('Authorization') || '';
+					if (authz.toLowerCase().startsWith('bearer ')) {
+						token = authz.slice(7);
+					}
 				}
-			}
-			if (!token) {
-				return `${baseKey}-user-anonymous`;
-			}
-			// Synchronous non-cryptographic hash (djb2) to avoid leaking token bytes
-			let hash = 5381;
-			for (let i = 0; i < token.length; i++) {
-				hash = ((hash << 5) + hash) ^ token.charCodeAt(i);
-			}
-			const userHash = (hash >>> 0).toString(16).padStart(8, '0');
-			return `${baseKey}-user-${userHash}`;
-		},
+				if (!token) {
+					return `${baseKey}-user-anonymous`;
+				}
+				// Synchronous non-cryptographic hash (djb2) to avoid leaking token bytes
+				let hash = 5381;
+				for (let i = 0; i < token.length; i++) {
+					hash = ((hash << 5) + hash) ^ token.charCodeAt(i);
+				}
+				const userHash = (hash >>> 0).toString(16).padStart(8, '0');
+				return `${baseKey}-user-${userHash}`;
+			},
 };
