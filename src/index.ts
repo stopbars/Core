@@ -1,7 +1,6 @@
 import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import openapiSpec from '../openapi.json';
 import { Connection } from './network/connection';
 import { AuthService } from './services/auth';
 import { CacheKeys, CacheService, withCache } from './services/cache';
@@ -700,13 +699,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-										.filter((o: DOObject) => allowedIds.has(o.id))
-										.map((o: DOObject) => ({
-											id: o.id,
-											state: o.state,
-											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-										}))
+									.filter((o: DOObject) => allowedIds.has(o.id))
+									.map((o: DOObject) => ({
+										id: o.id,
+										state: o.state,
+										timestamp: o.timestamp,
+										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+									}))
 								: [];
 
 							return {
@@ -800,13 +799,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 				const allowedIds = new Set(Object.keys(lightsByObject));
 				const objects = Array.isArray(state.objects)
 					? state.objects
-							.filter((o: DOObject) => allowedIds.has(o.id))
-							.map((o: DOObject) => ({
-								id: o.id,
-								state: o.state,
-								timestamp: o.timestamp,
-								lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-							}))
+						.filter((o: DOObject) => allowedIds.has(o.id))
+						.map((o: DOObject) => ({
+							id: o.id,
+							state: o.state,
+							timestamp: o.timestamp,
+							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+						}))
 					: [];
 				return dbContext.jsonResponse({
 					states: [
@@ -5302,6 +5301,16 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 	return c.json(healthChecks, statusCode);
 });
 
+type OpenApiSpec = Record<string, unknown>;
+let openapiSpecPromise: Promise<OpenApiSpec> | null = null;
+
+const loadOpenApiSpec = (): Promise<OpenApiSpec> => {
+	if (!openapiSpecPromise) {
+		openapiSpecPromise = import('../openapi.json').then((mod) => (mod.default ?? mod) as OpenApiSpec);
+	}
+	return openapiSpecPromise;
+};
+
 // Serve OpenAPI spec
 /**
  * @openapi
@@ -5319,8 +5328,9 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
  *             schema:
  *               type: object
  */
-app.get('/openapi.json', (c) => {
-	return c.json(openapiSpec, 200, {
+app.get('/openapi.json', async (c) => {
+	const spec = await loadOpenApiSpec();
+	return c.json(spec, 200, {
 		'Cache-Control': 'public, max-age=300',
 	});
 });
