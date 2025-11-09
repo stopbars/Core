@@ -4,24 +4,23 @@
 import { DatabaseSessionService } from './database-session';
 
 export class NotamService {
-	private dbSession: DatabaseSessionService;
-	constructor(private db: D1Database) {
-		this.dbSession = new DatabaseSessionService(db);
-	}
+	constructor(private db: D1Database) { }
 	/**
 	 * Get the current global NOTAM
 	 */ async getGlobalNotam(): Promise<{ content: string; type: string } | null> {
 		try {
-			const result = await this.dbSession.executeRead<{ content: string; type: string }>(
-				'SELECT id, content, type FROM notams WHERE id = ?',
+			const result = await DatabaseSessionService.simpleRead<{ content: string; type: string }>(
+				this.db,
+				'SELECT content, type FROM notams WHERE id = ?',
 				['global'],
 			);
-			if (!result.results[0]) {
+			const record = result.results[0];
+			if (!record) {
 				return null;
 			}
 			return {
-				content: result.results[0].content as string,
-				type: (result.results[0].type as string) || 'warning',
+				content: record.content,
+				type: record.type || 'warning',
 			};
 		} catch {
 			return null;
@@ -38,7 +37,8 @@ export class NotamService {
 			if (!validTypes.includes(type)) {
 				type = 'warning'; // Default to warning if invalid type
 			}
-			await this.dbSession.executeWrite(
+			await DatabaseSessionService.simpleWrite(
+				this.db,
 				'INSERT OR REPLACE INTO notams (id, content, type, updated_by, updated_at) VALUES (?, ?, ?, ?, datetime("now"))',
 				['global', content, type, userId],
 			);
