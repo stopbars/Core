@@ -285,6 +285,11 @@ CREATE INDEX IF NOT EXISTS idx_airports_continent_icao ON airports (
   icao
 );
 
+CREATE INDEX IF NOT EXISTS idx_airports_lat_lon ON airports (
+  latitude,
+  longitude
+);
+
 CREATE INDEX IF NOT EXISTS idx_runways_airport ON runways (
   airport_icao
 );
