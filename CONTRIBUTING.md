@@ -38,12 +38,12 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
    **Set up Cloudflare configuration:**
 
-   The `wrangler.toml` file is already configured and safe to use as-is. For local testing, you'll need to:
+   The `wrangler.jsonc` file is already configured and safe to use as-is. For local testing, you'll need to:
    1. Create your own D1 SQL database in the [Cloudflare Dashboard](https://dash.cloudflare.com) (Storage & Databases > D1 SQL)
 
    <br>
 	
-   2. Edit `wrangler.toml` and update the database configuration (see comments in the file):  
+   2. Edit `wrangler.jsonc` and update the database configuration (see comments in the file):  
 	
       - `account_id`: Your Cloudflare account ID (found in dash.cloudflare.com/`your-id`/home)
       - `VATSIM_CLIENT_ID`: Your VATSIM Connect application client ID
@@ -61,7 +61,7 @@ Thank you for your interest in contributing to BARS Core! This guide will help y
 
 
 > [!WARNING]
-> **Important**: Do not commit changes to `wrangler.toml` or `package.json` database configuration. These are for local development only and should remain as local modifications.
+> **Important**: Do not commit changes to `wrangler.jsonc` or `package.json` database configuration. These are for local development only and should remain as local modifications.
 
    <br>
 
