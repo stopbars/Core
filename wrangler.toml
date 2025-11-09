@@ -13,6 +13,9 @@ traces = {enabled = true}
 [placement]
 mode = "smart"
 
+[triggers]
+crons = ["0 * * * *"]
+
 [vars]
 VATSIM_CLIENT_ID = "1562" # Change this for local testing
 POSTHOG_HOST = "https://eu.i.posthog.com"

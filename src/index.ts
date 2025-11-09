@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { Connection } from './network/connection';
 import { AuthService } from './services/auth';
-import { CacheKeys, CacheService, withCache } from './services/cache';
+import { CacheKeys, withCache } from './services/cache';
 import { DatabaseContextFactory } from './services/database-context';
 import { HttpError } from './services/errors';
 import { getLightsByObject, type RadarLight } from './services/lights-cache';
@@ -14,7 +14,7 @@ import { ServicePool } from './services/service-pool';
 import { UserService } from './services/users';
 import { VatsimService } from './services/vatsim';
 import { sanitizeContributionXml } from './services/xml-sanitizer';
-import { PointChangeset, PointData, UserRecord, VatsimUser } from './types';
+import { AirportObject, PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
 
@@ -32,6 +32,119 @@ const applyServerTimingHeader = (headers: Headers, durationMs: number) => {
 		headers.append('Server-Timing', metric);
 	} else {
 		headers.set('Server-Timing', metric);
+	}
+};
+
+interface ActiveObjectSummary {
+	airport: string;
+	controllers: number;
+	pilots: number;
+	observers: number;
+}
+
+const OFFLINE_TEMPLATE_TTL_SECONDS = 300;
+const OFFLINE_TEMPLATE_NAMESPACE = 'state-offline';
+const ACTIVE_OBJECT_RETENTION_WINDOW = "-2 day";
+
+const parseActiveObjectName = (name: string): ActiveObjectSummary | null => {
+	if (!name) return null;
+	const parts = name.split('/');
+	if (parts.length < 4) return null;
+	const [rawAirport, controllersRaw, pilotsRaw, observersRaw] = parts;
+	const airport = (rawAirport || '').toUpperCase();
+	const controllers = Number.parseInt(controllersRaw ?? '', 10);
+	const pilots = Number.parseInt(pilotsRaw ?? '', 10);
+	const observers = Number.parseInt(observersRaw ?? '', 10);
+	if (
+		Number.isNaN(controllers) ||
+		Number.isNaN(pilots) ||
+		Number.isNaN(observers) ||
+		airport.length === 0
+	) {
+		return null;
+	}
+	return {
+		airport,
+		controllers,
+		pilots,
+		observers,
+	};
+};
+
+interface OfflineTemplateEntry {
+	id: string;
+	state: boolean;
+}
+
+const buildOfflineTemplate = async (env: Env, airport: string): Promise<OfflineTemplateEntry[]> => {
+	const pointsService = ServicePool.getPoints(env);
+	const points = await pointsService.getAirportPoints(airport);
+	return points.map((point) => {
+		switch (point.type) {
+			case 'taxiway':
+			case 'lead_on':
+			case 'stand':
+				return { id: point.id, state: true };
+			case 'stopbar':
+			default:
+				return { id: point.id, state: false };
+		}
+	});
+};
+
+const getOfflineStateSnapshot = async (env: Env, airport: string): Promise<AirportObject[] | null> => {
+	const normalizedAirport = airport.toUpperCase();
+	if (!/^[A-Z0-9]{4}$/.test(normalizedAirport)) {
+		return null;
+	}
+	const cacheService = ServicePool.getCache(env);
+	const cacheKey = `offline-template-${normalizedAirport}`;
+	try {
+		let template = await cacheService.get<OfflineTemplateEntry[]>(cacheKey, OFFLINE_TEMPLATE_NAMESPACE);
+		if (!template) {
+			template = await buildOfflineTemplate(env, normalizedAirport);
+			await cacheService.set(cacheKey, template, {
+				ttl: OFFLINE_TEMPLATE_TTL_SECONDS,
+				namespace: OFFLINE_TEMPLATE_NAMESPACE,
+			});
+		}
+		const timestamp = Date.now();
+		return template.map((entry) => ({
+			id: entry.id,
+			state: entry.state,
+			timestamp,
+		}));
+	} catch (error) {
+		try {
+			console.warn(
+				`[State] Failed to build offline template for ${normalizedAirport}:`,
+				error instanceof Error ? error.message : error,
+			);
+		} catch {
+			/* ignore logging issues */
+		}
+		return null;
+	}
+};
+
+const cleanupStaleActiveObjects = async (env: Env): Promise<void> => {
+	const session = DatabaseContextFactory.createSessionService(env.DB);
+	try {
+		await session.executeWrite(
+			"DELETE FROM active_objects WHERE last_updated <= datetime('now', ?)",
+			[ACTIVE_OBJECT_RETENTION_WINDOW],
+		);
+	} catch (error) {
+		try {
+			console.warn(
+				'[Cron] Failed to clean up active_objects:',
+				error instanceof Error ? error.message : error,
+			);
+		} catch {
+			/* ignore logging issues */
+		}
+	} finally {
+		session.closeSession();
 	}
 };
 
@@ -622,25 +735,9 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		);
 	}
 
-	// Create database context for this request with bookmark handling
-	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
-
-	try {
-		if (airport === 'all' || isVatsimRadar) {
-			// Use session-aware database operations
-			// Throttle cleanup query to at most once per minute using cache guard
-			try {
-				const cache = new CacheService(c.env);
-				const guardKey = 'active-objects-cleanup-guard';
-				const already = await cache.get(guardKey, 'health');
-				if (!already) {
-					await dbContext.db.executeWrite("DELETE FROM active_objects WHERE last_updated <= datetime('now', '-2 day')");
-					await cache.set(guardKey, true, { ttl: 60, namespace: 'health' });
-				}
-			} catch {
-				/* ignore cleanup throttling errors */
-			}
-
+	if (airport === 'all' || isVatsimRadar) {
+		const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
+		try {
 			interface ActiveObjectRow {
 				id: string;
 				name: string;
@@ -663,10 +760,39 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 			const allStates = await Promise.all<AggregatedState | null>(
 				activeObjectsResult.results.map(async (obj: ActiveObjectRow) => {
+					const metadata = parseActiveObjectName(obj.name);
+					const airportIcaoRaw = metadata?.airport ?? obj.name.split('/')[0] ?? '';
+					const airportIcao = airportIcaoRaw.toUpperCase();
+					if (!/^[A-Z0-9]{4}$/.test(airportIcao)) {
+						return null as null;
+					}
+
+					const controllerCountFromMetadata = metadata?.controllers ?? 0;
+					const pilotCountFromMetadata = metadata?.pilots ?? 0;
+					const observerCountFromMetadata = metadata?.observers ?? 0;
+
+					if (controllerCountFromMetadata === 0 && pilotCountFromMetadata === 0 && observerCountFromMetadata === 0) {
+						if (isVatsimRadar) {
+							return null as null;
+						}
+						const offlineSnapshot = await getOfflineStateSnapshot(c.env, airportIcao);
+						if (offlineSnapshot) {
+							return {
+								airport: airportIcao,
+								controllers: [],
+								pilots: [],
+								objects: offlineSnapshot,
+								offline: true,
+								connections: {
+									controllers: controllerCountFromMetadata,
+									pilots: pilotCountFromMetadata,
+								},
+							};
+						}
+					}
+
 					const id = c.env.BARS.idFromString(obj.id);
 					const durableObj = c.env.BARS.get(id);
-
-					const [airportIcao] = obj.name.split('/');
 
 					const stateRequest = new Request(`https://internal/state?airport=${airportIcao}`, {
 						method: 'GET',
@@ -755,79 +881,79 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 			});
 
 			return dbContext.jsonResponse({ states: visibleStates });
-		} else {
-			const id = c.env.BARS.idFromName(airport);
-			const obj = c.env.BARS.get(id);
-
-			if (airport.length !== 4) {
-				return dbContext.jsonResponse(
-					{
-						error: 'Invalid airport ICAO',
-					},
-					{ status: 400 },
-				);
-			}
-
-			const stateUrl = new URL('https://internal/state');
-			stateUrl.searchParams.set('airport', airport);
-			if (offlineRequested) {
-				stateUrl.searchParams.set('offline', 'true');
-			}
-			const stateRequest = new Request(stateUrl.toString(), {
-				method: 'GET',
-				headers: new Headers({
-					'X-Request-Type': 'get_state',
-				}),
-			});
-
-			if (!isVatsimRadar) {
-				return obj.fetch(stateRequest);
-			}
-
-			// Transform response for VATSIM Radar variant (filter to XML objects and attach lights)
-			try {
-				const resp = await obj.fetch(stateRequest);
-				type DOObject = { id: string; state: unknown; timestamp: number };
-				const state = (await resp.json()) as {
-					airport: string;
-					controllers: string[];
-					pilots: string[];
-					objects: DOObject[];
-					offline?: boolean;
-				};
-				const lightsByObject = await getLightsByObject(c.env, state.airport);
-				const allowedIds = new Set(Object.keys(lightsByObject));
-				const objects = Array.isArray(state.objects)
-					? state.objects
-						.filter((o: DOObject) => allowedIds.has(o.id))
-						.map((o: DOObject) => ({
-							id: o.id,
-							state: o.state,
-							timestamp: o.timestamp,
-							lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-						}))
-					: [];
-				return dbContext.jsonResponse({
-					states: [
-						{
-							airport: state.airport,
-							controllers: state.controllers,
-							pilots: state.pilots,
-							objects,
-							connections: {
-								controllers: Array.isArray(state.controllers) ? state.controllers.length : 0,
-								pilots: Array.isArray(state.pilots) ? state.pilots.length : 0,
-							},
-						},
-					],
-				});
-			} catch {
-				return dbContext.jsonResponse({ error: 'Failed to fetch state' }, { status: 500 });
-			}
+		} finally {
+			// Clean up database context
+			dbContext.close();
 		}
-	} finally {
-		// Clean up database context
-		dbContext.close();
+	}
+
+	const id = c.env.BARS.idFromName(airport);
+	const obj = c.env.BARS.get(id);
+
+	if (airport.length !== 4) {
+		return c.json(
+			{
+				error: 'Invalid airport ICAO',
+			},
+			400,
+		);
+	}
+
+	const stateUrl = new URL('https://internal/state');
+	stateUrl.searchParams.set('airport', airport);
+	if (offlineRequested) {
+		stateUrl.searchParams.set('offline', 'true');
+	}
+	const stateRequest = new Request(stateUrl.toString(), {
+		method: 'GET',
+		headers: new Headers({
+			'X-Request-Type': 'get_state',
+		}),
+	});
+
+	if (!isVatsimRadar) {
+		return obj.fetch(stateRequest);
+	}
+
+	// Transform response for VATSIM Radar variant (filter to XML objects and attach lights)
+	try {
+		const resp = await obj.fetch(stateRequest);
+		type DOObject = { id: string; state: unknown; timestamp: number };
+		const state = (await resp.json()) as {
+			airport: string;
+			controllers: string[];
+			pilots: string[];
+			objects: DOObject[];
+			offline?: boolean;
+		};
+		const lightsByObject = await getLightsByObject(c.env, state.airport);
+		const allowedIds = new Set(Object.keys(lightsByObject));
+		const objects = Array.isArray(state.objects)
+			? state.objects
+				.filter((o: DOObject) => allowedIds.has(o.id))
+				.map((o: DOObject) => ({
+					id: o.id,
+					state: o.state,
+					timestamp: o.timestamp,
+					lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+				}))
+			: [];
+		return c.json({
+			states: [
+				{
+					airport: state.airport,
+					controllers: state.controllers,
+					pilots: state.pilots,
+					objects,
+					connections: {
+						controllers: Array.isArray(state.controllers) ? state.controllers.length : 0,
+						pilots: Array.isArray(state.pilots) ? state.pilots.length : 0,
+					},
+				},
+			],
+		});
+	} catch {
+		return c.json({ error: 'Failed to fetch state' }, 500);
 	}
 });
 
@@ -5358,7 +5484,10 @@ app.notFound((c) => {
 });
 
 export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
-		return app.fetch(request, env);
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		return app.fetch(request, env, ctx);
+	},
+	async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		ctx.waitUntil(cleanupStaleActiveObjects(env));
 	},
 };
