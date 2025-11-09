@@ -5240,7 +5240,7 @@ app.route('/staff/faqs', faqStaffApp);
  */
 app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 	const requestedService = c.req.query('service');
-	const validServices = ['database', 'storage', 'vatsim', 'auth'];
+	const validServices = ['database', 'storage', 'vatsim'];
 
 	if (requestedService && !validServices.includes(requestedService)) {
 		return c.json(
@@ -5261,7 +5261,10 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 		},
 		storage: async () => {
 			const storage = ServicePool.getStorage(c.env);
-			await storage.listFiles(undefined, 1);
+			const sentinel = await storage.headFile('health/ping.txt');
+			if (!sentinel) {
+				throw new Error('Storage sentinel object missing');
+			}
 		},
 		vatsim: async () => {
 			const response = await fetch('https://auth.vatsim.net/api/user', {
@@ -5275,10 +5278,6 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 			if (!response.ok && response.status !== 401) {
 				throw new Error(`VATSIM API returned ${response.status}`);
 			}
-		},
-		auth: async () => {
-			const auth = ServicePool.getAuth(c.env);
-			await auth.getUserByVatsimId('1658308');
 		},
 	};
 
