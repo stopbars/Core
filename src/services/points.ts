@@ -289,74 +289,72 @@ export class PointsService {
 		}
 
 		if (modifyContexts.length > 0) {
-			const columnConfigs: Array<{
+			const updateMappings: Array<{
 				key: keyof PointData;
 				column: string;
-				value: (context: { patch: Partial<PointData>; merged: PointData }) => DatabaseSerializable;
+				resolver: (context: { patch: Partial<PointData>; merged: PointData }) => DatabaseSerializable;
 			}> = [
-				{ key: 'type', column: 'type', value: ({ merged }) => merged.type },
-				{ key: 'name', column: 'name', value: ({ merged }) => merged.name },
-				{ key: 'coordinates', column: 'coordinates', value: ({ merged }) => JSON.stringify(merged.coordinates) },
-				{ key: 'directionality', column: 'directionality', value: ({ patch }) => patch.directionality ?? null },
-				{ key: 'color', column: 'color', value: ({ patch }) => patch.color ?? null },
-				{ key: 'elevated', column: 'elevated', value: ({ patch }) => patch.elevated ?? null },
-				{ key: 'ihp', column: 'ihp', value: ({ patch }) => patch.ihp ?? null },
-			];
-
-			const updateTargets = new Map<string, Array<{ id: string; value: DatabaseSerializable }>>(
-				columnConfigs.map((config) => [config.column, []]),
-			);
+					{ key: 'type', column: 'type', resolver: ({ merged }) => merged.type },
+					{ key: 'name', column: 'name', resolver: ({ merged }) => merged.name },
+					{ key: 'coordinates', column: 'coordinates', resolver: ({ merged }) => JSON.stringify(merged.coordinates) },
+					{
+						key: 'directionality',
+						column: 'directionality',
+						resolver: ({ patch, merged }) => (patch.directionality === null ? null : (merged.directionality ?? null)),
+					},
+					{ key: 'color', column: 'color', resolver: ({ patch, merged }) => (patch.color === null ? null : (merged.color ?? null)) },
+					{
+						key: 'elevated',
+						column: 'elevated',
+						resolver: ({ patch, merged }) => (patch.elevated === null ? null : (merged.elevated ?? null)),
+					},
+					{ key: 'ihp', column: 'ihp', resolver: ({ patch, merged }) => (patch.ihp === null ? null : (merged.ihp ?? null)) },
+				];
 
 			for (const context of modifyContexts) {
 				const { id, patch, merged } = context;
-				for (const config of columnConfigs) {
-					const patchValue = patch[config.key];
-					if (!Object.prototype.hasOwnProperty.call(patch, config.key) || patchValue === undefined) {
+				const setFragments: string[] = [];
+				const params: DatabaseSerializable[] = [];
+
+				for (const mapping of updateMappings) {
+					if (!Object.prototype.hasOwnProperty.call(patch, mapping.key)) {
 						continue;
 					}
-					updateTargets.get(config.column)?.push({ id, value: config.value({ patch, merged }) });
+					const rawValue = patch[mapping.key];
+					if (rawValue === undefined) {
+						continue;
+					}
+					setFragments.push(`${mapping.column} = ?`);
+					params.push(mapping.resolver({ patch, merged }));
 				}
-			}
 
-			const caseClauses: string[] = [];
-			const updateParams: DatabaseSerializable[] = [];
-			for (const [column, entries] of updateTargets) {
-				if (!entries || entries.length === 0) {
+				if (setFragments.length === 0) {
 					continue;
 				}
-				const clauseParts: string[] = [`${column} = CASE id`];
-				for (const entry of entries) {
-					clauseParts.push('WHEN ? THEN ?');
-					updateParams.push(entry.id, entry.value);
-				}
-				clauseParts.push(`ELSE ${column} END`);
-				caseClauses.push(clauseParts.join(' '));
-			}
 
-			if (caseClauses.length > 0) {
-				caseClauses.push('updated_at = ?');
-				updateParams.push(now);
-
-				const modifyIds = modifyContexts.map((context) => context.id);
-				const idPlaceholders = modifyIds.map(() => '?').join(', ');
-				updateParams.push(airportId, ...modifyIds);
+				setFragments.push('updated_at = ?');
+				params.push(now, airportId, id);
 
 				statements.push({
 					query: `UPDATE points
-					SET ${caseClauses.join(', ')}
-					WHERE airport_id = ? AND id IN (${idPlaceholders})`,
-					params: updateParams,
+					SET ${setFragments.join(', ')}
+					WHERE airport_id = ? AND id = ?`,
+					params,
 				});
 			}
 		}
 
 		const deleteIds = changeset.delete ?? [];
 		if (deleteIds.length > 0) {
-			const deletePlaceholders = deleteIds.map(() => '?').join(', ');
-			statements.push({
-				query: `DELETE FROM points WHERE airport_id = ? AND id IN (${deletePlaceholders})`,
-				params: [airportId, ...deleteIds],
-			});
+			const maxIdsPerDelete = 99;
+			for (let index = 0; index < deleteIds.length; index += maxIdsPerDelete) {
+				const chunk = deleteIds.slice(index, index + maxIdsPerDelete);
+				const deletePlaceholders = chunk.map(() => '?').join(', ');
+				statements.push({
+					query: `DELETE FROM points WHERE airport_id = ? AND id IN (${deletePlaceholders})`,
+					params: [airportId, ...chunk],
+				});
+			}
 		}
 
 		if (statements.length > 0) {
