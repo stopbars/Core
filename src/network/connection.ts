@@ -8,6 +8,7 @@ import { DatabaseContextFactory } from '../services/database-context';
 import { PostHogService } from '../services/posthog';
 
 const MAX_STATE_SIZE = 1000000; // 1MB limit for persisted payloads
+const DISALLOWED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 // Add recursive merge utility function with safety checks
 function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): unknown {
@@ -60,6 +61,10 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 	for (const key of sourceKeys) {
 		if (typeof key !== 'string' || key.length > 100) {
 			throw new Error('Invalid property key');
+		}
+
+		if (DISALLOWED_KEYS.has(key)) {
+			throw new Error('Prototype pollution key rejected');
 		}
 
 		const sv = (source as Record<string, unknown>)[key];
