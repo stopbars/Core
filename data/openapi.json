@@ -1725,7 +1725,28 @@
 				"tags": ["Contributions"],
 				"responses": {
 					"200": {
-						"description": "Leaderboard returned"
+						"description": "Leaderboard returned",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"vatsimId": {
+												"type": "string"
+											},
+											"name": {
+												"type": "string"
+											},
+											"count": {
+												"type": "integer"
+											}
+										}
+									}
+								}
+							}
+						}
 					}
 				}
 			}

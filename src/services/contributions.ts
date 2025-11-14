@@ -580,6 +580,7 @@ export class ContributionService {
 	}
 	async getContributionLeaderboard(): Promise<
 		Array<{
+			vatsimId: string;
 			name: string;
 			count: number;
 		}>
@@ -598,7 +599,11 @@ export class ContributionService {
 			display_name: string | null;
 			contribution_count: number;
 		}>(query);
-		return results.results.map((r) => ({ name: r.display_name || r.user_id, count: r.contribution_count }));
+		return results.results.map((r) => ({
+			vatsimId: r.user_id,
+			name: r.display_name || r.user_id,
+			count: r.contribution_count,
+		}));
 	}
 	// Removed legacy user display name update + lookup helpers; display names now sourced directly from users table
 }
