@@ -1,60 +1,60 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "bars-core",
-  "main": "src/index.ts",
-  "compatibility_date": "2025-11-07",
-  "compatibility_flags": ["nodejs_compat"],
-  "account_id": "089721947f7dd0fe58fca4321531d933", // Change this for local testing
-  "preview_urls": false,
-  "observability": {
-    "enabled": true,
-    "traces": {
-      "enabled": true
-    }
-  },
-  "placement": {
-    "mode": "smart"
-  },
-  "triggers": {
-    "crons": ["0 * * * *"]
-  },
-  "vars": {
-    "VATSIM_CLIENT_ID": "1562", // Change this for local testing
-    "POSTHOG_HOST": "https://eu.i.posthog.com"
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "bars-db", // Change this for local testing
-      "database_id": "ce24bc57-21b8-4397-8cc7-49809ce3976c" // Change this for local testing
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "BARS_STORAGE", // Change this for local testing
-      "bucket_name": "bars-v2-cdn" // Change this for local testing
-    }
-  ],
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "BARS",
-        "class_name": "BARS"
-      },
-      {
-        "name": "BARS_RATE_LIMITER",
-        "class_name": "RateLimiter"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["BARS"]
-    },
-    {
-      "tag": "v2",
-      "new_sqlite_classes": ["RateLimiter"]
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "bars-core",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-11-07",
+	"compatibility_flags": ["nodejs_compat"],
+	"account_id": "089721947f7dd0fe58fca4321531d933", // Change this for local testing
+	"preview_urls": false,
+	"observability": {
+		"enabled": true,
+		"traces": {
+			"enabled": true,
+		},
+	},
+	"placement": {
+		"mode": "smart",
+	},
+	"triggers": {
+		"crons": ["0 * * * *"],
+	},
+	"vars": {
+		"VATSIM_CLIENT_ID": "1562", // Change this for local testing
+		"POSTHOG_HOST": "https://eu.i.posthog.com",
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "bars-db", // Change this for local testing
+			"database_id": "ce24bc57-21b8-4397-8cc7-49809ce3976c", // Change this for local testing
+		},
+	],
+	"r2_buckets": [
+		{
+			"binding": "BARS_STORAGE", // Change this for local testing
+			"bucket_name": "bars-v2-cdn", // Change this for local testing
+		},
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "BARS",
+				"class_name": "BARS",
+			},
+			{
+				"name": "BARS_RATE_LIMITER",
+				"class_name": "RateLimiter",
+			},
+		],
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["BARS"],
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["RateLimiter"],
+		},
+	],
 }
