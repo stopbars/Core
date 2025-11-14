@@ -30,17 +30,30 @@ export class RoleService {
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
-	async isStaff(userId: number): Promise<boolean> {
+	private async fetchStaffRecord(userId: number): Promise<StaffRecord | null> {
 		const staffResult = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
-		const staff = staffResult.results[0];
-		return !!staff && !!staff.role && staff.role in roleHierarchy;
+		return staffResult.results[0] ?? null;
+	}
+
+	private normalizeStaffRole(role?: StaffRecord['role'] | null): StaffRole | null {
+		if (!role) return null;
+		return role in roleHierarchy ? (role as StaffRole) : null;
+	}
+
+	async getStaffStatus(userId: number): Promise<{ isStaff: boolean; role: StaffRole | null }> {
+		const staff = await this.fetchStaffRecord(userId);
+		const role = this.normalizeStaffRole(staff?.role);
+		return { isStaff: !!role, role };
+	}
+
+	async isStaff(userId: number): Promise<boolean> {
+		const { isStaff } = await this.getStaffStatus(userId);
+		return isStaff;
 	}
 
 	async getUserRole(userId: number): Promise<StaffRole | null> {
-		const staffResult = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
-		const staff = staffResult.results[0];
-		if (!staff?.role) return null;
-		return staff.role as StaffRole;
+		const { role } = await this.getStaffStatus(userId);
+		return role;
 	}
 
 	async hasPermission(userId: number, requiredRole: StaffRole): Promise<boolean> {
