@@ -222,8 +222,10 @@ export class PolygonService {
 
 		// Add each object
 		for (const obj of processedObjects) {
+			const centerPoint = this.calculateObjectCenter(obj.points);
+			const centerAttributes = centerPoint ? ` centerLat="${centerPoint.lat}" centerLon="${centerPoint.lon}"` : '';
 			// stateId moved to per-light level (previously on BarsObject)
-			out.push(`\t<BarsObject id="${obj.id}" type="${obj.type}">`);
+			out.push(`\t<BarsObject id="${obj.id}" type="${obj.type}"${centerAttributes}>`);
 
 			// Add properties
 			const props = obj.properties;
@@ -287,6 +289,27 @@ export class PolygonService {
 		out.push('</BarsLights>');
 
 		return out.join('\n');
+	}
+
+	/**
+	 * Derive a simple centroid for a BARS object from its generated light points.
+	 */
+	private calculateObjectCenter(points: BarsLightPoint[]): GeoPoint | null {
+		if (points.length === 0) {
+			return null;
+		}
+
+		let latSum = 0;
+		let lonSum = 0;
+		for (const point of points) {
+			latSum += point.lat;
+			lonSum += point.lon;
+		}
+
+		return {
+			lat: latSum / points.length,
+			lon: lonSum / points.length,
+		};
 	}
 
 	/**
