@@ -13,7 +13,7 @@ import { StaffRole } from './services/roles';
 import { ServicePool } from './services/service-pool';
 import { UserService } from './services/users';
 import { VatsimService } from './services/vatsim';
-import { sanitizeContributionXml } from './services/xml-sanitizer';
+import { MAX_CONTRIBUTION_XML_BYTES, sanitizeContributionXml } from './services/xml-sanitizer';
 import { AirportObject, PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
@@ -2560,7 +2560,7 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 			return c.json({ error: 'Invalid file type. Please upload an XML file.' }, 400);
 		}
 
-		const MAX_XML_BYTES = 200_000;
+		const MAX_XML_BYTES = MAX_CONTRIBUTION_XML_BYTES; // 5 MB
 		if (xmlFile.size > MAX_XML_BYTES) {
 			return c.json({ error: `XML file too large (>${MAX_XML_BYTES} bytes)` }, 400);
 		}
@@ -2625,7 +2625,36 @@ app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
 		c.header('X-Cache-Gen', 'MISS');
 		return c.json({ supportsXml, barsXml });
 	} catch (error) {
-		console.error('Error generating XMLs:', error);
+		if (error instanceof HttpError) {
+			throw error;
+		}
+		const rawMessage = error instanceof Error ? error.message : 'Unknown error';
+		const normalized = rawMessage.toLowerCase();
+		const userFacingPatterns = [
+			'no remove polygons',
+			'no valid remove polygons',
+			'no bars polygons',
+			'no valid bars objects',
+			'no bars points found within',
+			'airport with icao',
+			'invalid xml',
+		];
+		const matchesUserError = userFacingPatterns.some((pattern) => normalized.includes(pattern));
+		if (matchesUserError) {
+			const lastColonIndex = rawMessage.lastIndexOf(':');
+			const friendlyMessage = lastColonIndex >= 0 ? rawMessage.slice(lastColonIndex + 1).trim() || rawMessage : rawMessage;
+			try {
+				console.warn('Support generation validation error:', rawMessage);
+			} catch {
+				/* ignore logging failures */
+			}
+			return c.json({ error: friendlyMessage }, 400);
+		}
+		try {
+			console.error('Error generating XMLs:', error);
+		} catch {
+			/* ignore logging failures */
+		}
 		return c.json({ error: 'Internal server error while generating XMLs' }, 500);
 	}
 });
@@ -4307,8 +4336,8 @@ vatsysStaffApp.post('/profiles/upload', async (c) => {
 	}
 	const file = form.get('file');
 	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
-	// Max size 1MB (service also guards)
-	if (file.size > 1_000_000) return c.json({ error: 'File too large (1MB max)' }, 400);
+	const MAX_PROFILE_BYTES = 5 * 1024 * 1024; // 5MB
+	if (file.size > MAX_PROFILE_BYTES) return c.json({ error: 'File too large (5MB max)' }, 400);
 
 	const bytes = await file.arrayBuffer();
 	const svc = ServicePool.getVatSysProfiles(c.env);

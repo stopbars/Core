@@ -1,7 +1,9 @@
+export const MAX_CONTRIBUTION_XML_BYTES = 5 * 1024 * 1024; // 5 MB
+
 export function sanitizeContributionXml(raw: string, opts?: { maxBytes?: number }): string {
 	if (!raw) throw new Error('Empty XML');
 
-	const maxBytes = opts?.maxBytes ?? 200_000; // ~200 KB
+	const maxBytes = opts?.maxBytes ?? MAX_CONTRIBUTION_XML_BYTES;
 	// Size guard (counting UTF-16 code units approximates bytes for ASCII subset typical of these files)
 	if (raw.length > maxBytes) {
 		throw new Error(`Submitted XML too large (> ${maxBytes} chars)`);
