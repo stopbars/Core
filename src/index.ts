@@ -975,7 +975,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 
 	const auth = ServicePool.getAuth(c.env);
 	try {
-		const { vatsimToken } = await auth.handleCallback(code);
+		const { vatsimToken } = await auth.handleCallback(code, c.executionCtx);
 		return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
 	} catch {
 		return Response.redirect('https://v2.stopbars.com/auth?error=oauth_failed', 302);

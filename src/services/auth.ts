@@ -5,6 +5,11 @@ import { PostHogService } from './posthog';
 
 type DisplayModeUser = Pick<UserRecord, 'id' | 'vatsim_id' | 'full_name' | 'display_mode' | 'display_name'>;
 
+interface ExistingUserLookup {
+	user: UserRecord | null;
+	bookmark: string | null;
+}
+
 export class AuthService {
 	private dbSession: DatabaseSessionService;
 
@@ -16,45 +21,76 @@ export class AuthService {
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
-	async handleCallback(code: string): Promise<{ vatsimToken: string }> {
+	async handleCallback(code: string, executionCtx?: ExecutionContext): Promise<{ vatsimToken: string }> {
 		const auth = await this.vatsim.getToken(code);
 		const vatsimUser = await this.vatsim.getUser(auth.access_token);
 		if (!vatsimUser.id || !vatsimUser.email) {
 			throw new Error('Invalid VATSIM user data');
 		}
-		// If banned, don't create user but still return token so UI can fetch /auth/account and get banned message
-		const banned = await this.isVatsimIdBanned(vatsimUser.id);
-		if (!banned) {
-			const { user, created } = await this.getOrCreateUser(vatsimUser);
-			try {
-				this.posthog?.track(created ? 'User Signed Up' : 'User Logged In', {
-					vatsimId: vatsimUser.id,
-					isNewUser: created,
-					userId: user.id,
-				});
-			} catch {
-				/* ignore analytics errors */
+		const [existingUser, banRecord] = await Promise.all([this.fetchExistingUser(vatsimUser.id), this.fetchBanRecord(vatsimUser.id)]);
+
+		const backgroundTasks: Promise<void>[] = [];
+		const banned = this.isBanRecordActive(banRecord);
+
+		if (banned) {
+			if (this.posthog) {
+				backgroundTasks.push(
+					(async () => {
+						try {
+							this.posthog!.track('Banned Login Attempt', { vatsimId: vatsimUser.id });
+						} catch {
+							/* ignore analytics errors */
+						}
+					})(),
+				);
 			}
-		} else {
-			try {
-				this.posthog?.track('Banned Login Attempt', { vatsimId: vatsimUser.id });
-			} catch {
-				/* ignore */
-			}
+			this.dispatchBackgroundTasks(backgroundTasks, executionCtx);
+			return { vatsimToken: auth.access_token };
 		}
+
+		const { user, created } = await this.getOrCreateUser(vatsimUser, existingUser);
+
+		if (!created) {
+			backgroundTasks.push(
+				(async () => {
+					try {
+						await this.refreshLoginMetadata(user.id, vatsimUser);
+					} catch {
+						/* ignore refresh errors */
+					}
+				})(),
+			);
+		}
+
+		if (this.posthog) {
+			backgroundTasks.push(
+				(async () => {
+					try {
+						this.posthog!.track(created ? 'User Signed Up' : 'User Logged In', {
+							vatsimId: vatsimUser.id,
+							isNewUser: created,
+							userId: user.id,
+						});
+					} catch {
+						/* ignore analytics errors */
+					}
+				})(),
+			);
+		}
+
+		this.dispatchBackgroundTasks(backgroundTasks, executionCtx);
 		return { vatsimToken: auth.access_token };
 	}
 
-	private async getOrCreateUser(vatsimUser: VatsimUser): Promise<{ user: UserRecord; created: boolean }> {
-		// Use primary mode for authentication checks to ensure latest data
-		this.dbSession.startSession({ mode: 'first-primary' });
+	private async getOrCreateUser(vatsimUser: VatsimUser, lookup?: ExistingUserLookup): Promise<{ user: UserRecord; created: boolean }> {
+		if (lookup?.user) {
+			return { user: lookup.user, created: false };
+		}
 
-		const existingUserResult = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimUser.id]);
-		const existingUser = existingUserResult.results[0];
-
-		if (existingUser) {
-			const refreshed = await this.refreshLoginMetadata(existingUser.id, vatsimUser);
-			return { user: refreshed || existingUser, created: false };
+		if (lookup?.bookmark) {
+			this.dbSession.startSession({ bookmark: lookup.bookmark });
+		} else {
+			this.dbSession.startSession({ mode: 'first-primary' });
 		}
 
 		const newUser = await this.createNewUser(vatsimUser);
@@ -269,28 +305,30 @@ export class AuthService {
 		}
 	}
 
-	private async refreshLoginMetadata(userId: number, vatsimUser: VatsimUser): Promise<UserRecord | null> {
-		const timestamp = new Date().toISOString();
-		const { regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName } = this.normalizeLocationFields(vatsimUser);
-		const result = await this.dbSession.executeWrite(
-			`UPDATE users
-			 SET
-			 	last_login = ?,
-			 	region_id = COALESCE(?, region_id),
-			 	region_name = COALESCE(?, region_name),
-			 	division_id = COALESCE(?, division_id),
-			 	division_name = COALESCE(?, division_name),
-			 	subdivision_id = COALESCE(?, subdivision_id),
-			 	subdivision_name = COALESCE(?, subdivision_name)
-			 WHERE id = ?
-			 RETURNING *`,
-			[timestamp, regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName, userId],
-		);
-		const rows = result.results as unknown as UserRecord[] | null;
-		if (rows && rows[0]) {
-			return rows[0] as UserRecord;
+	private async refreshLoginMetadata(userId: number, vatsimUser: VatsimUser): Promise<void> {
+		const session = new DatabaseSessionService(this.db);
+		try {
+			const timestamp = new Date().toISOString();
+			const { regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName } =
+				this.normalizeLocationFields(vatsimUser);
+			await session.executeWrite(
+				`UPDATE users
+				 SET
+				 	email = ?,
+				 	last_login = ?,
+				 	region_id = COALESCE(?, region_id),
+				 	region_name = COALESCE(?, region_name),
+				 	division_id = COALESCE(?, division_id),
+				 	division_name = COALESCE(?, division_name),
+				 	subdivision_id = COALESCE(?, subdivision_id),
+				 	subdivision_name = COALESCE(?, subdivision_name)
+				 WHERE id = ?
+				 RETURNING *`,
+				[vatsimUser.email, timestamp, regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName, userId],
+			);
+		} finally {
+			session.closeSession();
 		}
-		return null;
 	}
 
 	private normalizeLocationFields(vatsimUser: VatsimUser): {
@@ -346,16 +384,8 @@ export class AuthService {
 		return apiKey;
 	}
 	async isVatsimIdBanned(vatsimId: string): Promise<boolean> {
-		const res = await this.dbSession.executeRead<{ vatsim_id: string; expires_at: string | null }>(
-			'SELECT vatsim_id, expires_at FROM bans WHERE vatsim_id = ?',
-			[vatsimId],
-		);
-		const row = res.results[0];
-		if (!row) return false;
-		if (!row.expires_at) return true; // permanent
-		const now = Date.now();
-		const exp = new Date(row.expires_at).getTime();
-		return now <= exp;
+		const row = await this.fetchBanRecord(vatsimId);
+		return this.isBanRecordActive(row);
 	}
 
 	/** Create or update a ban for a vatsim id. Account is kept so UI can surface ban. */
@@ -408,5 +438,46 @@ export class AuthService {
 		const now = Date.now();
 		const exp = new Date(row.expires_at).getTime();
 		return now <= exp ? row : null;
+	}
+
+	private async fetchExistingUser(vatsimId: string): Promise<ExistingUserLookup> {
+		const session = new DatabaseSessionService(this.db);
+		try {
+			session.startSession({ mode: 'first-primary' });
+			const result = await session.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
+			const bookmark = session.getSessionInfo().bookmark;
+			return { user: result.results[0] ?? null, bookmark };
+		} finally {
+			session.closeSession();
+		}
+	}
+
+	private async fetchBanRecord(vatsimId: string): Promise<{ vatsim_id: string; expires_at: string | null } | null> {
+		const session = new DatabaseSessionService(this.db);
+		try {
+			const res = await session.executeRead<{ vatsim_id: string; expires_at: string | null }>(
+				'SELECT vatsim_id, expires_at FROM bans WHERE vatsim_id = ?',
+				[vatsimId],
+			);
+			return res.results[0] ?? null;
+		} finally {
+			session.closeSession();
+		}
+	}
+
+	private isBanRecordActive(record: { expires_at: string | null } | null): boolean {
+		if (!record) return false;
+		if (!record.expires_at) return true;
+		return Date.now() <= new Date(record.expires_at).getTime();
+	}
+
+	private dispatchBackgroundTasks(tasks: Promise<void>[], executionCtx?: ExecutionContext) {
+		if (tasks.length === 0) return;
+		const combined = Promise.allSettled(tasks).then(() => undefined);
+		if (executionCtx) {
+			executionCtx.waitUntil(combined);
+		} else {
+			void combined;
+		}
 	}
 }
