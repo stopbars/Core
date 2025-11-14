@@ -9,6 +9,7 @@ import { PostHogService } from '../services/posthog';
 
 const MAX_STATE_SIZE = 1000000; // 1MB limit for persisted payloads
 const DISALLOWED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const createNullObject = (): Record<string, unknown> => Object.create(null) as Record<string, unknown>;
 
 // Add recursive merge utility function with safety checks
 function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): unknown {
@@ -47,13 +48,19 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 	if (targetRecord) {
 		result = targetRecord;
 	} else {
-		result = {};
+		result = createNullObject();
 		cloned = true;
 	}
 
 	const ensureClone = () => {
 		if (!cloned) {
-			result = { ...targetRecord! };
+			if (targetRecord) {
+				const clone = createNullObject();
+				for (const [k, v] of Object.entries(targetRecord)) {
+					clone[k] = v;
+				}
+				result = clone;
+			}
 			cloned = true;
 		}
 	};
@@ -79,7 +86,7 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 				}
 			} else {
 				ensureClone();
-				result[key] = recursivelyMergeObjects({}, sv, depth + 1);
+				result[key] = recursivelyMergeObjects(createNullObject(), sv, depth + 1);
 			}
 		} else {
 			ensureClone();
