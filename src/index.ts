@@ -44,7 +44,7 @@ interface ActiveObjectSummary {
 
 const OFFLINE_TEMPLATE_TTL_SECONDS = 300;
 const OFFLINE_TEMPLATE_NAMESPACE = 'state-offline';
-const ACTIVE_OBJECT_RETENTION_WINDOW = "-2 day";
+const ACTIVE_OBJECT_RETENTION_WINDOW = '-2 day';
 
 const parseActiveObjectName = (name: string): ActiveObjectSummary | null => {
 	if (!name) return null;
@@ -55,12 +55,7 @@ const parseActiveObjectName = (name: string): ActiveObjectSummary | null => {
 	const controllers = Number.parseInt(controllersRaw ?? '', 10);
 	const pilots = Number.parseInt(pilotsRaw ?? '', 10);
 	const observers = Number.parseInt(observersRaw ?? '', 10);
-	if (
-		Number.isNaN(controllers) ||
-		Number.isNaN(pilots) ||
-		Number.isNaN(observers) ||
-		airport.length === 0
-	) {
+	if (Number.isNaN(controllers) || Number.isNaN(pilots) || Number.isNaN(observers) || airport.length === 0) {
 		return null;
 	}
 	return {
@@ -130,16 +125,10 @@ const getOfflineStateSnapshot = async (env: Env, airport: string): Promise<Airpo
 const cleanupStaleActiveObjects = async (env: Env): Promise<void> => {
 	const session = DatabaseContextFactory.createSessionService(env.DB);
 	try {
-		await session.executeWrite(
-			"DELETE FROM active_objects WHERE last_updated <= datetime('now', ?)",
-			[ACTIVE_OBJECT_RETENTION_WINDOW],
-		);
+		await session.executeWrite("DELETE FROM active_objects WHERE last_updated <= datetime('now', ?)", [ACTIVE_OBJECT_RETENTION_WINDOW]);
 	} catch (error) {
 		try {
-			console.warn(
-				'[Cron] Failed to clean up active_objects:',
-				error instanceof Error ? error.message : error,
-			);
+			console.warn('[Cron] Failed to clean up active_objects:', error instanceof Error ? error.message : error);
 		} catch {
 			/* ignore logging issues */
 		}
@@ -825,13 +814,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -930,13 +919,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		const allowedIds = new Set(Object.keys(lightsByObject));
 		const objects = Array.isArray(state.objects)
 			? state.objects
-				.filter((o: DOObject) => allowedIds.has(o.id))
-				.map((o: DOObject) => ({
-					id: o.id,
-					state: o.state,
-					timestamp: o.timestamp,
-					lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-				}))
+					.filter((o: DOObject) => allowedIds.has(o.id))
+					.map((o: DOObject) => ({
+						id: o.id,
+						state: o.state,
+						timestamp: o.timestamp,
+						lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+					}))
 			: [];
 		return c.json({
 			states: [
@@ -5432,7 +5421,7 @@ let openapiSpecPromise: Promise<OpenApiSpec> | null = null;
 
 const loadOpenApiSpec = (): Promise<OpenApiSpec> => {
 	if (!openapiSpecPromise) {
-		openapiSpecPromise = import('../openapi.json').then((mod) => (mod.default ?? mod) as OpenApiSpec);
+		openapiSpecPromise = import('../data/openapi.json').then((mod) => (mod.default ?? mod) as OpenApiSpec);
 	}
 	return openapiSpecPromise;
 };

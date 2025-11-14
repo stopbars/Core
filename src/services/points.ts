@@ -399,7 +399,19 @@ export class PointsService {
 		while (allocatedIds.size < count && attempts < maxAttempts) {
 			attempts += 1;
 			const needed = count - allocatedIds.size;
-			const generated = await this.idService.generateBarsIds(needed);
+			let generated: string[];
+			try {
+				generated = await this.idService.generateBarsIds(needed);
+			} catch (error) {
+				throw new HttpError(
+					500,
+					'Failed to allocate unique point IDs',
+					{
+						cause: error instanceof Error ? error.message : error,
+					},
+					false,
+				);
+			}
 			const candidateSet = new Set(generated.filter((candidate) => !allocatedIds.has(candidate)));
 			if (candidateSet.size === 0) {
 				continue;

@@ -28,11 +28,11 @@ jobs:
       - name: Generate & verify OpenAPI spec
         run: |
           bun run openapi
-          bun run prettier --write openapi.json || true
-          if ! git diff --quiet openapi.json; then
-            echo "::error::openapi.json is out of date. Run the OpenAPI Update PR workflow (or re-run it) so the spec is committed before merging to main.";
+          bun run prettier --write data/openapi.json || true
+          if ! git diff --quiet data/openapi.json; then
+            echo "::error::data/openapi.json is out of date. Run the OpenAPI Update PR workflow (or re-run it) so the spec is committed before merging to main.";
             echo "Changes detected:";
-            git --no-pager diff --name-only openapi.json;
+            git --no-pager diff --name-only data/openapi.json;
             exit 1;
           fi
 

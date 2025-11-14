@@ -52,5 +52,5 @@ const options = {
 };
 
 const openapiSpec = swaggerJsdoc(options);
-fs.writeFileSync(path.join(root, 'openapi.json'), JSON.stringify(openapiSpec, null, 2));
-console.log('OpenAPI spec generated at openapi.json');
+fs.writeFileSync(path.join(root, 'data/openapi.json'), JSON.stringify(openapiSpec, null, 2));
+console.log('OpenAPI spec generated at data/openapi.json');

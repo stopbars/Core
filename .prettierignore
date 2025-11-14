@@ -3,5 +3,4 @@ dist
 build
 bun.lock
 worker-configuration.d.ts
-openapi.json
 CONTRIBUTING.md

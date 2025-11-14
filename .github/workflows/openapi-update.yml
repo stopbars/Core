@@ -32,16 +32,16 @@ jobs:
       - name: Generate OpenAPI spec
         run: |
           bun run openapi
-          bun run prettier --write openapi.json || true
+          bun run prettier --write data/openapi.json || true
 
       - name: Commit updated spec (if changed)
         run: |
-          if git diff --quiet openapi.json; then
+          if git diff --quiet data/openapi.json; then
             echo "No OpenAPI spec changes"
           else
             git config user.name "openapi-bot"
             git config user.email "openapi-bot@users.noreply.github.com"
-            git add openapi.json
+            git add data/openapi.json
             git commit -m "chore: update openapi spec"
             git push
           fi
