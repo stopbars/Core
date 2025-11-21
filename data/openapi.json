@@ -1693,16 +1693,20 @@
 								"required": ["airportIcao", "packageName", "submittedXml"],
 								"properties": {
 									"airportIcao": {
-										"type": "string"
+										"type": "string",
+										"minLength": 4,
+										"maxLength": 4
 									},
 									"packageName": {
-										"type": "string"
+										"type": "string",
+										"maxLength": 64
 									},
 									"submittedXml": {
 										"type": "string"
 									},
 									"notes": {
-										"type": "string"
+										"type": "string",
+										"maxLength": 1000
 									}
 								}
 							}
@@ -1714,7 +1718,7 @@
 						"description": "Contribution created"
 					},
 					"400": {
-						"description": "Validation error (including duplicate detection when uploaded XML matches an existing pending/approved submission for the same package name)"
+						"description": "Validation error (includes ICAO/package length limits, duplicate detection, and notes exceeding 1000 characters)"
 					}
 				}
 			}

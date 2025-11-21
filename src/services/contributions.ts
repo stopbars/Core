@@ -47,6 +47,10 @@ export interface ContributionListResult {
 
 import { DatabaseSessionService } from './database-session';
 
+export const MAX_CONTRIBUTION_NOTES_CHARS = 1000;
+export const MAX_CONTRIBUTION_PACKAGE_CHARS = 64;
+const ICAO_REGEX = /^[A-Z0-9]{4}$/;
+
 export class ContributionService {
 	private airportService: AirportService;
 	private supportService: SupportService;
@@ -67,10 +71,50 @@ export class ContributionService {
 		this.storageService = new StorageService(storage);
 		this.dbSession = new DatabaseSessionService(db);
 	}
+
+	private normalizeAirportIcao(raw: string): string {
+		if (typeof raw !== 'string') {
+			throw new Error('airportIcao must be a string');
+		}
+		const normalized = raw.trim().toUpperCase();
+		if (!ICAO_REGEX.test(normalized)) {
+			throw new Error('airportIcao must be a valid 4-character ICAO code');
+		}
+		return normalized;
+	}
+
+	private sanitizePackageName(raw: string, fieldLabel = 'packageName'): string {
+		if (typeof raw !== 'string') {
+			throw new Error(`${fieldLabel} must be a string`);
+		}
+		const trimmed = raw.trim();
+		if (trimmed.length === 0) {
+			throw new Error(`${fieldLabel} is required`);
+		}
+		if (trimmed.length > MAX_CONTRIBUTION_PACKAGE_CHARS) {
+			throw new Error(`${fieldLabel} must be ${MAX_CONTRIBUTION_PACKAGE_CHARS} characters or fewer`);
+		}
+		return trimmed;
+	}
 	async createContribution(submission: ContributionSubmission): Promise<Contribution> {
-		const airport = await this.airportService.getAirport(submission.airportIcao);
+		const normalizedAirportIcao = this.normalizeAirportIcao(submission.airportIcao);
+		const sanitizedPackageName = this.sanitizePackageName(submission.packageName);
+
+		const airport = await this.airportService.getAirport(normalizedAirportIcao);
 		if (!airport) {
-			throw new Error(`Airport with ICAO ${submission.airportIcao} not found`);
+			throw new Error(`Airport with ICAO ${normalizedAirportIcao} not found`);
+		}
+
+		let sanitizedNotes: string | null = null;
+		if (submission.notes !== undefined && submission.notes !== null) {
+			if (typeof submission.notes !== 'string') {
+				throw new Error('Notes must be a string');
+			}
+			const trimmed = submission.notes.trim();
+			if (trimmed.length > MAX_CONTRIBUTION_NOTES_CHARS) {
+				throw new Error(`Notes must be ${MAX_CONTRIBUTION_NOTES_CHARS} characters or fewer`);
+			}
+			sanitizedNotes = trimmed.length > 0 ? trimmed : null;
 		}
 
 		// Sanitize & validate submitted XML to mitigate injection / XXE attempts
@@ -99,7 +143,7 @@ export class ContributionService {
 			 FROM contributions
 			 WHERE package_name = ? COLLATE NOCASE
 			   AND status IN ('pending','approved')`,
-			[submission.packageName],
+			[sanitizedPackageName],
 		);
 		for (const row of existingForPackage.results) {
 			if (normalize(row.submitted_xml) === normalizedXml) {
@@ -121,17 +165,17 @@ export class ContributionService {
 		submission_date, status
 	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-			[id, submission.userId, submission.airportIcao, submission.packageName, trimmedXml, submission.notes || null, now, 'pending'],
+			[id, submission.userId, normalizedAirportIcao, sanitizedPackageName, trimmedXml, sanitizedNotes, now, 'pending'],
 		);
 
 		const contribution: Contribution = {
 			id,
 			userId: submission.userId,
 			userDisplayName: null, // resolved dynamically on retrieval
-			airportIcao: submission.airportIcao,
-			packageName: submission.packageName,
+			airportIcao: normalizedAirportIcao,
+			packageName: sanitizedPackageName,
 			submittedXml: trimmedXml,
-			notes: submission.notes || null,
+			notes: sanitizedNotes,
 			submissionDate: now,
 			status: 'pending',
 			rejectionReason: null,
@@ -139,8 +183,8 @@ export class ContributionService {
 		};
 		try {
 			this.posthog?.track('Contribution Submitted', {
-				airport: submission.airportIcao,
-				packageName: submission.packageName,
+				airport: normalizedAirportIcao,
+				packageName: sanitizedPackageName,
 				userId: submission.userId,
 			});
 		} catch (e) {
@@ -310,7 +354,10 @@ export class ContributionService {
 		}
 
 		// Handle package name correction if provided
-		const packageName = decision.newPackageName || contribution.packageName;
+		const packageName =
+			decision.newPackageName !== undefined && decision.newPackageName !== null
+				? this.sanitizePackageName(decision.newPackageName, 'newPackageName')
+				: contribution.packageName;
 
 		// Update contribution with decision
 		const now = new Date().toISOString();

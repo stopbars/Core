@@ -814,13 +814,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-										.filter((o: DOObject) => allowedIds.has(o.id))
-										.map((o: DOObject) => ({
-											id: o.id,
-											state: o.state,
-											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-										}))
+									.filter((o: DOObject) => allowedIds.has(o.id))
+									.map((o: DOObject) => ({
+										id: o.id,
+										state: o.state,
+										timestamp: o.timestamp,
+										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+									}))
 								: [];
 
 							return {
@@ -919,13 +919,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		const allowedIds = new Set(Object.keys(lightsByObject));
 		const objects = Array.isArray(state.objects)
 			? state.objects
-					.filter((o: DOObject) => allowedIds.has(o.id))
-					.map((o: DOObject) => ({
-						id: o.id,
-						state: o.state,
-						timestamp: o.timestamp,
-						lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-					}))
+				.filter((o: DOObject) => allowedIds.has(o.id))
+				.map((o: DOObject) => ({
+					id: o.id,
+					state: o.state,
+					timestamp: o.timestamp,
+					lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+				}))
 			: [];
 		return c.json({
 			states: [
@@ -3294,15 +3294,20 @@ contributionsApp.get(
  *             type: object
  *             required: [airportIcao, packageName, submittedXml]
  *             properties:
- *               airportIcao: { type: string }
- *               packageName: { type: string }
+ *               airportIcao:
+ *                 type: string
+ *                 minLength: 4
+ *                 maxLength: 4
+ *               packageName:
+ *                 type: string
+ *                 maxLength: 64
  *               submittedXml: { type: string }
- *               notes: { type: string }
+ *               notes: { type: string, maxLength: 1000 }
  *     responses:
  *       201:
  *         description: Contribution created
  *       400:
- *         description: Validation error (including duplicate detection when uploaded XML matches an existing pending/approved submission for the same package name)
+ *         description: Validation error (includes ICAO/package length limits, duplicate detection, and notes exceeding 1000 characters)
  */
 contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
