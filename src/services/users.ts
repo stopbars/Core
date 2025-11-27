@@ -19,6 +19,8 @@ type StaffUserDTO = {
 	subdivision: { id: string | null; name: string | null } | null;
 	created_at: string;
 	last_login: string;
+	is_staff: boolean;
+	role: string | null;
 };
 
 export class UserService {
@@ -91,6 +93,8 @@ export class UserService {
 					subdivision: u.subdivision_id || u.subdivision_name ? { id: u.subdivision_id, name: u.subdivision_name } : null,
 					created_at: u.created_at,
 					last_login: u.last_login,
+					is_staff: u.is_staff === 1,
+					role: u.role !== null ? String(u.role) : null,
 				})),
 				total: countResult.results[0]?.count || 0,
 			};
@@ -153,6 +157,8 @@ export class UserService {
 				subdivision: u.subdivision_id || u.subdivision_name ? { id: u.subdivision_id, name: u.subdivision_name } : null,
 				created_at: u.created_at,
 				last_login: u.last_login,
+				is_staff: u.is_staff === 1,
+				role: u.role !== null ? String(u.role) : null,
 			}));
 		} catch {
 			throw new HttpError(500, 'Failed to search users');
