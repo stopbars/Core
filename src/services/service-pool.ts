@@ -127,9 +127,9 @@ export const ServicePool = (() => {
 			}
 			return storage;
 		},
-		getGitHub() {
+		getGitHub(env: Env) {
 			if (!github) {
-				github = new GitHubService();
+				github = new GitHubService(env.GITHUB_TOKEN);
 			}
 			return github;
 		},

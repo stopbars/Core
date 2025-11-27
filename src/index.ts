@@ -5111,7 +5111,7 @@ app.get(
 	withCache(() => 'github-contributors', 3600, 'github'), // Cache for 1 hour
 	async (c) => {
 		try {
-			const github = ServicePool.getGitHub();
+			const github = ServicePool.getGitHub(c.env);
 			const contributorsData = await github.getAllContributors();
 			return c.json(contributorsData);
 		} catch (error) {

@@ -58,8 +58,11 @@ interface ContributorsData {
 
 export class GitHubService {
 	private readonly GITHUB_ORG = 'stopbars';
+	private readonly token?: string;
 
-	constructor() {}
+	constructor(token?: string) {
+		this.token = token;
+	}
 
 	/**
 	 * Get all public repositories for the organization
@@ -71,10 +74,7 @@ export class GitHubService {
 
 		while (true) {
 			const res = await fetch(`https://api.github.com/orgs/${this.GITHUB_ORG}/repos?page=${page}&per_page=${perPage}&type=public`, {
-				headers: {
-					'User-Agent': 'BARS-API',
-					Accept: 'application/vnd.github.v3+json',
-				},
+				headers: this.getHeaders(),
 			});
 
 			if (!res.ok) {
@@ -100,15 +100,26 @@ export class GitHubService {
 	}
 
 	/**
+	 * Get common headers for GitHub API requests
+	 */
+	private getHeaders(): Record<string, string> {
+		const headers: Record<string, string> = {
+			'User-Agent': 'BARS-API',
+			Accept: 'application/vnd.github.v3+json',
+		};
+		if (this.token) {
+			headers['Authorization'] = `Bearer ${this.token}`;
+		}
+		return headers;
+	}
+
+	/**
 	 * Get contributors for a specific repository
 	 */
 	private async getRepositoryContributors(repoFullName: string): Promise<GitHubContributorResponse[]> {
 		try {
 			const res = await fetch(`https://api.github.com/repos/${repoFullName}/contributors?per_page=100`, {
-				headers: {
-					'User-Agent': 'BARS-API',
-					Accept: 'application/vnd.github.v3+json',
-				},
+				headers: this.getHeaders(),
 			});
 
 			if (!res.ok) {
