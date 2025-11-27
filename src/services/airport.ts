@@ -8,6 +8,7 @@ interface AirportData {
 	longitude_deg?: number;
 	name?: string;
 	continent?: string;
+	elevation_ft?: string;
 	runways?: Array<{
 		length_ft: string;
 		width_ft: string;
@@ -17,7 +18,7 @@ interface AirportData {
 		he_ident: string;
 		he_latitude_deg: string;
 		he_longitude_deg: string;
-		closed?: string; // '1' if closed per external API
+		closed?: string;
 	}>;
 }
 
@@ -147,19 +148,48 @@ export class AirportService {
 		throw new HttpError(503, 'Bounding box unavailable');
 	}
 
+	/**
+	 * Fetch elevation from AirportDB and store in database.
+	 * Returns the elevation data if successful, null otherwise.
+	 */
+	private async fetchAndStoreElevation(icao: string): Promise<{ elevation_ft: number; elevation_m: number } | null> {
+		try {
+			const response = await fetch(`https://airportdb.io/api/v1/airport/${icao}?apiToken=${this.apiToken}`, { method: 'GET' });
+			if (!response.ok) return null;
+			const data = (await response.json()) as AirportData;
+			if (!data.elevation_ft) return null;
+
+			const elevation_ft = parseInt(data.elevation_ft, 10);
+			if (Number.isNaN(elevation_ft)) return null;
+
+			const elevation_m = Math.round(elevation_ft * 0.3048 * 100) / 100; // ft to m, 2 decimal places
+
+			await this.dbSession.executeWrite('UPDATE airports SET elevation_ft = ?, elevation_m = ? WHERE icao = ?', [
+				elevation_ft,
+				elevation_m,
+				icao,
+			]);
+
+			return { elevation_ft, elevation_m };
+		} catch {
+			return null;
+		}
+	}
+
 	async getAirport(icao: string) {
 		const uppercaseIcao = icao.toUpperCase().replace(/[^A-Z0-9]/g, '');
 		if (!/^[A-Z0-9]{4}$/.test(uppercaseIcao)) {
 			return null;
 		}
 
-		// First try to get from database using read-optimized query
 		const airportResult = await this.dbSession.executeRead<{
 			icao: string;
 			latitude: number | null;
 			longitude: number | null;
 			name: string;
 			continent: string;
+			elevation_ft: number | null;
+			elevation_m: number | null;
 			bbox_min_lat: number | null;
 			bbox_min_lon: number | null;
 			bbox_max_lat: number | null;
@@ -168,31 +198,50 @@ export class AirportService {
 		const airportFromDb = airportResult.results[0];
 
 		if (airportFromDb) {
+			const fetchPromises: Promise<void>[] = [];
+			let needsReread = false;
+
+			if (airportFromDb.elevation_ft == null) {
+				needsReread = true;
+				fetchPromises.push(this.fetchAndStoreElevation(uppercaseIcao).then(() => { }).catch(() => { }));
+			}
 			if (
 				airportFromDb.bbox_min_lat == null ||
 				airportFromDb.bbox_min_lon == null ||
 				airportFromDb.bbox_max_lat == null ||
 				airportFromDb.bbox_max_lon == null
 			) {
-				try {
-					await this.fetchAndStoreBoundingBox(uppercaseIcao);
-				} catch (err) {
-					try {
-						this.posthog?.track('Airport Bounding Box Unavailable', {
-							source: 'db-cache-miss',
-							icao: uppercaseIcao,
-							error: err instanceof Error ? err.message : String(err),
-						});
-					} catch {
-						/* ignore analytics errors */
-					}
-				}
+				needsReread = true;
+				fetchPromises.push(
+					this.fetchAndStoreBoundingBox(uppercaseIcao)
+						.then(() => { })
+						.catch((err) => {
+							try {
+								this.posthog?.track('Airport Bounding Box Unavailable', {
+									source: 'db-cache-miss',
+									icao: uppercaseIcao,
+									error: err instanceof Error ? err.message : String(err),
+								});
+							} catch {
+								/* ignore analytics errors */
+							}
+						}),
+				);
+			}
+
+			if (fetchPromises.length > 0) {
+				await Promise.all(fetchPromises);
+			}
+
+			if (needsReread) {
 				const reread = await this.dbSession.executeRead<{
 					icao: string;
 					latitude: number | null;
 					longitude: number | null;
 					name: string;
 					continent: string;
+					elevation_ft: number | null;
+					elevation_m: number | null;
 					bbox_min_lat: number | null;
 					bbox_min_lon: number | null;
 					bbox_max_lat: number | null;
@@ -231,6 +280,10 @@ export class AirportService {
 			});
 			const airportData = (await response.json()) as AirportData;
 
+			// Parse elevation if available
+			const elevation_ft = airportData.elevation_ft ? parseInt(airportData.elevation_ft, 10) : null;
+			const elevation_m = elevation_ft != null && !Number.isNaN(elevation_ft) ? Math.round(elevation_ft * 0.3048 * 100) / 100 : null;
+
 			// Map API response to our database schema
 			const airport = {
 				icao: uppercaseIcao,
@@ -238,16 +291,15 @@ export class AirportService {
 				longitude: airportData.longitude_deg,
 				name: airportData.name || '',
 				continent: airportData.continent || 'UNKNOWN',
+				elevation_ft: !Number.isNaN(elevation_ft) ? elevation_ft : null,
+				elevation_m,
 			};
 
 			// Save airport to database using write-optimized operation
-			await this.dbSession.executeWrite('INSERT INTO airports (icao, latitude, longitude, name, continent) VALUES (?, ?, ?, ?, ?)', [
-				airport.icao,
-				airport.latitude ?? null,
-				airport.longitude ?? null,
-				airport.name,
-				airport.continent,
-			]);
+			await this.dbSession.executeWrite(
+				'INSERT INTO airports (icao, latitude, longitude, name, continent, elevation_ft, elevation_m) VALUES (?, ?, ?, ?, ?, ?, ?)',
+				[airport.icao, airport.latitude ?? null, airport.longitude ?? null, airport.name, airport.continent, airport.elevation_ft, airport.elevation_m],
+			);
 
 			// Attempt bbox fetch; continue even if unavailable
 			try {
@@ -271,6 +323,8 @@ export class AirportService {
 				longitude: number | null;
 				name: string;
 				continent: string;
+				elevation_ft: number | null;
+				elevation_m: number | null;
 				bbox_min_lat: number | null;
 				bbox_min_lon: number | null;
 				bbox_max_lat: number | null;
@@ -386,6 +440,8 @@ export class AirportService {
 			longitude: number | null;
 			name: string;
 			continent: string;
+			elevation_ft: number | null;
+			elevation_m: number | null;
 		}>('SELECT * FROM airports WHERE continent = ? ORDER BY icao', [continent.toUpperCase()]);
 		return { results: result.results };
 	}
@@ -417,9 +473,11 @@ export class AirportService {
 			longitude: number;
 			name: string;
 			continent: string;
+			elevation_ft: number | null;
+			elevation_m: number | null;
 			distance_score: number;
 		}>(
-			`SELECT icao, latitude, longitude, name, continent,
+			`SELECT icao, latitude, longitude, name, continent, elevation_ft, elevation_m,
 				((latitude - ?) * (latitude - ?) + ((longitude - ?) * (longitude - ?) * ?)) AS distance_score
 			 FROM airports
 			 WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
@@ -447,6 +505,8 @@ export class AirportService {
 			longitude: row.longitude,
 			name: row.name,
 			continent: row.continent,
+			elevation_ft: row.elevation_ft,
+			elevation_m: row.elevation_m,
 			distance_m: Math.round(distance_m),
 			distance_nm: Number(distance_nm.toFixed(2)),
 		};

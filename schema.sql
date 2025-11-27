@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS airports (
   longitude REAL NOT NULL,
   name TEXT NOT NULL,
   continent TEXT NOT NULL,
+  elevation_ft INTEGER,
+  elevation_m REAL,
   bbox_min_lat REAL,
   bbox_min_lon REAL,
   bbox_max_lat REAL,
