@@ -20,7 +20,6 @@ type StaffUserDTO = {
 	created_at: string;
 	last_login: string;
 	is_staff: boolean;
-	role: string | null;
 };
 
 export class UserService {
@@ -62,12 +61,10 @@ export class UserService {
 					created_at: string;
 					last_login: string;
 					is_staff: number;
-					role: number | null;
 				}>(
 					`
 				SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.display_name, u.region_id, u.region_name, u.division_id, u.division_name, u.subdivision_id, u.subdivision_name, u.created_at, u.last_login,
-				CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
-				s.role
+				CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff
 				FROM users u
 				LEFT JOIN staff s ON u.id = s.user_id
 				ORDER BY u.created_at DESC
@@ -94,7 +91,6 @@ export class UserService {
 					created_at: u.created_at,
 					last_login: u.last_login,
 					is_staff: u.is_staff === 1,
-					role: u.role !== null ? String(u.role) : null,
 				})),
 				total: countResult.results[0]?.count || 0,
 			};
@@ -128,12 +124,10 @@ export class UserService {
 				created_at: string;
 				last_login: string;
 				is_staff: number;
-				role: number | null;
 			}>(
 				`
 		  SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.display_name, u.region_id, u.region_name, u.division_id, u.division_name, u.subdivision_id, u.subdivision_name, u.created_at, u.last_login,
-		  CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff,
-		  s.role
+		  CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff
 		  FROM users u
 		  LEFT JOIN staff s ON u.id = s.user_id
 		  WHERE u.email LIKE ? OR u.vatsim_id LIKE ?
@@ -158,7 +152,6 @@ export class UserService {
 				created_at: u.created_at,
 				last_login: u.last_login,
 				is_staff: u.is_staff === 1,
-				role: u.role !== null ? String(u.role) : null,
 			}));
 		} catch {
 			throw new HttpError(500, 'Failed to search users');
