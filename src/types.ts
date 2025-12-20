@@ -132,6 +132,7 @@ export interface Packet {
 		sharedState?: Record<string, unknown>; // Full shared state (for initial state)
 		objects?: AirportObject[];
 		controllerId?: string;
+		controllers?: string[];
 		message?: string; // For error messages
 		connectionType?: ClientType; // Add connection type to data
 		offline?: boolean; // Flag to indicate if state is offline (no controllers)

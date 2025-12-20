@@ -780,6 +780,8 @@ export class Connection {
 			data: {
 				objects: stateObjects,
 				connectionType: clientType,
+				controllerId: clientType === 'controller' ? user.vatsim_id : undefined,
+				controllers: Array.from(state.controllers),
 				offline: isOffline,
 				sharedState: this.getSharedStateSnapshot(airport), // Add shared state to initial state
 			},
@@ -924,6 +926,7 @@ export class Connection {
 							data: {
 								objects,
 								sharedState: this.getSharedStateSnapshot(airport),
+								controllers: state ? Array.from(state.controllers) : undefined,
 								offline,
 								requestedAt: (packet as Packet).timestamp || now,
 							},
