@@ -169,6 +169,12 @@ CREATE TABLE IF NOT EXISTS contributions (
   package_name TEXT NOT NULL,
   submitted_xml TEXT NOT NULL,
   notes TEXT,
+  simulator TEXT CHECK (
+    simulator IN (
+      'msfs2020',
+      'msfs2024'
+    )
+  ) NOT NULL DEFAULT 'msfs2024',
   submission_date DATETIME DEFAULT CURRENT_TIMESTAMP,
   status TEXT CHECK (
     status IN (

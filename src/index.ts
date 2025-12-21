@@ -160,6 +160,7 @@ interface ContributionSubmissionPayload {
 	packageName: string;
 	submittedXml: string;
 	notes?: string;
+	simulator: 'msfs2020' | 'msfs2024';
 }
 
 interface ContributionDecisionPayload {
@@ -814,13 +815,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -919,13 +920,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		const allowedIds = new Set(Object.keys(lightsByObject));
 		const objects = Array.isArray(state.objects)
 			? state.objects
-				.filter((o: DOObject) => allowedIds.has(o.id))
-				.map((o: DOObject) => ({
-					id: o.id,
-					state: o.state,
-					timestamp: o.timestamp,
-					lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-				}))
+					.filter((o: DOObject) => allowedIds.has(o.id))
+					.map((o: DOObject) => ({
+						id: o.id,
+						state: o.state,
+						timestamp: o.timestamp,
+						lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+					}))
 			: [];
 		return c.json({
 			states: [
@@ -3292,7 +3293,7 @@ contributionsApp.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [airportIcao, packageName, submittedXml]
+ *             required: [airportIcao, packageName, submittedXml, simulator]
  *             properties:
  *               airportIcao:
  *                 type: string
@@ -3303,11 +3304,15 @@ contributionsApp.get(
  *                 maxLength: 64
  *               submittedXml: { type: string }
  *               notes: { type: string, maxLength: 1000 }
+ *               simulator:
+ *                 type: string
+ *                 enum: [msfs2020, msfs2024]
+ *                 description: Target flight simulator for this contribution
  *     responses:
  *       201:
  *         description: Contribution created
  *       400:
- *         description: Validation error (includes ICAO/package length limits, duplicate detection, and notes exceeding 1000 characters)
+ *         description: Validation error (includes ICAO/package length limits, duplicate detection, notes exceeding 1000 characters, or invalid simulator)
  */
 contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
@@ -3334,6 +3339,7 @@ contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 			packageName: payload.packageName,
 			submittedXml: payload.submittedXml,
 			notes: payload.notes,
+			simulator: payload.simulator,
 		});
 
 		return c.json(result, 201);

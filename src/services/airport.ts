@@ -203,7 +203,11 @@ export class AirportService {
 
 			if (airportFromDb.elevation_ft == null) {
 				needsReread = true;
-				fetchPromises.push(this.fetchAndStoreElevation(uppercaseIcao).then(() => { }).catch(() => { }));
+				fetchPromises.push(
+					this.fetchAndStoreElevation(uppercaseIcao)
+						.then(() => {})
+						.catch(() => {}),
+				);
 			}
 			if (
 				airportFromDb.bbox_min_lat == null ||
@@ -214,7 +218,7 @@ export class AirportService {
 				needsReread = true;
 				fetchPromises.push(
 					this.fetchAndStoreBoundingBox(uppercaseIcao)
-						.then(() => { })
+						.then(() => {})
 						.catch((err) => {
 							try {
 								this.posthog?.track('Airport Bounding Box Unavailable', {
@@ -298,7 +302,15 @@ export class AirportService {
 			// Save airport to database using write-optimized operation
 			await this.dbSession.executeWrite(
 				'INSERT INTO airports (icao, latitude, longitude, name, continent, elevation_ft, elevation_m) VALUES (?, ?, ?, ?, ?, ?, ?)',
-				[airport.icao, airport.latitude ?? null, airport.longitude ?? null, airport.name, airport.continent, airport.elevation_ft, airport.elevation_m],
+				[
+					airport.icao,
+					airport.latitude ?? null,
+					airport.longitude ?? null,
+					airport.name,
+					airport.continent,
+					airport.elevation_ft,
+					airport.elevation_m,
+				],
 			);
 
 			// Attempt bbox fetch; continue even if unavailable

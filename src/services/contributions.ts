@@ -6,6 +6,10 @@ import { PolygonService } from './polygons';
 import { PostHogService } from './posthog';
 import { sanitizeContributionXml } from './xml-sanitizer';
 
+export type Simulator = 'msfs2020' | 'msfs2024';
+
+export const VALID_SIMULATORS: readonly Simulator[] = ['msfs2020', 'msfs2024'] as const;
+
 export interface Contribution {
 	id: string;
 	userId: string;
@@ -14,6 +18,7 @@ export interface Contribution {
 	packageName: string;
 	submittedXml: string;
 	notes: string | null;
+	simulator: Simulator;
 	submissionDate: string;
 	status: 'pending' | 'approved' | 'rejected' | 'outdated';
 	rejectionReason: string | null;
@@ -26,6 +31,7 @@ export interface ContributionSubmission {
 	packageName: string;
 	submittedXml: string;
 	notes?: string;
+	simulator: Simulator;
 }
 
 export interface ContributionDecision {
@@ -100,6 +106,11 @@ export class ContributionService {
 		const normalizedAirportIcao = this.normalizeAirportIcao(submission.airportIcao);
 		const sanitizedPackageName = this.sanitizePackageName(submission.packageName);
 
+		// Validate simulator
+		if (!submission.simulator || !VALID_SIMULATORS.includes(submission.simulator)) {
+			throw new Error(`simulator must be one of: ${VALID_SIMULATORS.join(', ')}`);
+		}
+
 		const airport = await this.airportService.getAirport(normalizedAirportIcao);
 		if (!airport) {
 			throw new Error(`Airport with ICAO ${normalizedAirportIcao} not found`);
@@ -135,20 +146,21 @@ export class ContributionService {
 				.replace(/>\s+</g, '><');
 		const normalizedXml = normalize(trimmedXml);
 
-		// Prevent duplicate or stolen submissions:
+		// Prevent duplicate or stolen submissions (same package + simulator):
 		const existingForPackage = await this.dbSession.executeRead<{
 			submitted_xml: string;
 		}>(
 			`SELECT submitted_xml
 			 FROM contributions
 			 WHERE package_name = ? COLLATE NOCASE
+			   AND simulator = ?
 			   AND status IN ('pending','approved')`,
-			[sanitizedPackageName],
+			[sanitizedPackageName, submission.simulator],
 		);
 		for (const row of existingForPackage.results) {
 			if (normalize(row.submitted_xml) === normalizedXml) {
 				throw new Error(
-					'Duplicate submission detected: XML matches an existing contribution for the same package. Please submit original work.',
+					'Duplicate submission detected: XML matches an existing contribution for the same package and simulator. Please submit original work.',
 				);
 			}
 		}
@@ -162,10 +174,20 @@ export class ContributionService {
 	  INSERT INTO contributions (
 		id, user_id, airport_icao, 
 		package_name, submitted_xml, notes,
-		submission_date, status
-	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		simulator, submission_date, status
+	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-			[id, submission.userId, normalizedAirportIcao, sanitizedPackageName, trimmedXml, sanitizedNotes, now, 'pending'],
+			[
+				id,
+				submission.userId,
+				normalizedAirportIcao,
+				sanitizedPackageName,
+				trimmedXml,
+				sanitizedNotes,
+				submission.simulator,
+				now,
+				'pending',
+			],
 		);
 
 		const contribution: Contribution = {
@@ -176,6 +198,7 @@ export class ContributionService {
 			packageName: sanitizedPackageName,
 			submittedXml: trimmedXml,
 			notes: sanitizedNotes,
+			simulator: submission.simulator,
 			submissionDate: now,
 			status: 'pending',
 			rejectionReason: null,
@@ -198,7 +221,7 @@ export class ContributionService {
 	  SELECT 
 		c.id, c.user_id as userId, u.display_name as userDisplayName,
 		c.airport_icao as airportIcao, c.package_name as packageName,
-		c.submitted_xml as submittedXml, c.notes,
+		c.submitted_xml as submittedXml, c.notes, c.simulator,
 		c.submission_date as submissionDate, c.status,
 		c.rejection_reason as rejectionReason, c.decision_date as decisionDate
 	  FROM contributions c
@@ -222,7 +245,7 @@ export class ContributionService {
 			SELECT 
 				c.id, c.user_id as userId, u.display_name as userDisplayName,
 				c.airport_icao as airportIcao, c.package_name as packageName,
-				c.submitted_xml as submittedXml, c.notes,
+				c.submitted_xml as submittedXml, c.notes, c.simulator,
 				c.submission_date as submissionDate, c.status,
 				c.rejection_reason as rejectionReason, c.decision_date as decisionDate
 			FROM contributions c
@@ -261,7 +284,7 @@ export class ContributionService {
 	  SELECT 
 		c.id, c.user_id as userId, u.display_name as userDisplayName,
 		c.airport_icao as airportIcao, c.package_name as packageName,
-		c.submitted_xml as submittedXml, c.notes,
+		c.submitted_xml as submittedXml, c.notes, c.simulator,
 		c.submission_date as submissionDate, c.status,
 		c.rejection_reason as rejectionReason, c.decision_date as decisionDate
 	  FROM contributions c

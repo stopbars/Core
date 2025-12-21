@@ -1690,7 +1690,7 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["airportIcao", "packageName", "submittedXml"],
+								"required": ["airportIcao", "packageName", "submittedXml", "simulator"],
 								"properties": {
 									"airportIcao": {
 										"type": "string",
@@ -1707,6 +1707,11 @@
 									"notes": {
 										"type": "string",
 										"maxLength": 1000
+									},
+									"simulator": {
+										"type": "string",
+										"enum": ["msfs2020", "msfs2024"],
+										"description": "Target flight simulator for this contribution"
 									}
 								}
 							}
@@ -1718,7 +1723,7 @@
 						"description": "Contribution created"
 					},
 					"400": {
-						"description": "Validation error (includes ICAO/package length limits, duplicate detection, and notes exceeding 1000 characters)"
+						"description": "Validation error (includes ICAO/package length limits, duplicate detection, notes exceeding 1000 characters, or invalid simulator)"
 					}
 				}
 			}
