@@ -73,7 +73,7 @@ export class ContributionService {
 	) {
 		this.airportService = new AirportService(db, apiKey);
 		this.supportService = new SupportService(db);
-		this.polygonService = new PolygonService(db);
+		this.polygonService = new PolygonService(db, undefined, posthog);
 		this.storageService = new StorageService(storage);
 		this.dbSession = new DatabaseSessionService(db);
 	}
@@ -208,6 +208,7 @@ export class ContributionService {
 			this.posthog?.track('Contribution Submitted', {
 				airport: normalizedAirportIcao,
 				packageName: sanitizedPackageName,
+				simulator: submission.simulator,
 				userId: submission.userId,
 			});
 		} catch (e) {
@@ -238,8 +239,19 @@ export class ContributionService {
 	 * Case-insensitive package name match.
 	 * @param airportIcao ICAO code
 	 * @param packageName Package name (case-insensitive)
+	 * @param simulator Optional simulator filter - if not provided, returns latest across all simulators
 	 */
-	async getLatestApprovedContributionForAirportPackage(airportIcao: string, packageName: string): Promise<Contribution | null> {
+	async getLatestApprovedContributionForAirportPackage(
+		airportIcao: string,
+		packageName: string,
+		simulator?: Simulator,
+	): Promise<Contribution | null> {
+		const params: string[] = [airportIcao, packageName];
+		let simulatorClause = '';
+		if (simulator) {
+			simulatorClause = ' AND c.simulator = ?';
+			params.push(simulator);
+		}
 		const result = await this.dbSession.executeRead<Contribution>(
 			`
 			SELECT 
@@ -250,11 +262,11 @@ export class ContributionService {
 				c.rejection_reason as rejectionReason, c.decision_date as decisionDate
 			FROM contributions c
 			LEFT JOIN users u ON u.vatsim_id = c.user_id
-			WHERE c.airport_icao = ? AND lower(c.package_name) = lower(?) AND c.status = 'approved'
+			WHERE c.airport_icao = ? AND lower(c.package_name) = lower(?) AND c.status = 'approved'${simulatorClause}
 			ORDER BY datetime(c.decision_date) DESC
 			LIMIT 1
 			`,
-			[airportIcao, packageName],
+			params,
 		);
 		return result.results[0] || null;
 	}
@@ -306,6 +318,7 @@ export class ContributionService {
 			id: string;
 			airportIcao: string;
 			packageName: string;
+			simulator: Simulator;
 		}>;
 		total: number;
 	}> {
@@ -333,7 +346,8 @@ export class ContributionService {
 		SELECT 
 			c.id,
 			c.airport_icao as airportIcao,
-			c.package_name as packageName
+			c.package_name as packageName,
+			c.simulator
 		FROM contributions c
 		${whereClause}
 		ORDER BY c.submission_date DESC
@@ -343,6 +357,7 @@ export class ContributionService {
 			id: string;
 			airportIcao: string;
 			packageName: string;
+			simulator: Simulator;
 		}>(query, params);
 
 		return {
@@ -384,7 +399,7 @@ export class ContributionService {
 
 		// Update contribution with decision
 		const now = new Date().toISOString();
-		const status = decision.approved ? 'approved' : 'rejected'; // If approving, mark any existing approved contributions for the same airport and package as outdated
+		const status = decision.approved ? 'approved' : 'rejected'; // If approving, mark any existing approved contributions for the same airport, package, and simulator as outdated
 		if (decision.approved) {
 			await this.dbSession.executeWrite(
 				`
@@ -392,10 +407,11 @@ export class ContributionService {
 		SET status = 'outdated', decision_date = ?
 		WHERE airport_icao = ? 
 		AND package_name = ? 
+		AND simulator = ?
 		AND status = 'approved' 
 		AND id != ?
 	  `,
-				[now, contribution.airportIcao, packageName, id],
+				[now, contribution.airportIcao, packageName, contribution.simulator, id],
 			);
 
 			// Generate and upload the XML files to CDN
@@ -406,12 +422,12 @@ export class ContributionService {
 					this.polygonService.processBarsXML(contribution.submittedXml),
 				]);
 
-				// Create safe filenames for the uploads
+				// Create safe filenames for the uploads (include simulator to keep them separate)
 				const safePackageName = packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
 
-				// Filename format: ICAO_PackageName_type.xml
-				const supportsFileName = `${contribution.airportIcao}_${safePackageName}_supports.xml`;
-				const barsFileName = `${contribution.airportIcao}_${safePackageName}_bars.xml`;
+				// Filename format: ICAO_PackageName_simulator_type.xml
+				const supportsFileName = `${contribution.airportIcao}_${safePackageName}_${contribution.simulator}_supports.xml`;
+				const barsFileName = `${contribution.airportIcao}_${safePackageName}_${contribution.simulator}_bars.xml`;
 
 				// Set folder paths for each file type
 				const removalObjectsPath = 'RemovalObjects';
@@ -460,6 +476,7 @@ export class ContributionService {
 				id,
 				airport: contribution.airportIcao,
 				packageName,
+				simulator: contribution.simulator,
 				decidedBy: userId,
 				rejectionReason: decision.approved ? undefined : decision.rejectionReason || 'No reason provided',
 			});
@@ -538,6 +555,7 @@ export class ContributionService {
 					deletedBy: userId,
 					role: isStaff ? 'staff' : 'owner',
 					status: existing.status,
+					simulator: existing.simulator,
 				});
 			} catch (e) {
 				console.warn('Posthog track failed (Contribution Deleted)', e);
@@ -584,10 +602,10 @@ export class ContributionService {
 				this.polygonService.processBarsXML(contribution.submittedXml),
 			]);
 
-			// Safe filename components
+			// Safe filename components (include simulator to keep them separate)
 			const safePackageName = contribution.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
-			const supportsFileName = `${contribution.airportIcao}_${safePackageName}_supports.xml`;
-			const barsFileName = `${contribution.airportIcao}_${safePackageName}_bars.xml`;
+			const supportsFileName = `${contribution.airportIcao}_${safePackageName}_${contribution.simulator}_supports.xml`;
+			const barsFileName = `${contribution.airportIcao}_${safePackageName}_${contribution.simulator}_bars.xml`;
 
 			// Upload to the same paths (overwrite)
 			const [supportsRes, barsRes] = await Promise.all([
@@ -610,6 +628,7 @@ export class ContributionService {
 					id,
 					airport: contribution.airportIcao,
 					packageName: contribution.packageName,
+					simulator: contribution.simulator,
 					requestedBy: requestedByVatsimId,
 				});
 			} catch (e) {

@@ -1659,7 +1659,7 @@
 						"schema": {
 							"type": "boolean"
 						},
-						"description": "When true, returns only contribution id, airport ICAO, and package name."
+						"description": "When true, returns only contribution id, airport ICAO, package name, and simulator."
 					},
 					{
 						"in": "query",
@@ -1938,6 +1938,16 @@
 						"schema": {
 							"type": "string"
 						}
+					},
+					{
+						"in": "query",
+						"name": "simulator",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"enum": ["msfs2020", "msfs2024"]
+						},
+						"description": "Filter by simulator (optional - returns latest across all simulators if not specified)"
 					}
 				],
 				"responses": {

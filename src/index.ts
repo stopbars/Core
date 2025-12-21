@@ -815,13 +815,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-										.filter((o: DOObject) => allowedIds.has(o.id))
-										.map((o: DOObject) => ({
-											id: o.id,
-											state: o.state,
-											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-										}))
+									.filter((o: DOObject) => allowedIds.has(o.id))
+									.map((o: DOObject) => ({
+										id: o.id,
+										state: o.state,
+										timestamp: o.timestamp,
+										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+									}))
 								: [];
 
 							return {
@@ -920,13 +920,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		const allowedIds = new Set(Object.keys(lightsByObject));
 		const objects = Array.isArray(state.objects)
 			? state.objects
-					.filter((o: DOObject) => allowedIds.has(o.id))
-					.map((o: DOObject) => ({
-						id: o.id,
-						state: o.state,
-						timestamp: o.timestamp,
-						lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-					}))
+				.filter((o: DOObject) => allowedIds.has(o.id))
+				.map((o: DOObject) => ({
+					id: o.id,
+					state: o.state,
+					timestamp: o.timestamp,
+					lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+				}))
 			: [];
 		return c.json({
 			states: [
@@ -3146,7 +3146,7 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *         name: simple
  *         schema:
  *           type: boolean
- *         description: When true, returns only contribution id, airport ICAO, and package name.
+ *         description: When true, returns only contribution id, airport ICAO, package name, and simulator.
  *       - in: query
  *         name: summary
  *         schema:
@@ -3589,6 +3589,13 @@ const cdnApp = new Hono<{ Bindings: Env }>();
  *         name: package
  *         required: true
  *         schema: { type: string }
+ *       - in: query
+ *         name: simulator
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [msfs2020, msfs2024]
+ *         description: Filter by simulator (optional - returns latest across all simulators if not specified)
  *     responses:
  *       200:
  *         description: BARS XML document returned inline (application/xml)
@@ -3598,16 +3605,17 @@ const cdnApp = new Hono<{ Bindings: Env }>();
 app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const pkg = c.req.param('package');
+	const simulatorParam = c.req.query('simulator') as 'msfs2020' | 'msfs2024' | undefined;
 	const contributions = ServicePool.getContributions(c.env);
 	const storage = ServicePool.getStorage(c.env);
 
-	const latest = await contributions.getLatestApprovedContributionForAirportPackage(icao, pkg);
+	const latest = await contributions.getLatestApprovedContributionForAirportPackage(icao, pkg, simulatorParam);
 	if (!latest) {
 		return c.text('No approved map found', 404);
 	}
 
 	const safePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
-	const fileKey = `Maps/${icao}_${safePackageName}_bars.xml`;
+	const fileKey = `Maps/${icao}_${safePackageName}_${latest.simulator}_bars.xml`;
 
 	const stored = await storage.getFile(fileKey);
 	if (!stored) {
