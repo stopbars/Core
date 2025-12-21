@@ -5459,40 +5459,6 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 	return c.json(healthChecks, statusCode);
 });
 
-type OpenApiSpec = Record<string, unknown>;
-let openapiSpecPromise: Promise<OpenApiSpec> | null = null;
-
-const loadOpenApiSpec = (): Promise<OpenApiSpec> => {
-	if (!openapiSpecPromise) {
-		openapiSpecPromise = import('../data/openapi.json').then((mod) => (mod.default ?? mod) as OpenApiSpec);
-	}
-	return openapiSpecPromise;
-};
-
-// Serve OpenAPI spec
-/**
- * @openapi
- * /openapi.json:
- *   get:
- *     summary: Get OpenAPI specification
- *     tags:
- *       - System
- *     description: Returns the current OpenAPI 3.0 document for the BARS Core API.
- *     responses:
- *       200:
- *         description: OpenAPI document
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- */
-app.get('/openapi.json', async (c) => {
-	const spec = await loadOpenApiSpec();
-	return c.json(spec, 200, {
-		'Cache-Control': 'public, max-age=300',
-	});
-});
-
 // API Docs Redirect
 /**
  * @openapi

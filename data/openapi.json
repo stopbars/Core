@@ -2820,25 +2820,6 @@
 				}
 			}
 		},
-		"/openapi.json": {
-			"get": {
-				"summary": "Get OpenAPI specification",
-				"tags": ["System"],
-				"description": "Returns the current OpenAPI 3.0 document for the BARS Core API.",
-				"responses": {
-					"200": {
-						"description": "OpenAPI document",
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object"
-								}
-							}
-						}
-					}
-				}
-			}
-		},
 		"/docs": {
 			"get": {
 				"summary": "Redirect to API documentation",
