@@ -25,15 +25,21 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Generate & verify OpenAPI spec
+      - name: Generate OpenAPI spec
         run: |
           bun run openapi
           bun run prettier --write data/openapi.json || true
-          if ! git diff --quiet data/openapi.json; then
-            echo "::error::data/openapi.json is out of date. Run the OpenAPI Update PR workflow (or re-run it) so the spec is committed before merging to main.";
-            echo "Changes detected:";
-            git --no-pager diff --name-only data/openapi.json;
-            exit 1;
+
+      - name: Commit updated spec (if changed)
+        run: |
+          if git diff --quiet data/openapi.json; then
+            echo "No OpenAPI spec changes"
+          else
+            git config user.name "openapi-bot"
+            git config user.email "openapi-bot@users.noreply.github.com"
+            git add data/openapi.json
+            git commit -m "chore: update openapi spec [skip ci]"
+            git push
           fi
 
       - name: Deploy to Cloudflare Workers
