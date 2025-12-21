@@ -93,7 +93,7 @@ export const ServicePool = (() => {
 		},
 		getPolygons(env: Env) {
 			if (!polygons) {
-				polygons = new PolygonService(env.DB);
+				polygons = new PolygonService(env.DB, undefined, this.getPostHog(env));
 			}
 			return polygons;
 		},

@@ -2,6 +2,7 @@ import { AirportService } from './airport';
 import { processBarsPolygon, deduplicateTaxiwayPoints } from './bars/handlers';
 import { BarsPolygon, BarsDBRecord, ProcessedBarsObject, BarsLightPoint, LightProperties, GeoPoint } from './bars/types';
 import { calculateDistance } from './bars/geoUtils';
+import { PostHogService } from './posthog';
 
 import { DatabaseSessionService } from './database-session';
 
@@ -25,6 +26,7 @@ export class PolygonService {
 	constructor(
 		private db: D1Database,
 		private airportApiKey?: string,
+		private posthog?: PostHogService,
 	) {
 		this.airportService = new AirportService(db, airportApiKey || '');
 		this.dbSession = new DatabaseSessionService(db);
@@ -508,6 +510,21 @@ export class PolygonService {
 			// Apply point deduplication to merge taxiway points that are very close together
 			// This prevents overlapping lights where taxiway segments join
 			const deduplicatedObjects = deduplicateTaxiwayPoints(processedObjects);
+
+			// Count total light points generated
+			const totalPoints = deduplicatedObjects.reduce((sum, obj) => sum + obj.points.length, 0);
+
+			// Track point generation analytics
+			try {
+				this.posthog?.track('Points Generated', {
+					airport: icao,
+					totalPoints,
+					objectCount: deduplicatedObjects.length,
+					polygonCount: polygons.length,
+				});
+			} catch (e) {
+				console.warn('PostHog track failed (Points Generated)', e);
+			}
 
 			// Generate BARS XML with light locations using the deduplicated points
 			return this.generateBarsLightsXML(deduplicatedObjects);
