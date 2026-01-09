@@ -111,18 +111,18 @@ export interface AirportState {
 
 export interface Packet {
 	type:
-		| 'STATE_UPDATE'
-		| 'INITIAL_STATE'
-		| 'CONTROLLER_CONNECT'
-		| 'CONTROLLER_DISCONNECT'
-		| 'SHARED_STATE_UPDATE'
-		| 'ERROR'
-		| 'HEARTBEAT'
-		| 'HEARTBEAT_ACK'
-		| 'CLOSE'
-		| 'GET_STATE'
-		| 'STATE_SNAPSHOT'
-		| 'STOPBAR_CROSSING';
+	| 'STATE_UPDATE'
+	| 'INITIAL_STATE'
+	| 'CONTROLLER_CONNECT'
+	| 'CONTROLLER_DISCONNECT'
+	| 'SHARED_STATE_UPDATE'
+	| 'ERROR'
+	| 'HEARTBEAT'
+	| 'HEARTBEAT_ACK'
+	| 'CLOSE'
+	| 'GET_STATE'
+	| 'STATE_SNAPSHOT'
+	| 'STOPBAR_CROSSING';
 	airport?: string;
 	data?: {
 		objectId?: string;
@@ -162,6 +162,7 @@ export interface Point {
 	color?: 'yellow' | 'green' | 'green-yellow' | 'green-orange' | 'green-blue';
 	elevated?: boolean;
 	ihp?: boolean;
+	linkedTo?: string[]; // IDs of stopbars this lead_on is linked to (for auto-toggle)
 	createdAt: string;
 	updatedAt: string;
 	createdBy: string;

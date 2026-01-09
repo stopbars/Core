@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS points (
   ),
   elevated BOOLEAN DEFAULT FALSE,
   ihp BOOLEAN DEFAULT FALSE,
+  linked_to TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   created_by TEXT NOT NULL
@@ -424,6 +425,10 @@ CREATE INDEX IF NOT EXISTS idx_division_airports_icao ON division_airports (
 CREATE INDEX IF NOT EXISTS idx_points_airport_type ON points (
   airport_id,
   type
+);
+
+CREATE INDEX IF NOT EXISTS idx_points_linked_to ON points (
+  linked_to
 );
 
 CREATE INDEX IF NOT EXISTS idx_faqs_order ON faqs (

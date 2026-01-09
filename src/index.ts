@@ -1915,6 +1915,8 @@ divisionsApp.post('/:id/members', async (c) => {
 
 	const divisionId = parseInt(c.req.param('id'));
 	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 
@@ -1924,8 +1926,12 @@ divisionsApp.post('/:id/members', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
+	// Check if user is lead developer (can manage any division)
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const isLeadDev = user ? await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER) : false;
+
 	const userRole = await divisions.getMemberRole(divisionId, vatsimUser.id);
-	if (userRole !== 'nav_head') {
+	if (userRole !== 'nav_head' && !isLeadDev) {
 		return c.text('Forbidden', 403);
 	}
 
@@ -1966,6 +1972,8 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 	const divisionId = parseInt(c.req.param('id'));
 	const targetVatsimId = c.req.param('vatsimId');
 	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
 	const divisions = ServicePool.getDivisions(c.env);
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 
@@ -1975,13 +1983,17 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
+	// Check if user is lead developer (can manage any division)
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const isLeadDev = user ? await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER) : false;
+
 	const userRole = await divisions.getMemberRole(divisionId, vatsimUser.id);
-	if (userRole !== 'nav_head') {
+	if (userRole !== 'nav_head' && !isLeadDev) {
 		return c.text('Forbidden', 403);
 	}
 
-	// Prevent removing yourself
-	if (targetVatsimId === vatsimUser.id.toString()) {
+	// Prevent removing yourself (unless you're a lead dev removing yourself from a division you're not heading)
+	if (targetVatsimId === vatsimUser.id.toString() && !isLeadDev) {
 		return c.text('Cannot remove yourself from the division', 400);
 	}
 
@@ -2379,6 +2391,344 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	try {
 		await points.deletePoint(pointId, user.vatsim_id);
 		return c.body(null, 204);
+	} catch (error) {
+		if (error instanceof HttpError) {
+			throw error;
+		}
+		const message = error instanceof Error ? error.message : 'An unknown error occurred';
+		return c.json({ error: message }, 500);
+	}
+});
+
+/**
+ * @openapi
+ * /airports/{icao}/points/{stopbarId}/link:
+ *   post:
+ *     summary: Link a lead-on to a stopbar for auto-toggle
+ *     tags:
+ *       - Points
+ *     security:
+ *       - VatsimToken: []
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: stopbarId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [leadOnId]
+ *             properties:
+ *               leadOnId:
+ *                 type: string
+ *                 description: ID of the lead-on to link
+ *     responses:
+ *       200:
+ *         description: Link created
+ *       400:
+ *         description: Validation error
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Point not found
+ */
+app.post('/airports/:icao/points/:stopbarId/link', async (c) => {
+	const airportId = c.req.param('icao');
+	const stopbarId = c.req.param('stopbarId');
+
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	if (!stopbarId.match(POINT_ID_REGEX)) {
+		return c.text('Invalid stopbar ID format', 400);
+	}
+
+	const { user } = await resolveUserFromVatsimOrApi(c);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const body = await c.req.json<{ leadOnId: string }>();
+	if (!body.leadOnId || !body.leadOnId.match(POINT_ID_REGEX)) {
+		return c.text('Invalid or missing leadOnId', 400);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	try {
+		await points.linkLeadOnToStopbar(body.leadOnId, stopbarId, user.vatsim_id);
+		return c.json({ success: true, stopbarId, leadOnId: body.leadOnId });
+	} catch (error) {
+		if (error instanceof HttpError) {
+			throw error;
+		}
+		const message = error instanceof Error ? error.message : 'An unknown error occurred';
+		return c.json({ error: message }, 500);
+	}
+});
+
+/**
+ * @openapi
+ * /airports/{icao}/points/{stopbarId}/link/{leadOnId}:
+ *   delete:
+ *     summary: Unlink a lead-on from a stopbar
+ *     tags:
+ *       - Points
+ *     security:
+ *       - VatsimToken: []
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: stopbarId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: leadOnId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Unlinked
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Point not found
+ */
+app.delete('/airports/:icao/points/:stopbarId/link/:leadOnId', async (c) => {
+	const airportId = c.req.param('icao');
+	const stopbarId = c.req.param('stopbarId');
+	const leadOnId = c.req.param('leadOnId');
+
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	if (!stopbarId.match(POINT_ID_REGEX) || !leadOnId.match(POINT_ID_REGEX)) {
+		return c.text('Invalid point ID format', 400);
+	}
+
+	const { user } = await resolveUserFromVatsimOrApi(c);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	try {
+		await points.unlinkLeadOn(leadOnId, user.vatsim_id);
+		return c.body(null, 204);
+	} catch (error) {
+		if (error instanceof HttpError) {
+			throw error;
+		}
+		const message = error instanceof Error ? error.message : 'An unknown error occurred';
+		return c.json({ error: message }, 500);
+	}
+});
+
+/**
+ * @openapi
+ * /airports/{icao}/points/{stopbarId}/links:
+ *   get:
+ *     summary: Get all lead-ons linked to a stopbar
+ *     tags:
+ *       - Points
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: stopbarId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of linked lead-on IDs
+ */
+app.get('/airports/:icao/points/:stopbarId/links', async (c) => {
+	const airportId = c.req.param('icao');
+	const stopbarId = c.req.param('stopbarId');
+
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	if (!stopbarId.match(POINT_ID_REGEX)) {
+		return c.text('Invalid stopbar ID format', 400);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+	const linkedIds = await points.getLinkedLeadOns(stopbarId);
+
+	return c.json({ stopbarId, links: linkedIds });
+});
+
+/**
+ * @openapi
+ * /airports/{icao}/links:
+ *   get:
+ *     summary: Get all stopbar-to-lead-on links for an airport
+ *     tags:
+ *       - Points
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Map of stopbar IDs to linked lead-on IDs
+ */
+app.get('/airports/:icao/links', async (c) => {
+	const airportId = c.req.param('icao');
+
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	const points = ServicePool.getPoints(c.env);
+	const links = await points.getAirportLinks(airportId);
+
+	return c.json({ airport: airportId, links });
+});
+
+/**
+ * @openapi
+ * /airports/{icao}/links/bulk:
+ *   post:
+ *     summary: Bulk update stopbar-to-lead-on links for an airport
+ *     tags:
+ *       - Points
+ *     description: Apply multiple link and unlink operations in a single request. Supports multiple stopbars per lead-on.
+ *     security:
+ *       - VatsimToken: []
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               link:
+ *                 type: array
+ *                 description: Lead-on to stopbar links to add
+ *                 items:
+ *                   type: object
+ *                   required: [leadOnId, stopbarId]
+ *                   properties:
+ *                     leadOnId:
+ *                       type: string
+ *                       description: ID of the lead-on point
+ *                     stopbarId:
+ *                       type: string
+ *                       description: ID of the stopbar to link to
+ *               unlink:
+ *                 type: array
+ *                 description: Specific lead-on to stopbar links to remove
+ *                 items:
+ *                   type: object
+ *                   required: [leadOnId, stopbarId]
+ *                   properties:
+ *                     leadOnId:
+ *                       type: string
+ *                       description: ID of the lead-on point
+ *                     stopbarId:
+ *                       type: string
+ *                       description: ID of the stopbar to unlink from
+ *     responses:
+ *       200:
+ *         description: Bulk update completed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 linked:
+ *                   type: integer
+ *                 unlinked:
+ *                   type: integer
+ *       400:
+ *         description: Validation error
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Point not found
+ */
+app.post('/airports/:icao/links/bulk', async (c) => {
+	const airportId = c.req.param('icao');
+
+	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	const { user } = await resolveUserFromVatsimOrApi(c);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	let body: { link?: Array<{ leadOnId: string; stopbarId: string }>; unlink?: Array<{ leadOnId: string; stopbarId: string }> };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
+
+	const link = Array.isArray(body.link) ? body.link : [];
+	const unlink = Array.isArray(body.unlink) ? body.unlink : [];
+
+	// Validate link array entries
+	for (const entry of link) {
+		if (!entry.leadOnId || !entry.stopbarId) {
+			return c.json({ error: 'Each link entry must have leadOnId and stopbarId' }, 400);
+		}
+		if (!entry.leadOnId.match(POINT_ID_REGEX) || !entry.stopbarId.match(POINT_ID_REGEX)) {
+			return c.json({ error: 'Invalid point ID format in link entry' }, 400);
+		}
+	}
+
+	// Validate unlink array entries
+	for (const entry of unlink) {
+		if (!entry.leadOnId || !entry.stopbarId) {
+			return c.json({ error: 'Each unlink entry must have leadOnId and stopbarId' }, 400);
+		}
+		if (!entry.leadOnId.match(POINT_ID_REGEX) || !entry.stopbarId.match(POINT_ID_REGEX)) {
+			return c.json({ error: 'Invalid point ID format in unlink entry' }, 400);
+		}
+	}
+
+	const points = ServicePool.getPoints(c.env);
+
+	try {
+		const result = await points.bulkUpdateLinks(airportId, user.vatsim_id, { link, unlink });
+		return c.json({ success: true, ...result });
 	} catch (error) {
 		if (error instanceof HttpError) {
 			throw error;
