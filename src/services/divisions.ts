@@ -232,6 +232,33 @@ export class DivisionService {
 			}));
 	}
 
+	async deleteAirportRequest(divisionId: number, icao: string, vatsimId: string): Promise<boolean> {
+		// Verify user is a member of this division
+		const role = await this.getMemberRole(divisionId, vatsimId);
+		if (!role) throw new HttpError(403, 'Forbidden: User is not a member of this division');
+
+		// Delete only if the division has requested this ICAO and status is pending or rejected
+		const result = await this.dbSession.executeWrite(
+			`DELETE FROM division_airports 
+			 WHERE division_id = ? AND icao = ? AND status IN ('pending', 'rejected')
+			 RETURNING id`,
+			[divisionId, icao.toUpperCase()],
+		);
+
+		const rows = result.results as unknown as Array<{ id: number }> | null;
+		const deleted = !!(rows && rows[0]);
+
+		if (deleted) {
+			try {
+				this.posthog?.track('Division Airport Request Deleted', { divisionId, icao, deletedBy: vatsimId });
+			} catch (e) {
+				console.warn('Posthog track failed (Division Airport Request Deleted)', e);
+			}
+		}
+
+		return deleted;
+	}
+
 	async getDivisionMembers(divisionId: number): Promise<(DivisionMember & { display_name: string })[] | null> {
 		type DivisionMemberRow = {
 			division_exists: number | null;

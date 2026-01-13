@@ -9,6 +9,10 @@ interface AirportData {
 	name?: string;
 	continent?: string;
 	elevation_ft?: string;
+	country?: {
+		code: string;
+		name: string;
+	};
 	runways?: Array<{
 		length_ft: string;
 		width_ft: string;
@@ -194,6 +198,8 @@ export class AirportService {
 			bbox_min_lon: number | null;
 			bbox_max_lat: number | null;
 			bbox_max_lon: number | null;
+			country_code: string | null;
+			country_name: string | null;
 		}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
 		const airportFromDb = airportResult.results[0];
 
@@ -250,6 +256,8 @@ export class AirportService {
 					bbox_min_lon: number | null;
 					bbox_max_lat: number | null;
 					bbox_max_lon: number | null;
+					country_code: string | null;
+					country_name: string | null;
 				}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
 				if (reread.results[0]) Object.assign(airportFromDb, reread.results[0]);
 			}
@@ -297,11 +305,13 @@ export class AirportService {
 				continent: airportData.continent || 'UNKNOWN',
 				elevation_ft: !Number.isNaN(elevation_ft) ? elevation_ft : null,
 				elevation_m,
+				country_code: airportData.country?.code || null,
+				country_name: airportData.country?.name || null,
 			};
 
 			// Save airport to database using write-optimized operation
 			await this.dbSession.executeWrite(
-				'INSERT INTO airports (icao, latitude, longitude, name, continent, elevation_ft, elevation_m) VALUES (?, ?, ?, ?, ?, ?, ?)',
+				'INSERT INTO airports (icao, latitude, longitude, name, continent, elevation_ft, elevation_m, country_code, country_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
 				[
 					airport.icao,
 					airport.latitude ?? null,
@@ -310,6 +320,8 @@ export class AirportService {
 					airport.continent,
 					airport.elevation_ft,
 					airport.elevation_m,
+					airport.country_code,
+					airport.country_name,
 				],
 			);
 
@@ -341,6 +353,8 @@ export class AirportService {
 				bbox_min_lon: number | null;
 				bbox_max_lat: number | null;
 				bbox_max_lon: number | null;
+				country_code: string | null;
+				country_name: string | null;
 			}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
 			const mergedAirport = { ...airport, ...reread.results[0] };
 

@@ -2153,6 +2153,64 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 	return c.json(airport);
 });
 
+// DELETE /divisions/:id/airports - Delete airport request (only pending or rejected, by any division member)
+/**
+ * @openapi
+ * /divisions/{id}/airports:
+ *   delete:
+ *     x-hidden: true
+ *     summary: Delete airport request
+ *     description: Allows any division member to delete an airport request if the status is pending or rejected
+ *     tags:
+ *       - Divisions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [icao]
+ *             properties:
+ *               icao:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Airport request deleted
+ *       403:
+ *         description: Forbidden - not a division member or request is approved
+ *       404:
+ *         description: Division or airport request not found
+ */
+divisionsApp.delete('/:id/airports', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const divisionId = parseInt(c.req.param('id'));
+	const { icao } = (await c.req.json()) as { icao: string };
+	const vatsim = ServicePool.getVatsim(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
+
+	// Verify division exists
+	const division = await divisions.getDivision(divisionId);
+	if (!division) {
+		return c.text('Division not found', 404);
+	}
+
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const deleted = await divisions.deleteAirportRequest(divisionId, icao, vatsimUser.id);
+	if (!deleted) {
+		return c.text('Airport request not found or cannot be deleted', 404);
+	}
+	return c.json({ success: true });
+});
+
 app.route('/divisions', divisionsApp);
 
 // Points endpoints
