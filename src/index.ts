@@ -151,6 +151,11 @@ interface RequestAirportPayload {
 	icao: string;
 }
 
+interface DeleteAirportRequestParams {
+	divisionId: number;
+	airportId: number;
+}
+
 interface ApproveAirportPayload {
 	approved: boolean;
 }
@@ -2086,6 +2091,61 @@ divisionsApp.post('/:id/airports', async (c) => {
 	const { icao } = (await c.req.json()) as RequestAirportPayload;
 	const airport = await divisions.requestAirport(divisionId, icao, vatsimUser.id);
 	return c.json(airport);
+});
+
+/**
+ * @openapi
+ * /divisions/{id}/airports/{airportId}:
+ *   delete:
+ *     summary: Delete a pending division airport request
+ *     tags:
+ *       - Divisions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: airportId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       204:
+ *         description: Request deleted
+ *       400:
+ *         description: Only pending requests can be deleted
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Division or request not found
+ */
+divisionsApp.delete('/:id/airports/:airportId', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const params: DeleteAirportRequestParams = {
+		divisionId: parseInt(c.req.param('id')),
+		airportId: parseInt(c.req.param('airportId')),
+	};
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+
+	const division = await divisions.getDivision(params.divisionId);
+	if (!division) {
+		return c.text('Division not found', 404);
+	}
+
+	const role = await divisions.getMemberRole(params.divisionId, vatsimUser.id);
+	if (!role) {
+		return c.text('Forbidden', 403);
+	}
+
+	await divisions.deleteAirportRequest(params.divisionId, params.airportId, vatsimUser.id, role);
+	return c.body(null, 204);
 });
 
 // POST /divisions/:id/airports/:airportId/approve - Approve/reject airport (requires lead_developer role)

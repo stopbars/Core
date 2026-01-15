@@ -164,6 +164,52 @@ export class DivisionService {
 		return airport;
 	}
 
+	async deleteAirportRequest(
+		divisionId: number,
+		airportId: number,
+		requesterId: string,
+		requesterRole: 'nav_head' | 'nav_member',
+	): Promise<boolean> {
+		const existingResult = await this.dbSession.executeRead<DivisionAirport>(
+			`SELECT * FROM division_airports WHERE id = ? AND division_id = ?`,
+			[airportId, divisionId],
+		);
+
+		const existing = existingResult.results[0];
+		if (!existing) {
+			throw new HttpError(404, 'Airport request not found');
+		}
+
+		if (existing.status !== 'pending') {
+			throw new HttpError(400, 'Only pending requests can be deleted');
+		}
+
+		const isOwner = existing.requested_by === requesterId;
+		if (!isOwner && requesterRole !== 'nav_head') {
+			throw new HttpError(403, 'Forbidden: Only the requester or division head can delete this request');
+		}
+
+		const deleteResult = await this.dbSession.executeWrite(
+			'DELETE FROM division_airports WHERE id = ? AND status = ? RETURNING id',
+			[airportId, 'pending'],
+		);
+
+		const deleted = !!(deleteResult.results && (deleteResult.results as Array<{ id: number }>)[0]);
+		if (deleted) {
+			try {
+				this.posthog?.track('Division Airport Request Deleted', {
+					airportId,
+					divisionId,
+					requesterId,
+				});
+			} catch (e) {
+				console.warn('Posthog track failed (Division Airport Request Deleted)', e);
+			}
+		}
+
+		return deleted;
+	}
+
 	async getDivisionAirports(divisionId: number): Promise<DivisionAirport[] | null> {
 		type DivisionAirportRow = {
 			division_exists: number | null;

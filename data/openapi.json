@@ -1033,6 +1033,49 @@
 				}
 			}
 		},
+		"/divisions/{id}/airports/{airportId}": {
+			"delete": {
+				"summary": "Delete a pending division airport request",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					},
+					{
+						"in": "path",
+						"name": "airportId",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Request deleted"
+					},
+					"400": {
+						"description": "Only pending requests can be deleted"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Division or request not found"
+					}
+				}
+			}
+		},
 		"/divisions/{id}/airports/{airportId}/approve": {
 			"post": {
 				"x-hidden": true,
