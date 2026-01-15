@@ -161,7 +161,21 @@ export class AirportService {
 			const response = await fetch(`https://airportdb.io/api/v1/airport/${uppercaseIcao}?apiToken=${this.apiToken}`, {
 				method: 'GET',
 			});
+			if (!response.ok) {
+				if (response.status === 404) return null;
+				throw new HttpError(503, 'Bounding box unavailable');
+			}
 			const airportData = (await response.json()) as AirportData;
+
+			const hasCoords = Number.isFinite(airportData.latitude_deg) && Number.isFinite(airportData.longitude_deg);
+			if (!hasCoords) {
+				try {
+					this.posthog?.track('Airport External Fetch MissingCoords', { icao: uppercaseIcao });
+				} catch {
+					/* ignore */
+				}
+				return null;
+			}
 
 			const elevation_ft = airportData.elevation_ft ? parseInt(airportData.elevation_ft, 10) : null;
 			const elevation_m = elevation_ft != null && !Number.isNaN(elevation_ft) ? Math.round(elevation_ft * 0.3048 * 100) / 100 : null;
@@ -174,8 +188,8 @@ export class AirportService {
 
 			const airport = {
 				icao: uppercaseIcao,
-				latitude: airportData.latitude_deg,
-				longitude: airportData.longitude_deg,
+				latitude: airportData.latitude_deg!,
+				longitude: airportData.longitude_deg!,
 				name: airportData.name || '',
 				continent: airportData.continent || 'UNKNOWN',
 				country_code,
@@ -189,8 +203,8 @@ export class AirportService {
 				'INSERT INTO airports (icao, latitude, longitude, name, continent, country_code, country_name, region_name, elevation_ft, elevation_m) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
 				[
 					airport.icao,
-					airport.latitude ?? null,
-					airport.longitude ?? null,
+					airport.latitude,
+					airport.longitude,
 					airport.name,
 					airport.continent,
 					airport.country_code,
