@@ -7,10 +7,16 @@
 	"account_id": "089721947f7dd0fe58fca4321531d933", // Change this for local testing
 	"preview_urls": false,
 	"observability": {
+		"logs": {
 		"enabled": true,
-		"traces": {
-			"enabled": true,
+		"invocation_logs": true,
+		"destinations": [
+			"posthog"
+		]
 		},
+		"traces": {
+		"enabled": true
+		}
 	},
 	"placement": {
 		"mode": "smart",
