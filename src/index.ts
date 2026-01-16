@@ -2204,7 +2204,7 @@ divisionsApp.post('/:id/airports', async (c) => {
  * @openapi
  * /divisions/{id}/airports/{airportId}:
  *   delete:
- *     summary: Delete a pending division airport request
+ *     summary: Delete a division airport request
  *     tags:
  *       - Divisions
  *     security:
@@ -2222,7 +2222,7 @@ divisionsApp.post('/:id/airports', async (c) => {
  *       204:
  *         description: Request deleted
  *       400:
- *         description: Only pending requests can be deleted
+ *         description: Only pending or rejected requests can be deleted
  *       403:
  *         description: Forbidden
  *       404:

@@ -180,8 +180,9 @@ export class DivisionService {
 			throw new HttpError(404, 'Airport request not found');
 		}
 
-		if (existing.status !== 'pending') {
-			throw new HttpError(400, 'Only pending requests can be deleted');
+		const deletableStatuses: Array<DivisionAirport['status']> = ['pending', 'rejected'];
+		if (!deletableStatuses.includes(existing.status)) {
+			throw new HttpError(400, 'Only pending or rejected requests can be deleted');
 		}
 
 		const isOwner = existing.requested_by === requesterId;
@@ -189,10 +190,10 @@ export class DivisionService {
 			throw new HttpError(403, 'Forbidden: Only the requester or division head can delete this request');
 		}
 
-		const deleteResult = await this.dbSession.executeWrite('DELETE FROM division_airports WHERE id = ? AND status = ? RETURNING id', [
-			airportId,
-			'pending',
-		]);
+		const deleteResult = await this.dbSession.executeWrite(
+			'DELETE FROM division_airports WHERE id = ? AND status IN (?, ?) RETURNING id',
+			[airportId, 'pending', 'rejected'],
+		);
 
 		const deleted = !!(deleteResult.results && (deleteResult.results as Array<{ id: number }>)[0]);
 		if (deleted) {
