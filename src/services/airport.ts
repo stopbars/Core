@@ -73,16 +73,16 @@ export class AirportService {
 				needsReread = true;
 				fetchPromises.push(
 					this.fetchAndStoreElevation(uppercaseIcao)
-						.then(() => { })
-						.catch(() => { }),
+						.then(() => {})
+						.catch(() => {}),
 				);
 			}
 			if (airportFromDb.country_code == null || airportFromDb.country_name == null || airportFromDb.region_name == null) {
 				needsReread = true;
 				fetchPromises.push(
 					this.fetchAndStoreLocationMeta(uppercaseIcao)
-						.then(() => { })
-						.catch(() => { }),
+						.then(() => {})
+						.catch(() => {}),
 				);
 			}
 			if (
@@ -94,7 +94,7 @@ export class AirportService {
 				needsReread = true;
 				fetchPromises.push(
 					this.fetchAndStoreBoundingBox(uppercaseIcao)
-						.then(() => { })
+						.then(() => {})
 						.catch((err) => {
 							try {
 								this.posthog?.track('Airport Bounding Box Unavailable', {
@@ -179,10 +179,7 @@ export class AirportService {
 
 			const elevation_ft = airportData.elevation_ft ? parseInt(airportData.elevation_ft, 10) : null;
 			const elevation_m = elevation_ft != null && !Number.isNaN(elevation_ft) ? Math.round(elevation_ft * 0.3048 * 100) / 100 : null;
-			const country_code =
-				airportData.iso_country?.trim().toUpperCase() ||
-				airportData.country?.code?.trim().toUpperCase() ||
-				null;
+			const country_code = airportData.iso_country?.trim().toUpperCase() || airportData.country?.code?.trim().toUpperCase() || null;
 			const country_name = airportData.country?.name?.trim() || null;
 			const region_name = airportData.region?.name?.trim() || null;
 

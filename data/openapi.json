@@ -386,6 +386,29 @@
 				}
 			}
 		},
+		"/auth/network-status": {
+			"get": {
+				"summary": "Get VATSIM network status for API key",
+				"tags": ["Auth"],
+				"description": "Validates a BARS API key and returns the user's current VATSIM connection status parsed from slurper.vatsim.net.",
+				"security": [
+					{
+						"ApiKeyAuth": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "CID, offline flag, and parsed VATSIM status returned"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"502": {
+						"description": "Upstream VATSIM status unavailable"
+					}
+				}
+			}
+		},
 		"/auth/display-mode": {
 			"put": {
 				"summary": "Update preferred display name mode",

@@ -8,15 +8,13 @@
 	"preview_urls": false,
 	"observability": {
 		"logs": {
-		"enabled": true,
-		"invocation_logs": true,
-		"destinations": [
-			"posthog"
-		]
+			"enabled": true,
+			"invocation_logs": true,
+			"destinations": ["posthog"],
 		},
 		"traces": {
-		"enabled": true
-		}
+			"enabled": true,
+		},
 	},
 	"placement": {
 		"mode": "smart",

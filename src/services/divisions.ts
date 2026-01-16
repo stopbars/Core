@@ -189,10 +189,10 @@ export class DivisionService {
 			throw new HttpError(403, 'Forbidden: Only the requester or division head can delete this request');
 		}
 
-		const deleteResult = await this.dbSession.executeWrite(
-			'DELETE FROM division_airports WHERE id = ? AND status = ? RETURNING id',
-			[airportId, 'pending'],
-		);
+		const deleteResult = await this.dbSession.executeWrite('DELETE FROM division_airports WHERE id = ? AND status = ? RETURNING id', [
+			airportId,
+			'pending',
+		]);
 
 		const deleted = !!(deleteResult.results && (deleteResult.results as Array<{ id: number }>)[0]);
 		if (deleted) {

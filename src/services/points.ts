@@ -72,10 +72,7 @@ export class PointsService {
 			['id', 'airportId'],
 		);
 		this.stmtCheckPointId = this.dbSession.prepare('SELECT id FROM points WHERE id = ? LIMIT 1;', ['id']);
-		this.stmtGetLinkedLeadOns = this.dbSession.prepare(
-			'SELECT id FROM points WHERE linked_to = ? AND type = ?',
-			['stopbarId'],
-		);
+		this.stmtGetLinkedLeadOns = this.dbSession.prepare('SELECT id FROM points WHERE linked_to = ? AND type = ?', ['stopbarId']);
 	}
 
 	async createPoint(airportId: string, userId: string, point: PointData): Promise<Point> {
@@ -302,22 +299,22 @@ export class PointsService {
 				column: string;
 				resolver: (context: { patch: Partial<PointData>; merged: PointData }) => DatabaseSerializable;
 			}> = [
-					{ key: 'type', column: 'type', resolver: ({ merged }) => merged.type },
-					{ key: 'name', column: 'name', resolver: ({ merged }) => merged.name },
-					{ key: 'coordinates', column: 'coordinates', resolver: ({ merged }) => JSON.stringify(merged.coordinates) },
-					{
-						key: 'directionality',
-						column: 'directionality',
-						resolver: ({ patch, merged }) => (patch.directionality === null ? null : (merged.directionality ?? null)),
-					},
-					{ key: 'color', column: 'color', resolver: ({ patch, merged }) => (patch.color === null ? null : (merged.color ?? null)) },
-					{
-						key: 'elevated',
-						column: 'elevated',
-						resolver: ({ patch, merged }) => (patch.elevated === null ? null : (merged.elevated ?? null)),
-					},
-					{ key: 'ihp', column: 'ihp', resolver: ({ patch, merged }) => (patch.ihp === null ? null : (merged.ihp ?? null)) },
-				];
+				{ key: 'type', column: 'type', resolver: ({ merged }) => merged.type },
+				{ key: 'name', column: 'name', resolver: ({ merged }) => merged.name },
+				{ key: 'coordinates', column: 'coordinates', resolver: ({ merged }) => JSON.stringify(merged.coordinates) },
+				{
+					key: 'directionality',
+					column: 'directionality',
+					resolver: ({ patch, merged }) => (patch.directionality === null ? null : (merged.directionality ?? null)),
+				},
+				{ key: 'color', column: 'color', resolver: ({ patch, merged }) => (patch.color === null ? null : (merged.color ?? null)) },
+				{
+					key: 'elevated',
+					column: 'elevated',
+					resolver: ({ patch, merged }) => (patch.elevated === null ? null : (merged.elevated ?? null)),
+				},
+				{ key: 'ihp', column: 'ihp', resolver: ({ patch, merged }) => (patch.ihp === null ? null : (merged.ihp ?? null)) },
+			];
 
 			for (const context of modifyContexts) {
 				const { id, patch, merged } = context;
@@ -617,10 +614,11 @@ export class PointsService {
 		const newLinks = [...existingLinks, stopbarId];
 
 		// Update the lead_on's linked_to field as JSON array
-		await this.dbSession.executeWrite(
-			'UPDATE points SET linked_to = ?, updated_at = ? WHERE id = ?',
-			[JSON.stringify(newLinks), new Date().toISOString(), leadOnId],
-		);
+		await this.dbSession.executeWrite('UPDATE points SET linked_to = ?, updated_at = ? WHERE id = ?', [
+			JSON.stringify(newLinks),
+			new Date().toISOString(),
+			leadOnId,
+		]);
 
 		try {
 			this.posthog?.track('Lead-on Linked', {
@@ -669,10 +667,11 @@ export class PointsService {
 		}
 		// If no stopbarId provided, newLinks stays null (unlink all)
 
-		await this.dbSession.executeWrite(
-			'UPDATE points SET linked_to = ?, updated_at = ? WHERE id = ?',
-			[newLinks ? JSON.stringify(newLinks) : null, new Date().toISOString(), leadOnId],
-		);
+		await this.dbSession.executeWrite('UPDATE points SET linked_to = ?, updated_at = ? WHERE id = ?', [
+			newLinks ? JSON.stringify(newLinks) : null,
+			new Date().toISOString(),
+			leadOnId,
+		]);
 
 		try {
 			this.posthog?.track('Lead-on Unlinked', {
