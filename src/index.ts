@@ -3639,6 +3639,69 @@ staffManageApp.delete('/:vatsimId', async (c) => {
 
 app.route('/staff/manage', staffManageApp);
 
+const staffDivisionsApp = new Hono<{
+	Bindings: Env;
+	Variables: {
+		user?: UserRecord;
+	};
+}>();
+
+staffDivisionsApp.use('*', async (c, next) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	if (!user) return c.text('User not found', 404);
+
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
+
+	c.set('user', user);
+	await next();
+});
+
+/**
+ * @openapi
+ * /staff/divisions/airports:
+ *   get:
+ *     x-hidden: true
+ *     summary: List all division airport requests (staff)
+ *     tags:
+ *       - Staff
+ *       - Divisions
+ *     description: Returns every division airport request with division metadata. Requires Product Manager or higher.
+ *     security:
+ *       - VatsimToken: []
+ *     responses:
+ *       200:
+ *         description: Division airports listed
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ */
+staffDivisionsApp.get('/airports', async (c) => {
+	const divisions = ServicePool.getDivisions(c.env);
+	const airports = await divisions.getAllDivisionAirports();
+	const shaped = airports.map((airport) => ({
+		division_id: airport.division_id,
+		division_name: airport.division_name,
+		airport_request_id: airport.id,
+		icao: airport.icao,
+		status: airport.status,
+		requested_by: airport.requested_by,
+		approved_by: airport.approved_by ?? null,
+	}));
+	return c.json({ airports: shaped });
+});
+
+app.route('/staff/divisions', staffDivisionsApp);
+
 // Contributions endpoints
 const contributionsApp = new Hono<{ Bindings: Env }>();
 

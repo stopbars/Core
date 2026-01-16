@@ -1971,6 +1971,30 @@
 				}
 			}
 		},
+		"/staff/divisions/airports": {
+			"get": {
+				"x-hidden": true,
+				"summary": "List all division airport requests (staff)",
+				"tags": ["Staff", "Divisions"],
+				"description": "Returns every division airport request with division metadata. Requires Product Manager or higher.",
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Division airports listed"
+					},
+					"401": {
+						"description": "Unauthorized"
+					},
+					"403": {
+						"description": "Forbidden"
+					}
+				}
+			}
+		},
 		"/contributions": {
 			"get": {
 				"summary": "List contributions",

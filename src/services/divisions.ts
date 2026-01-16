@@ -27,6 +27,10 @@ interface DivisionAirport {
 	updated_at: string;
 }
 
+type DivisionAirportWithDivision = DivisionAirport & {
+	division_name: string;
+};
+
 export class DivisionService {
 	private dbSession: DatabaseSessionService;
 
@@ -277,6 +281,40 @@ export class DivisionService {
 				created_at: row.created_at,
 				updated_at: row.updated_at,
 			}));
+	}
+
+	async getAllDivisionAirports(): Promise<DivisionAirportWithDivision[]> {
+		const result = await this.dbSession.executeRead<
+			DivisionAirportWithDivision & {
+				division_name: string | null;
+			}
+		>(
+			`SELECT
+				da.id,
+				da.division_id,
+				d.name AS division_name,
+				da.icao,
+				da.status,
+				da.requested_by,
+				da.approved_by,
+				da.created_at,
+				da.updated_at
+			FROM division_airports da
+			JOIN divisions d ON d.id = da.division_id
+			ORDER BY d.name ASC, da.created_at DESC`,
+		);
+
+		return result.results.map((row) => ({
+			id: row.id,
+			division_id: row.division_id,
+			division_name: row.division_name ?? '',
+			icao: row.icao,
+			status: row.status,
+			requested_by: row.requested_by,
+			approved_by: row.approved_by ?? undefined,
+			created_at: row.created_at,
+			updated_at: row.updated_at,
+		}));
 	}
 
 	async getDivisionMembers(divisionId: number): Promise<(DivisionMember & { display_name: string })[] | null> {
