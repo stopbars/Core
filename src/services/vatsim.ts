@@ -136,6 +136,29 @@ export class VatsimService {
 			return null;
 		}
 	}
+
+	async getUserConnectionsCsv(userId: string): Promise<string | null> {
+		try {
+			if (!/^\d+$/.test(userId)) {
+				return null;
+			}
+
+			const params = new URLSearchParams({ cid: userId });
+			const url = `https://slurper.vatsim.net/users/info?${params.toString()}`;
+
+			const response = await fetch(url, {
+				signal: AbortSignal.timeout(5000),
+			});
+
+			if (!response.ok) {
+				return null;
+			}
+
+			return await response.text();
+		} catch {
+			return null;
+		}
+	}
 	isController(userStatus: { type: string; callsign: string } | null | undefined): boolean {
 		return userStatus?.type === 'atc' && !this.isObserver(userStatus);
 	}

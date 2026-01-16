@@ -174,6 +174,16 @@ interface ContributionDecisionPayload {
 	newPackageName?: string;
 }
 
+type VatsimConnectionStatus = {
+	callsign: string;
+	facility_type: 'pilot' | 'atc' | string;
+	frequency: number | null;
+	visual_range: number | null;
+	latitude: number | null;
+	longitude: number | null;
+	secondary_positions: Array<{ latitude: number; longitude: number }>;
+};
+
 export class BARS {
 	private connection: Connection;
 
@@ -200,6 +210,53 @@ const app = new Hono<{
 		serverTimingStart?: number;
 	};
 }>();
+
+const parseVatsimStatusCsv = (csv: string): { offline: boolean; status: VatsimConnectionStatus | null; raw: string } => {
+	const trimmed = (csv || '').trim();
+	if (!trimmed) {
+		return { offline: true, status: null, raw: '' };
+	}
+
+	const parts = trimmed.split(',');
+	if (parts[parts.length - 1] === '') {
+		parts.pop();
+	}
+
+	if (parts.length < 3) {
+		return { offline: true, status: null, raw: trimmed };
+	}
+
+	const numberOrNull = (value: string | undefined) => {
+		if (value === undefined || value === '') return null;
+		const n = Number.parseFloat(value);
+		return Number.isFinite(n) ? n : null;
+	};
+
+	const [cid, callsign, facilityType, freq, visRange, lat, lon, ...rest] = parts;
+	if (!cid || !callsign || !facilityType) {
+		return { offline: true, status: null, raw: trimmed };
+	}
+
+	const secondary_positions: Array<{ latitude: number; longitude: number }> = [];
+	for (let i = 0; i < rest.length; i += 2) {
+		const latVal = numberOrNull(rest[i]);
+		const lonVal = numberOrNull(rest[i + 1]);
+		if (latVal === null || lonVal === null) continue;
+		secondary_positions.push({ latitude: latVal, longitude: lonVal });
+	}
+
+	const status: VatsimConnectionStatus = {
+		callsign,
+		facility_type: (facilityType as VatsimConnectionStatus['facility_type']) || 'unknown',
+		frequency: numberOrNull(freq),
+		visual_range: numberOrNull(visRange),
+		latitude: numberOrNull(lat),
+		longitude: numberOrNull(lon),
+		secondary_positions,
+	};
+
+	return { offline: false, status, raw: trimmed };
+};
 
 // Global error handler to turn expected HttpErrors into clean responses
 
@@ -1082,6 +1139,56 @@ app.get('/auth/account', async (c) => {
 	} finally {
 		dbContext.close();
 	}
+});
+
+/**
+ * @openapi
+ * /auth/network-status:
+ *   get:
+ *     summary: Get VATSIM network status for API key
+ *     tags:
+ *       - Auth
+ *     description: Validates a BARS API key and returns the user's current VATSIM connection status parsed from slurper.vatsim.net.
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: CID, offline flag, and parsed VATSIM status returned
+ *       401:
+ *         description: Unauthorized
+ *       502:
+ *         description: Upstream VATSIM status unavailable
+ */
+app.get('/auth/network-status', async (c) => {
+	const authHeader = c.req.header('Authorization') || '';
+	if (!authHeader.toLowerCase().startsWith('bearer ')) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const apiKey = authHeader.slice(7).trim();
+	if (!apiKey) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const auth = ServicePool.getAuth(c.env);
+	const user = await auth.getUserByApiKey(apiKey);
+	if (!user) {
+		return c.text('Unauthorized', 401);
+	}
+
+	const vatsim = ServicePool.getVatsim(c.env);
+	const vatsimStatusCsv = await vatsim.getUserConnectionsCsv(user.vatsim_id);
+	if (vatsimStatusCsv === null) {
+		return c.json({ cid: user.vatsim_id, offline: null, vatsim_status: null, error: 'Failed to fetch VATSIM status' }, 502);
+	}
+
+	const { offline, status, raw } = parseVatsimStatusCsv(vatsimStatusCsv ?? '');
+	const payload: Record<string, unknown> = { cid: user.vatsim_id, offline };
+	if (!offline) {
+		payload.vatsim_status = status;
+		payload.vatsim_status_raw = raw;
+	}
+	return c.json(payload);
 });
 
 /**
