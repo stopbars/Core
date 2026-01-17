@@ -1,4 +1,12 @@
-import { ClientType, Packet, AirportState, AirportObject, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT } from '../types';
+import {
+	ClientType,
+	Packet,
+	AirportState,
+	AirportObject,
+	MultiStateUpdateItem,
+	HEARTBEAT_INTERVAL,
+	HEARTBEAT_TIMEOUT,
+} from '../types';
 import { AuthService } from '../services/auth';
 import { VatsimService } from '../services/vatsim';
 import { PointsService } from '../services/points';
@@ -8,6 +16,8 @@ import { DatabaseContextFactory } from '../services/database-context';
 import { PostHogService } from '../services/posthog';
 
 const MAX_STATE_SIZE = 1000000; // 1MB limit for persisted payloads
+const MAX_MULTI_STATE_UPDATES = 200;
+const OBJECT_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 const DISALLOWED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const createNullObject = (): Record<string, unknown> => Object.create(null) as Record<string, unknown>;
 
@@ -370,91 +380,153 @@ export class Connection {
 		}
 		return state;
 	}
+	private applyStateUpdateToAirport(
+		state: AirportState,
+		update: Record<string, unknown>,
+		controllerId: string,
+		now: number,
+	): MultiStateUpdateItem {
+		if (!update || typeof update !== 'object') {
+			throw new Error('Invalid update data structure');
+		}
+
+		const objectId = update['objectId'];
+		if (!objectId || typeof objectId !== 'string') {
+			throw new Error('Missing or invalid objectId');
+		}
+
+		if (!OBJECT_ID_REGEX.test(objectId)) {
+			throw new Error('Invalid objectId format');
+		}
+
+		const hasPatch = Object.prototype.hasOwnProperty.call(update, 'patch');
+		const hasState = Object.prototype.hasOwnProperty.call(update, 'state');
+
+		if (!hasPatch && !hasState) {
+			throw new Error(`Missing both patch and state data for object ${objectId}`);
+		}
+
+		let newState: boolean | Record<string, unknown> | null;
+		let normalized: MultiStateUpdateItem = { objectId };
+
+		const existingObject = state.objects.get(objectId) || {
+			id: objectId,
+			state: {},
+			controllerId: controllerId,
+			timestamp: now,
+		};
+
+		if (hasPatch) {
+			const patch = (update as { patch?: unknown }).patch;
+			if (patch === undefined) {
+				throw new Error(`Missing patch data for object ${objectId}`);
+			}
+			if (patch !== null && typeof patch !== 'object') {
+				throw new Error(`Patch data must be an object or null for object ${objectId}`);
+			}
+
+			const baseState =
+				typeof existingObject.state === 'object' && existingObject.state !== null ? existingObject.state : {};
+			const merged = patch === null ? null : recursivelyMergeObjects(baseState, patch as Record<string, unknown>);
+			newState = merged as Record<string, unknown> | null;
+			normalized = { objectId, patch: patch as Record<string, unknown> | null };
+		} else {
+			const stateValue = (update as { state?: unknown }).state;
+			try {
+				JSON.stringify(stateValue);
+			} catch {
+				throw new Error(`State data is not serializable for object ${objectId}`);
+			}
+
+			if (typeof stateValue === 'boolean') {
+				newState = stateValue;
+			} else if (stateValue && typeof stateValue === 'object' && !Array.isArray(stateValue)) {
+				newState = stateValue as Record<string, unknown>;
+			} else {
+				throw new Error('State data must be boolean or object');
+			}
+			normalized = { objectId, state: newState };
+		}
+
+		state.objects.set(objectId, {
+			id: objectId,
+			state: newState as boolean | Record<string, unknown>,
+			controllerId: controllerId,
+			timestamp: now,
+		});
+
+		state.lastUpdate = now;
+
+		return normalized;
+	}
+
 	private async handleStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
 		try {
-			// Validate required fields
-			if (!packet?.data || typeof packet.data !== 'object') {
+			if (!packet?.data || typeof packet.data !== 'object' || Array.isArray(packet.data)) {
 				throw new Error('Invalid packet data structure');
 			}
 
-			if (!packet.data.objectId || typeof packet.data.objectId !== 'string') {
-				throw new Error('Missing or invalid objectId');
-			}
-
-			if (packet.data.patch === undefined && packet.data.state === undefined) {
-				throw new Error('Missing both patch and state data');
-			}
-
-			// Validate airport parameter
 			const airport = packet.airport || connectionAirport;
 			if (!airport || typeof airport !== 'string' || airport.length === 0) {
 				throw new Error('Invalid airport identifier');
 			}
 
-			// Validate objectId format (should be alphanumeric with possible hyphens/underscores)
-			const objectIdRegex = /^[a-zA-Z0-9_-]+$/;
-			if (!objectIdRegex.test(packet.data.objectId)) {
-				throw new Error('Invalid objectId format');
-			}
-
 			const now = Date.now();
 			const state = this.getOrCreateAirportState(airport);
-			const objectId = packet.data.objectId;
-
-			// Get existing object or create a new one
-			const existingObject = state.objects.get(objectId) || {
-				id: objectId,
-				state: {}, // Initialize with empty object for patching
-				controllerId: controllerId,
-				timestamp: now,
-			};
-
-			let newState: boolean | Record<string, unknown>;
-
-			// Handle both legacy 'state' updates and new 'patch' updates
-			if (packet.data.patch !== undefined) {
-				// Validate patch is an object
-				if (packet.data.patch !== null && typeof packet.data.patch !== 'object') {
-					throw new Error('Patch data must be an object or null');
-				}
-
-				// Ensure existing state is an object for merging
-				const baseState = typeof existingObject.state === 'object' && existingObject.state !== null ? existingObject.state : {};
-
-				// Apply patch using recursive merge with size limit
-				newState = recursivelyMergeObjects(baseState, packet.data.patch) as Record<string, unknown>;
-			} else {
-				// Legacy direct state update - validate it's serializable
-				try {
-					JSON.stringify(packet.data.state);
-					if (typeof packet.data.state === 'boolean') {
-						newState = packet.data.state;
-					} else if (packet.data.state && typeof packet.data.state === 'object' && !Array.isArray(packet.data.state)) {
-						newState = packet.data.state as Record<string, unknown>;
-					} else {
-						throw new Error('State data must be boolean or object');
-					}
-				} catch {
-					throw new Error('State data is not serializable');
-				}
-			}
-
-			// Update the object with merged state
-			state.objects.set(objectId, {
-				id: objectId,
-				state: newState,
-				controllerId: controllerId,
-				timestamp: now,
-			});
-
-			state.lastUpdate = now;
+			this.applyStateUpdateToAirport(state, packet.data as Record<string, unknown>, controllerId, now);
 
 			await this.persistAirportState(airport);
-			return now; // Return timestamp for broadcasting
-		} catch {
+			return now;
+		} catch (error) {
 			console.error(`State update error for controller ${controllerId}`);
+			if (error instanceof Error) {
+				console.error(error.message);
+			}
 			throw new Error('State update error');
 		}
+	}
+
+	private async handleMultiStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
+		const airport = packet.airport || connectionAirport;
+		if (!airport || typeof airport !== 'string' || airport.length === 0) {
+			throw new Error('Invalid airport identifier');
+		}
+
+		const updatesPayload = this.extractMultiStateUpdates(packet.data);
+
+		if (!updatesPayload || updatesPayload.length === 0) {
+			throw new Error('Missing updates array');
+		}
+
+		if (updatesPayload.length > MAX_MULTI_STATE_UPDATES) {
+			throw new Error(`Batch update exceeds maximum allowed size of ${MAX_MULTI_STATE_UPDATES}`);
+		}
+
+		const updates: MultiStateUpdateItem[] = updatesPayload;
+
+		const now = Date.now();
+		const state = this.getOrCreateAirportState(airport);
+		const normalizedUpdates: MultiStateUpdateItem[] = [];
+
+		for (let index = 0; index < updates.length; index++) {
+			const update = updates[index];
+			try {
+				const normalized = this.applyStateUpdateToAirport(
+					state,
+					update as Record<string, unknown>,
+					controllerId,
+					now,
+				);
+				normalizedUpdates.push(normalized);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : 'Unknown error';
+				throw new Error(`Update ${index + 1} failed: ${message}`);
+			}
+		}
+
+		await this.persistAirportState(airport);
+
+		return { updates: normalizedUpdates, timestamp: now, airport };
 	}
 
 	private async handleControllerDisconnect(socket: WebSocket) {
@@ -872,7 +944,10 @@ export class Connection {
 
 						const p = packet as Packet;
 						const airport = socketInfo.airport;
-						const objectId = p.data?.objectId as string | undefined;
+						if (!p.data || typeof p.data !== 'object' || Array.isArray(p.data)) {
+							throw new Error('Invalid payload for STOPBAR_CROSSING');
+						}
+						const objectId = (p.data as { objectId?: string }).objectId;
 						if (!objectId) {
 							throw new Error('objectId is required');
 						}
@@ -935,6 +1010,40 @@ export class Connection {
 						server.send(JSON.stringify(snapshot));
 						break;
 					}
+
+					case 'MULTI_STATE_UPDATE':
+						if (clientType === 'pilot') {
+							throw new Error('Pilots cannot send state updates');
+						}
+						if (clientType === 'observer') {
+							throw new Error('Observers cannot send state updates');
+						}
+
+						try {
+							const { updates, timestamp, airport } = await this.handleMultiStateUpdate(
+								packet as Packet,
+								user.vatsim_id,
+								socketInfo.airport,
+							);
+							const broadcastPacket: Packet = {
+								type: 'MULTI_STATE_UPDATE',
+								airport,
+								data: { updates },
+								timestamp,
+							};
+							await this.broadcast(broadcastPacket, server);
+							this.trackMessage({
+								clientType,
+								messageType: 'MULTI_STATE_UPDATE',
+								airport: socketInfo.airport,
+								meta: { count: updates.length },
+							});
+						} catch (updateError) {
+							throw new Error(
+								`State batch update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
+							);
+						}
+						break;
 
 					case 'STATE_UPDATE':
 						if (clientType === 'pilot') {
@@ -1320,7 +1429,7 @@ export class Connection {
 	private handleSharedStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
 		try {
 			// Validate required fields
-			if (!packet?.data || typeof packet.data !== 'object') {
+			if (!packet?.data || typeof packet.data !== 'object' || Array.isArray(packet.data)) {
 				throw new Error('Invalid packet data structure');
 			}
 
@@ -1445,6 +1554,7 @@ export class Connection {
 			'HEARTBEAT',
 			'HEARTBEAT_ACK',
 			'STATE_UPDATE',
+			'MULTI_STATE_UPDATE',
 			'CLOSE',
 			'SHARED_STATE_UPDATE',
 			'INITIAL_STATE',
@@ -1484,6 +1594,8 @@ export class Connection {
 		switch (type) {
 			case 'STATE_UPDATE':
 				return this.validateStateUpdatePacket(packet);
+			case 'MULTI_STATE_UPDATE':
+				return this.validateMultiStateUpdatePacket(packet);
 			case 'SHARED_STATE_UPDATE':
 				return this.validateSharedStateUpdatePacket(packet);
 			case 'STOPBAR_CROSSING':
@@ -1495,7 +1607,7 @@ export class Connection {
 
 	private validateStateUpdatePacket(packet: unknown): boolean {
 		const obj = packet as { data?: unknown };
-		if (!obj.data || typeof obj.data !== 'object') {
+		if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
 			return false;
 		}
 
@@ -1535,9 +1647,55 @@ export class Connection {
 		return true;
 	}
 
+	private validateMultiStateUpdatePacket(packet: unknown): boolean {
+		const obj = packet as { data?: unknown };
+		const updates = this.extractMultiStateUpdates(obj.data);
+
+		if (!updates || updates.length === 0) {
+			return false;
+		}
+
+		if (updates.length > MAX_MULTI_STATE_UPDATES) {
+			return false;
+		}
+
+		const typedUpdates: MultiStateUpdateItem[] = updates;
+
+		const guardObject = (val: unknown, maxDepth = 20, maxProps = 100): boolean => {
+			const seen = new WeakSet<object>();
+			const walk = (v: unknown, depth: number): boolean => {
+				if (v === null) return true;
+				if (typeof v !== 'object') return true;
+				if (Array.isArray(v)) {
+					return v.length <= 1000 && v.every((it) => walk(it, depth + 1));
+				}
+				if (depth > maxDepth) return false;
+				const o = v as Record<string, unknown>;
+				if (seen.has(o)) return false;
+				seen.add(o);
+				const keys = Object.keys(o);
+				if (keys.length > maxProps) return false;
+				return keys.every((k) => typeof k === 'string' && k.length <= 100 && walk(o[k], depth + 1));
+			};
+			return walk(val, 0);
+		};
+
+		for (const update of typedUpdates) {
+			if (!update || typeof update !== 'object') return false;
+			const data = update as Record<string, unknown>;
+			if (!data.objectId || typeof data.objectId !== 'string') return false;
+			if (!OBJECT_ID_REGEX.test(data.objectId)) return false;
+			if (data.patch === undefined && data.state === undefined) return false;
+			if (data.patch !== undefined && !guardObject(data.patch)) return false;
+			if (data.state !== undefined && !guardObject(data.state)) return false;
+		}
+
+		return true;
+	}
+
 	private validateSharedStateUpdatePacket(packet: unknown): boolean {
 		const obj = packet as { data?: unknown };
-		if (!obj.data || typeof obj.data !== 'object') {
+		if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
 			return false;
 		}
 
@@ -1572,7 +1730,7 @@ export class Connection {
 
 	private validateStopbarCrossingPacket(packet: unknown): boolean {
 		const obj = packet as { data?: unknown };
-		if (!obj.data || typeof obj.data !== 'object') {
+		if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
 			return false;
 		}
 
@@ -1588,5 +1746,19 @@ export class Connection {
 	private sanitizeInput(input: string): string {
 		// Remove potentially dangerous characters and limit length
 		return input.replace(/[<>'"&]/g, '').substring(0, 1000);
+	}
+
+	// Extracts a typed updates array from either a bare array payload or an object with `updates`
+	private extractMultiStateUpdates(data: unknown): MultiStateUpdateItem[] | null {
+		if (Array.isArray(data)) {
+			return data as MultiStateUpdateItem[];
+		}
+		if (data && typeof data === 'object' && !Array.isArray(data)) {
+			const maybeUpdates = (data as { updates?: unknown }).updates;
+			if (Array.isArray(maybeUpdates)) {
+				return maybeUpdates as MultiStateUpdateItem[];
+			}
+		}
+		return null;
 	}
 }

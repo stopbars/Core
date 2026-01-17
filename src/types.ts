@@ -85,6 +85,12 @@ export interface StateUpdate {
 	data: UpdateData;
 }
 
+export type MultiStateUpdateItem = {
+	objectId: string;
+	state?: boolean | Record<string, unknown>;
+	patch?: Record<string, unknown> | null;
+};
+
 export interface UpdateData {
 	barsId: string;
 	state: boolean;
@@ -111,18 +117,19 @@ export interface AirportState {
 
 export interface Packet {
 	type:
-		| 'STATE_UPDATE'
-		| 'INITIAL_STATE'
-		| 'CONTROLLER_CONNECT'
-		| 'CONTROLLER_DISCONNECT'
-		| 'SHARED_STATE_UPDATE'
-		| 'ERROR'
-		| 'HEARTBEAT'
-		| 'HEARTBEAT_ACK'
-		| 'CLOSE'
-		| 'GET_STATE'
-		| 'STATE_SNAPSHOT'
-		| 'STOPBAR_CROSSING';
+	| 'STATE_UPDATE'
+	| 'MULTI_STATE_UPDATE'
+	| 'INITIAL_STATE'
+	| 'CONTROLLER_CONNECT'
+	| 'CONTROLLER_DISCONNECT'
+	| 'SHARED_STATE_UPDATE'
+	| 'ERROR'
+	| 'HEARTBEAT'
+	| 'HEARTBEAT_ACK'
+	| 'CLOSE'
+	| 'GET_STATE'
+	| 'STATE_SNAPSHOT'
+	| 'STOPBAR_CROSSING';
 	airport?: string;
 	data?: {
 		objectId?: string;
@@ -133,11 +140,12 @@ export interface Packet {
 		objects?: AirportObject[];
 		controllerId?: string;
 		controllers?: string[];
+		updates?: MultiStateUpdateItem[]; // Batched state updates
 		message?: string; // For error messages
 		connectionType?: ClientType; // Add connection type to data
 		offline?: boolean; // Flag to indicate if state is offline (no controllers)
 		requestedAt?: number; // For STATE_SNAPSHOT - when request was made
-	};
+	} | MultiStateUpdateItem[];
 	timestamp?: number; // Optional since server will set it
 }
 
