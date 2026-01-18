@@ -2109,6 +2109,11 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 		return c.text('Cannot remove yourself from the division', 400);
 	}
 
+	const targetRole = await divisions.getMemberRole(divisionId, targetVatsimId);
+	if (targetRole === 'nav_head' && !isLeadDev) {
+		return c.text('Cannot remove another nav head', 403);
+	}
+
 	await divisions.removeMember(divisionId, targetVatsimId);
 	return c.body(null, 204);
 });
