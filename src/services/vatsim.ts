@@ -159,8 +159,37 @@ export class VatsimService {
 			return null;
 		}
 	}
+	private readonly ControllerSuffixes = new Set([
+		'DEL',
+		'RMP',
+		'GND',
+		'TWR',
+		'DEP',
+		'APP',
+		'CTR',
+		'FSS',
+		'RDO',
+		'TMU',
+		'FMP',
+	]);
+
+	private getCallsignSuffix(callsign?: string | null): string | null {
+		if (!callsign) return null;
+		const upper = callsign.toUpperCase();
+		const parts = upper.split('_');
+		if (parts.length < 2) return null;
+		return parts[parts.length - 1] || null;
+	}
+
+	private isControllerCallsign(callsign?: string | null): boolean {
+		const suffix = this.getCallsignSuffix(callsign);
+		if (!suffix) return false;
+		if (suffix === 'OBS') return false;
+		return this.ControllerSuffixes.has(suffix);
+	}
+
 	isController(userStatus: { type: string; callsign: string } | null | undefined): boolean {
-		return userStatus?.type === 'atc' && !this.isObserver(userStatus);
+		return userStatus?.type === 'atc' && this.isControllerCallsign(userStatus?.callsign);
 	}
 
 	isPilot(userStatus: { type: string } | null | undefined): boolean {
@@ -168,6 +197,6 @@ export class VatsimService {
 	}
 
 	isObserver(userStatus: { type: string; callsign: string } | null | undefined): boolean {
-		return userStatus?.type === 'atc' && userStatus?.callsign?.includes('_OBS');
+		return userStatus?.type === 'atc' && !this.isControllerCallsign(userStatus?.callsign);
 	}
 }
