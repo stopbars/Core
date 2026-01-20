@@ -23,6 +23,7 @@ interface DivisionAirport {
 	status: 'pending' | 'approved' | 'rejected';
 	requested_by: string;
 	approved_by?: string;
+	has_objects: boolean;
 	created_at: string;
 	updated_at: string;
 }
@@ -224,6 +225,7 @@ export class DivisionService {
 			status: 'pending' | 'approved' | 'rejected' | null;
 			requested_by: string | null;
 			approved_by?: string | null;
+			has_objects: number | null;
 			created_at: string | null;
 			updated_at: string | null;
 		};
@@ -237,10 +239,17 @@ export class DivisionService {
 				da.status,
 				da.requested_by,
 				da.approved_by,
+				CASE
+					WHEN po.airport_id IS NOT NULL THEN 1
+					ELSE 0
+				END AS has_objects,
 				da.created_at,
 				da.updated_at
 			FROM divisions d
 			LEFT JOIN division_airports da ON da.division_id = d.id
+			LEFT JOIN (
+				SELECT DISTINCT airport_id FROM points
+			) po ON po.airport_id = da.icao
 			WHERE d.id = ?
 			ORDER BY da.created_at DESC`,
 			[divisionId],
@@ -260,6 +269,7 @@ export class DivisionService {
 					icao: string;
 					status: 'pending' | 'approved' | 'rejected';
 					requested_by: string;
+					has_objects: number;
 					created_at: string;
 					updated_at: string;
 				} =>
@@ -268,6 +278,7 @@ export class DivisionService {
 					row.icao !== null &&
 					row.status !== null &&
 					row.requested_by !== null &&
+					row.has_objects !== null &&
 					row.created_at !== null &&
 					row.updated_at !== null,
 			)
@@ -278,6 +289,7 @@ export class DivisionService {
 				status: row.status,
 				requested_by: row.requested_by,
 				approved_by: row.approved_by ?? undefined,
+				has_objects: row.has_objects === 1,
 				created_at: row.created_at,
 				updated_at: row.updated_at,
 			}));
@@ -285,8 +297,9 @@ export class DivisionService {
 
 	async getAllDivisionAirports(): Promise<DivisionAirportWithDivision[]> {
 		const result = await this.dbSession.executeRead<
-			DivisionAirportWithDivision & {
+			Omit<DivisionAirportWithDivision, 'has_objects'> & {
 				division_name: string | null;
+				has_objects: number | null;
 			}
 		>(
 			`SELECT
@@ -297,10 +310,17 @@ export class DivisionService {
 				da.status,
 				da.requested_by,
 				da.approved_by,
+				CASE
+					WHEN po.airport_id IS NOT NULL THEN 1
+					ELSE 0
+				END AS has_objects,
 				da.created_at,
 				da.updated_at
 			FROM division_airports da
 			JOIN divisions d ON d.id = da.division_id
+			LEFT JOIN (
+				SELECT DISTINCT airport_id FROM points
+			) po ON po.airport_id = da.icao
 			ORDER BY d.name ASC, da.created_at DESC`,
 		);
 
@@ -312,6 +332,7 @@ export class DivisionService {
 			status: row.status,
 			requested_by: row.requested_by,
 			approved_by: row.approved_by ?? undefined,
+			has_objects: row.has_objects === 1,
 			created_at: row.created_at,
 			updated_at: row.updated_at,
 		}));
