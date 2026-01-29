@@ -2848,6 +2848,9 @@
 				"security": [
 					{
 						"VatsimToken": []
+					},
+					{
+						"ApiKeyAuth": []
 					}
 				],
 				"requestBody": {
@@ -2864,7 +2867,7 @@
 									},
 									"type": {
 										"type": "string",
-										"enum": ["models", "models-2020", "removals"]
+										"enum": ["models", "models-2020", "removals-2020", "removals-2024"]
 									}
 								}
 							}

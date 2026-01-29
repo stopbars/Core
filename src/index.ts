@@ -1398,7 +1398,7 @@ app.delete('/auth/delete', rateLimit({ maxRequests: 1 }), async (c) => {
  *       401:
  *         description: Unauthorized
  */
-app.get('/auth/is-staff', withCache(CacheKeys.withUser('is-staff'), 3600, 'auth'), async (c) => {
+app.get('/auth/is-staff', withCache(CacheKeys.withUser('is-staff'), 120, 'auth'), async (c) => {
 	const authHeader = c.req.header('Authorization');
 	if (!authHeader) {
 		return c.text('Unauthorized', 401);
@@ -5377,6 +5377,7 @@ app.post('/download', async (c) => {
  *       - Data
  *     security:
  *       - VatsimToken: []
+ *       - ApiKeyAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -5390,7 +5391,7 @@ app.post('/download', async (c) => {
  *                 format: binary
  *               type:
  *                 type: string
- *                 enum: [models, models-2020, removals]
+ *                 enum: [models, models-2020, removals-2020, removals-2024]
  *     responses:
  *       201:
  *         description: Package uploaded successfully
@@ -5402,18 +5403,30 @@ app.post('/download', async (c) => {
  *         description: Forbidden
  */
 app.post('/staff/bars-packages/upload', async (c) => {
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	if (!vatsimToken) return c.text('Unauthorized', 401);
-	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
-	let vatsimUser;
-	try {
-		vatsimUser = await vatsim.getUser(vatsimToken);
-	} catch {
-		return c.text('Unauthorized', 401);
+	let user;
+
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (vatsimToken) {
+		const vatsim = ServicePool.getVatsim(c.env);
+		let vatsimUser;
+		try {
+			vatsimUser = await vatsim.getUser(vatsimToken);
+		} catch {
+			return c.text('Unauthorized', 401);
+		}
+		user = await auth.getUserByVatsimId(vatsimUser.id);
+	} else {
+		const authHeader = c.req.header('Authorization') || '';
+		if (!authHeader.toLowerCase().startsWith('bearer ')) {
+			return c.text('Unauthorized', 401);
+		}
+		const apiKey = authHeader.slice(7).trim();
+		if (!apiKey) return c.text('Unauthorized', 401);
+		user = await auth.getUserByApiKey(apiKey);
 	}
-	const user = await auth.getUserByVatsimId(vatsimUser.id);
+
 	if (!user) return c.text('User not found', 404);
 	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
 	if (!allowed) return c.text('Forbidden', 403);
@@ -5427,7 +5440,7 @@ app.post('/staff/bars-packages/upload', async (c) => {
 	const file = form.get('file');
 	const type = form.get('type')?.toString();
 	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
-	if (!type || !['models', 'models-2020', 'removals'].includes(type)) return c.json({ error: 'invalid type' }, 400);
+	if (!type || !['models', 'models-2020', 'removals-2020', 'removals-2024'].includes(type)) return c.json({ error: 'invalid type' }, 400);
 	// Enforce .zip
 	const lowerName = file.name.toLowerCase();
 	if (!lowerName.endsWith('.zip')) return c.json({ error: 'file must be a .zip archive' }, 400);
@@ -5445,7 +5458,8 @@ app.post('/staff/bars-packages/upload', async (c) => {
 		let key: string;
 		if (type === 'models') key = 'packages/bars-models-2024.zip';
 		else if (type === 'models-2020') key = 'packages/bars-models-2020.zip';
-		else key = 'packages/bars-removals.zip';
+		else if (type === 'removals-2020') key = 'packages/bars-removals-2020.zip';
+		else key = 'packages/bars-removals-2024.zip';
 		const uploadRes = await storage.uploadFile(key, bytes, 'application/zip', {
 			uploadedBy: user.vatsim_id,
 			type,
@@ -5488,7 +5502,7 @@ app.post('/staff/bars-packages/upload', async (c) => {
 app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) => {
 	try {
 		const storage = ServicePool.getStorage(c.env);
-		const KEYS = ['packages/bars-models-2024.zip', 'packages/bars-models-2020.zip', 'packages/bars-removals.zip'];
+		const KEYS = ['packages/bars-models-2024.zip', 'packages/bars-models-2020.zip', 'packages/bars-removals-2020.zip', 'packages/bars-removals-2024.zip'];
 		const results = await Promise.all(
 			KEYS.map(async (key) => {
 				try {
@@ -5497,7 +5511,8 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
 					let type: string;
 					if (key.endsWith('bars-models-2024.zip')) type = 'models';
 					else if (key.endsWith('bars-models-2020.zip')) type = 'models-2020';
-					else type = 'removals';
+					else if (key.endsWith('bars-removals-2020.zip')) type = 'removals-2020';
+					else type = 'removals-2024';
 					return {
 						key,
 						size: obj.size,
