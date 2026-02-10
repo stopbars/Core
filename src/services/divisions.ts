@@ -91,20 +91,33 @@ export class DivisionService {
 	}
 
 	async addMember(divisionId: number, vatsimId: string, role: 'nav_head' | 'nav_member'): Promise<DivisionMember> {
-		const result = await this.dbSession.executeWrite(
-			'INSERT INTO division_members (division_id, vatsim_id, role) VALUES (?, ?, ?) RETURNING *',
-			[divisionId, vatsimId, role],
-		);
-
-		const rows = result.results as unknown as DivisionMember[] | null;
-		const member = rows && rows[0];
-		if (!member) throw new Error('Failed to add member to division');
-		try {
-			this.posthog?.track('Division Member Added', { divisionId, vatsimId, role });
-		} catch (e) {
-			console.warn('Posthog track failed (Division Member Added)', e);
+		const existingRole = await this.getMemberRole(divisionId, vatsimId);
+		if (existingRole) {
+			throw new HttpError(409, 'User is already a member of this division');
 		}
-		return member;
+
+		try {
+			const result = await this.dbSession.executeWrite(
+				'INSERT INTO division_members (division_id, vatsim_id, role) VALUES (?, ?, ?) RETURNING *',
+				[divisionId, vatsimId, role],
+			);
+
+			const rows = result.results as unknown as DivisionMember[] | null;
+			const member = rows && rows[0];
+			if (!member) throw new Error('Failed to add member to division');
+			try {
+				this.posthog?.track('Division Member Added', { divisionId, vatsimId, role });
+			} catch (e) {
+				console.warn('Posthog track failed (Division Member Added)', e);
+			}
+			return member;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (message.includes('UNIQUE constraint failed: division_members.division_id, division_members.vatsim_id')) {
+				throw new HttpError(409, 'User is already a member of this division');
+			}
+			throw error;
+		}
 	}
 
 	async removeMember(divisionId: number, vatsimId: string): Promise<void> {

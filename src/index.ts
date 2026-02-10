@@ -2018,6 +2018,8 @@ divisionsApp.get('/:id/members', async (c) => {
  *     responses:
  *       200:
  *         description: Member added
+ *       409:
+ *         description: User is already a member of this division
  *       403:
  *         description: Forbidden
  */
