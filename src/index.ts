@@ -1421,7 +1421,7 @@ app.get('/auth/is-staff', withCache(CacheKeys.withUser('is-staff'), 120, 'auth')
 	return c.json(staffStatus);
 });
 
-// Ban management endpoints (Lead Developer only)
+// Ban management endpoints (Product Manager+)
 /**
  * @openapi
  * /bans:
@@ -1449,7 +1449,7 @@ app.get('/bans', async (c) => {
 	const vatsimUser = await vatsim.getUser(token);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('Unauthorized', 401);
-	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 	if (!allowed) return c.text('Forbidden', 403);
 	const bans = await auth.listBans();
 	return c.json({ bans });
@@ -1517,8 +1517,16 @@ app.post('/bans', async (c) => {
 	const staffUser = await vatsim.getUser(token);
 	const localUser = await auth.getUserByVatsimId(staffUser.id);
 	if (!localUser) return c.text('Unauthorized', 401);
-	const allowed = await roles.hasPermission(localUser.id, StaffRole.LEAD_DEVELOPER);
+	const allowed = await roles.hasPermission(localUser.id, StaffRole.PRODUCT_MANAGER);
 	if (!allowed) return c.text('Forbidden', 403);
+	const actingRole = await roles.getUserRole(localUser.id);
+	const targetUser = await auth.getUserByVatsimIdEvenIfBanned(vatsimId);
+	if (actingRole === StaffRole.PRODUCT_MANAGER && targetUser) {
+		const targetRole = await roles.getUserRole(targetUser.id);
+		if (targetRole === StaffRole.LEAD_DEVELOPER) {
+			return c.json({ error: 'Forbidden: Product managers cannot ban lead developers' }, 403);
+		}
+	}
 	await auth.banUser(vatsimId, reason, staffUser.id, expiresAt);
 	return c.json({ success: true });
 });
@@ -1556,7 +1564,7 @@ app.delete('/bans/:vatsimId', async (c) => {
 	const staffUser = await vatsim.getUser(token);
 	const localUser = await auth.getUserByVatsimId(staffUser.id);
 	if (!localUser) return c.text('Unauthorized', 401);
-	const allowed = await roles.hasPermission(localUser.id, StaffRole.LEAD_DEVELOPER);
+	const allowed = await roles.hasPermission(localUser.id, StaffRole.PRODUCT_MANAGER);
 	if (!allowed) return c.text('Forbidden', 403);
 	await auth.unbanUser(targetId);
 	return c.body(null, 204);
@@ -1780,8 +1788,8 @@ divisionsApp.post('/', async (c) => {
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
 
-	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
-	if (!isLeadDev) return c.text('Forbidden', 403);
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
 
 	const { name, headVatsimId } = (await c.req.json()) as CreateDivisionPayload;
 	const division = await divisions.createDivision(name, headVatsimId);
@@ -1835,8 +1843,8 @@ divisionsApp.put('/:id', async (c) => {
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
 
-	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
-	if (!isLeadDev) return c.text('Forbidden', 403);
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
 
 	const existing = await divisions.getDivision(id);
 	if (!existing) return c.text('Division not found', 404);
@@ -1885,8 +1893,8 @@ divisionsApp.delete('/:id', async (c) => {
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
 
-	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
-	if (!isLeadDev) return c.text('Forbidden', 403);
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
 
 	const existing = await divisions.getDivision(id);
 	if (!existing) return c.text('Division not found', 404);
@@ -2040,12 +2048,13 @@ divisionsApp.post('/:id/members', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
-	// Check if user is lead developer (can manage any division)
+	// Product managers and lead developers can manage any division.
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	const isLeadDev = user ? await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER) : false;
+	const isPM = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
 
 	const userRole = await divisions.getMemberRole(divisionId, vatsimUser.id);
-	if (userRole !== 'nav_head' && !isLeadDev) {
+	if (userRole !== 'nav_head' && !isLeadDev && !isPM) {
 		return c.text('Forbidden', 403);
 	}
 
@@ -2097,22 +2106,23 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
-	// Check if user is lead developer (can manage any division)
+	// Product managers and lead developers can manage any division.
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	const isLeadDev = user ? await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER) : false;
+	const isPM = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
 
 	const userRole = await divisions.getMemberRole(divisionId, vatsimUser.id);
-	if (userRole !== 'nav_head' && !isLeadDev) {
+	if (userRole !== 'nav_head' && !isLeadDev && !isPM) {
 		return c.text('Forbidden', 403);
 	}
 
 	// Prevent removing yourself (unless you're a lead dev removing yourself from a division you're not heading)
-	if (targetVatsimId === vatsimUser.id.toString() && !isLeadDev) {
+	if (targetVatsimId === vatsimUser.id.toString() && !isLeadDev && !isPM) {
 		return c.text('Cannot remove yourself from the division', 400);
 	}
 
 	const targetRole = await divisions.getMemberRole(divisionId, targetVatsimId);
-	if (targetRole === 'nav_head' && !isLeadDev) {
+	if (targetRole === 'nav_head' && !isLeadDev && !isPM) {
 		return c.text('Cannot remove another nav head', 403);
 	}
 
@@ -2202,8 +2212,15 @@ divisionsApp.post('/:id/airports', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const isPM = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
+
 	const { icao } = (await c.req.json()) as RequestAirportPayload;
-	const airport = await divisions.requestAirport(divisionId, icao, vatsimUser.id);
+	const airport = isPM
+		? await divisions.requestAirportAsStaff(divisionId, icao, vatsimUser.id)
+		: await divisions.requestAirport(divisionId, icao, vatsimUser.id);
 	return c.json(airport);
 });
 
@@ -2253,16 +2270,21 @@ divisionsApp.delete('/:id/airports/:airportId', async (c) => {
 		return c.text('Division not found', 404);
 	}
 
+	const auth = ServicePool.getAuth(c.env);
+	const roles = ServicePool.getRoles(c.env);
+	const user = await auth.getUserByVatsimId(vatsimUser.id);
+	const isPM = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
+
 	const role = await divisions.getMemberRole(params.divisionId, vatsimUser.id);
-	if (!role) {
+	if (!role && !isPM) {
 		return c.text('Forbidden', 403);
 	}
 
-	await divisions.deleteAirportRequest(params.divisionId, params.airportId, vatsimUser.id, role);
+	await divisions.deleteAirportRequest(params.divisionId, params.airportId, vatsimUser.id, role ?? 'nav_member', isPM);
 	return c.body(null, 204);
 });
 
-// POST /divisions/:id/airports/:airportId/approve - Approve/reject airport (requires lead_developer role)
+// POST /divisions/:id/airports/:airportId/approve - Approve/reject airport (requires product_manager+ role)
 /**
  * @openapi
  * /divisions/{id}/airports/{airportId}/approve:
@@ -2319,8 +2341,8 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
 
-	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
-	if (!isLeadDev) return c.text('Forbidden', 403);
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
 
 	const { approved } = (await c.req.json()) as ApproveAirportPayload;
 	const airport = await divisions.approveAirport(airportId, vatsimUser.id, approved);
@@ -3288,9 +3310,9 @@ app.put('/notam', async (c) => {
 		return c.text('User not found', 404);
 	}
 
-	// Check if user has staff permissions
-	const isStaff = await roles.isStaff(user.id);
-	if (!isStaff) {
+	// Require product manager or higher.
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) {
 		return c.text('Forbidden', 403);
 	}
 
@@ -4911,8 +4933,8 @@ vatsysStaffApp.use('*', async (c, next) => {
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
-	const isStaff = await roles.isStaff(user.id);
-	if (!isStaff) return c.text('Forbidden', 403);
+	const allowed = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
+	if (!allowed) return c.text('Forbidden', 403);
 	c.set('user', user);
 	c.set('vatsimUser', vatsimUser);
 	await next();
@@ -5064,7 +5086,7 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
  * /releases/upload:
  *   post:
  *     x-hidden: true
- *     summary: Create a new product release (lead developer only)
+ *     summary: Create a new product release (product manager+)
  *     tags:
  *       - Installer
  *     security:
@@ -5128,8 +5150,8 @@ app.post('/releases/upload', async (c) => {
 	}
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
-	const isLeadDev = await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER);
-	if (!isLeadDev) return c.text('Forbidden', 403);
+	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
+	if (!allowed) return c.text('Forbidden', 403);
 
 	if (!product || !version) return c.json({ error: 'product & version required' }, 400);
 

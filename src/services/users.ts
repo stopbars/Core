@@ -36,9 +36,9 @@ export class UserService {
 	// Get all users with pagination
 	async getAllUsers(page: number = 1, limit: number = 10, userId: number): Promise<{ users: StaffUserDTO[]; total: number }> {
 		// Check if user has permission
-		const hasPermission = await this.roles.hasPermission(userId, StaffRole.LEAD_DEVELOPER);
+		const hasPermission = await this.roles.hasPermission(userId, StaffRole.PRODUCT_MANAGER);
 		if (!hasPermission) {
-			throw new HttpError(403, 'Forbidden: Only lead developers can access user management');
+			throw new HttpError(403, 'Forbidden: Only product managers and lead developers can access user management');
 		}
 
 		const offset = (page - 1) * limit;
@@ -102,9 +102,9 @@ export class UserService {
 	// Search users by email or vatsim_id
 	async searchUsers(query: string, userId: number): Promise<StaffUserDTO[]> {
 		// Check if user has permission
-		const hasPermission = await this.roles.hasPermission(userId, StaffRole.LEAD_DEVELOPER);
+		const hasPermission = await this.roles.hasPermission(userId, StaffRole.PRODUCT_MANAGER);
 		if (!hasPermission) {
-			throw new HttpError(403, 'Forbidden: Only lead developers can search users');
+			throw new HttpError(403, 'Forbidden: Only product managers and lead developers can search users');
 		}
 
 		try {
@@ -161,9 +161,9 @@ export class UserService {
 	// Delete user by id
 	async deleteUser(userId: number, requestingUserId: number): Promise<boolean> {
 		// Check if user has permission
-		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.LEAD_DEVELOPER);
+		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.PRODUCT_MANAGER);
 		if (!hasPermission) {
-			throw new HttpError(403, 'Forbidden: Only lead developers can delete users');
+			throw new HttpError(403, 'Forbidden: Only product managers and lead developers can delete users');
 		}
 
 		try {
@@ -192,12 +192,12 @@ export class UserService {
 		}
 	}
 
-	// Refresh user's API token by VATSIM ID (lead developers only)
+	// Refresh user's API token by VATSIM ID (product managers and lead developers)
 	async refreshUserApiToken(vatsimId: string, requestingUserId: number): Promise<string> {
 		// Check if user has permission
-		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.LEAD_DEVELOPER);
+		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.PRODUCT_MANAGER);
 		if (!hasPermission) {
-			throw new HttpError(403, 'Forbidden: Only lead developers can refresh user API tokens');
+			throw new HttpError(403, 'Forbidden: Only product managers and lead developers can refresh user API tokens');
 		}
 
 		try {

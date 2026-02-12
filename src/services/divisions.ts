@@ -156,6 +156,22 @@ export class DivisionService {
 		}
 		return request;
 	}
+	async requestAirportAsStaff(divisionId: number, icao: string, requestedBy: string): Promise<DivisionAirport> {
+		const result = await this.dbSession.executeWrite(
+			'INSERT INTO division_airports (division_id, icao, requested_by) VALUES (?, ?, ?) RETURNING *',
+			[divisionId, icao, requestedBy],
+		);
+
+		const rows = result.results as unknown as DivisionAirport[] | null;
+		const request = rows && rows[0];
+		if (!request) throw new Error('Failed to create airport request');
+		try {
+			this.posthog?.track('Division Airport Access Requested', { divisionId, icao, requestedBy, privileged: true });
+		} catch (e) {
+			console.warn('Posthog track failed (Division Airport Access Requested)', e);
+		}
+		return request;
+	}
 	async approveAirport(airportId: number, approvedBy: string, approved: boolean): Promise<DivisionAirport> {
 		const result = await this.dbSession.executeWrite(
 			`
@@ -187,6 +203,7 @@ export class DivisionService {
 		airportId: number,
 		requesterId: string,
 		requesterRole: 'nav_head' | 'nav_member',
+		isPrivilegedStaff: boolean = false,
 	): Promise<boolean> {
 		const existingResult = await this.dbSession.executeRead<DivisionAirport>(
 			`SELECT * FROM division_airports WHERE id = ? AND division_id = ?`,
@@ -204,7 +221,7 @@ export class DivisionService {
 		}
 
 		const isOwner = existing.requested_by === requesterId;
-		if (!isOwner && requesterRole !== 'nav_head') {
+		if (!isPrivilegedStaff && !isOwner && requesterRole !== 'nav_head') {
 			throw new HttpError(403, 'Forbidden: Only the requester or division head can delete this request');
 		}
 
