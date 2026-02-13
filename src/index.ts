@@ -672,6 +672,133 @@ app.delete('/contact/:id', async (c) => {
  *         - `key` query parameter, or
  *         - `Authorization: Bearer <API key>` header
  *       The API key is forwarded as a Bearer token to the airport's Durable Object for auth.
+ *     x-mint:
+ *       content: |
+ *         ## Establish a session
+ *         1. Connect to `/connect` with `airport` and your API key.
+ *         2. Wait for `INITIAL_STATE` (this confirms your role and current airport state).
+ *         3. Keep the connection alive by sending `HEARTBEAT` regularly.
+ *
+ *         The server sends `HEARTBEAT` every 60 seconds and closes idle sessions after ~70 seconds without inbound client messages.
+ *
+ *         ## Packet envelope
+ *         Every packet uses this top-level shape:
+ *
+ *         ```json
+ *         {
+ *           "type": "STATE_UPDATE",
+ *           "airport": "YSSY",
+ *           "data": {},
+ *           "timestamp": 1739400000000
+ *         }
+ *         ```
+ *
+ *         - `type` is required.
+ *         - `airport` is optional on most client packets (server uses your connected airport if omitted).
+ *         - `timestamp` is optional on client packets and server-populated on outbound packets.
+ *
+ *         ## Packet permissions by role
+ *         | Packet type | Who can send | What happens |
+ *         | --- | --- | --- |
+ *         | `HEARTBEAT` | controller, pilot, observer | Server replies with `HEARTBEAT_ACK` |
+ *         | `GET_STATE` | controller, pilot, observer | Server replies with `STATE_SNAPSHOT` |
+ *         | `STATE_UPDATE` | controller only | Broadcast to same-airport clients (except sender) |
+ *         | `MULTI_STATE_UPDATE` | controller only | Broadcast to same-airport clients (except sender) |
+ *         | `SHARED_STATE_UPDATE` | controller only | Broadcast to same-airport clients (including sender) |
+ *         | `STOPBAR_CROSSING` | pilot only | Broadcast to same-airport controllers |
+ *         | `CLOSE` | controller, pilot, observer | Server closes the session gracefully |
+ *
+ *         ## Client packets you send
+ *         ### HEARTBEAT
+ *         ```json
+ *         { "type": "HEARTBEAT" }
+ *         ```
+ *
+ *         ### GET_STATE
+ *         ```json
+ *         { "type": "GET_STATE" }
+ *         ```
+ *
+ *         ### STATE_UPDATE (controller only)
+ *         ```json
+ *         {
+ *           "type": "STATE_UPDATE",
+ *           "data": {
+ *             "objectId": "BARS_7K2QH",
+ *             "state": false
+ *           }
+ *         }
+ *         ```
+ *
+ *         ### MULTI_STATE_UPDATE (controller only)
+ *         ```json
+ *         {
+ *           "type": "MULTI_STATE_UPDATE",
+ *           "data": {
+ *             "updates": [
+ *               { "objectId": "BARS_7K2QH", "state": false },
+ *               { "objectId": "BARS_8R1LP", "state": true }
+ *             ]
+ *           }
+ *         }
+ *         ```
+ *
+ *         ### SHARED_STATE_UPDATE (controller only)
+ *         ```json
+ *         {
+ *           "type": "SHARED_STATE_UPDATE",
+ *           "data": {
+ *             "sharedStatePatch": {
+ *               "profile": "default",
+ *               "nodes": {
+ *                 "TWY_A1": true,
+ *                 "TWY_B2": false,
+ *                 "RWY_09L_HOLD": true
+ *               },
+ *               "blocks": {
+ *                 "BLOCK_A": "clear",
+ *                 "BLOCK_B": "relax",
+ *                 "BLOCK_C": { "route": ["TWY_A1", "TWY_B2"] }
+ *               }
+ *             }
+ *           }
+ *         }
+ *         ```
+ *
+ *         ### STOPBAR_CROSSING (pilot only)
+ *         ```json
+ *         {
+ *           "type": "STOPBAR_CROSSING",
+ *           "data": {
+ *             "objectId": "BARS_7K2QH"
+ *           }
+ *         }
+ *         ```
+ *
+ *         ### CLOSE
+ *         ```json
+ *         { "type": "CLOSE" }
+ *         ```
+ *
+ *         ## Server packets you should handle
+ *         - `INITIAL_STATE` immediately after connect
+ *         - `HEARTBEAT` every 60 seconds
+ *         - `HEARTBEAT_ACK` in response to client `HEARTBEAT`
+ *         - `STATE_SNAPSHOT` in response to `GET_STATE`
+ *         - `STATE_UPDATE` when a controller changes one object state
+ *         - `MULTI_STATE_UPDATE` when a controller sends a batch state change
+ *         - `CONTROLLER_CONNECT` / `CONTROLLER_DISCONNECT` for controller presence changes
+ *         - `SHARED_STATE_UPDATE` when shared state changes
+ *         - `STOPBAR_CROSSING` (controllers only) when a pilot crosses a stopbar
+ *         - `ERROR` when validation/processing fails
+ *
+ *         ## Validation and limits (avoid malformed packets)
+ *         - `objectId` must match `^[a-zA-Z0-9_-]+$`.
+ *         - `STATE_UPDATE` must include `data.objectId` and one of `data.state` or `data.patch`.
+ *         - `MULTI_STATE_UPDATE` must include `data.updates` (maximum `200` updates).
+ *         - `SHARED_STATE_UPDATE` must include `data.sharedStatePatch` object (maximum `10,240` serialized characters).
+ *         - Maximum packet size is `50,000` characters.
+ *         - Unknown packet `type` values are rejected.
  *     parameters:
  *       - in: query
  *         name: airport
