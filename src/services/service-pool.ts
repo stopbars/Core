@@ -22,24 +22,11 @@ import { VatSysProfilesService } from './vatsys-profiles';
 
 export const ServicePool = (() => {
 	let vatsim: VatsimService;
-	let auth: AuthService;
-	let roles: RoleService;
 	let cache: CacheService;
-	let airport: AirportService;
-	let divisions: DivisionService;
 	let id: IDService;
-	let points: PointsService;
-	let polygons: PolygonService;
-	let support: SupportService;
-	let notam: NotamService;
-	let contributions: ContributionService;
 	let storage: StorageService;
 	let github: GitHubService;
 	let posthog: PostHogService;
-	let faqs: FAQService;
-	let releases: ReleaseService;
-	let contact: ContactService;
-	let downloads: DownloadsService;
 	let vatsysProfiles: VatSysProfilesService;
 
 	return {
@@ -49,17 +36,12 @@ export const ServicePool = (() => {
 			}
 			return vatsim;
 		},
+		// DB-backed services stay request-scoped so D1 session state never leaks across requests.
 		getAuth(env: Env) {
-			if (!auth) {
-				auth = new AuthService(env.DB, this.getVatsim(env), this.getPostHog(env));
-			}
-			return auth;
+			return new AuthService(env.DB, this.getVatsim(env), this.getPostHog(env));
 		},
 		getRoles(env: Env) {
-			if (!roles) {
-				roles = new RoleService(env.DB);
-			}
-			return roles;
+			return new RoleService(env.DB);
 		},
 		getCache(env: Env) {
 			if (!cache) {
@@ -68,16 +50,10 @@ export const ServicePool = (() => {
 			return cache;
 		},
 		getAirport(env: Env) {
-			if (!airport) {
-				airport = new AirportService(env.DB, env.AIRPORTDB_API_KEY, this.getPostHog(env));
-			}
-			return airport;
+			return new AirportService(env.DB, env.AIRPORTDB_API_KEY, this.getPostHog(env));
 		},
 		getDivisions(env: Env) {
-			if (!divisions) {
-				divisions = new DivisionService(env.DB, this.getPostHog(env));
-			}
-			return divisions;
+			return new DivisionService(env.DB, this.getPostHog(env));
 		},
 		getID() {
 			if (!id) {
@@ -86,40 +62,25 @@ export const ServicePool = (() => {
 			return id;
 		},
 		getPoints(env: Env) {
-			if (!points) {
-				points = new PointsService(env.DB, this.getID(), this.getDivisions(env), this.getPostHog(env));
-			}
-			return points;
+			return new PointsService(env.DB, this.getID(), this.getDivisions(env), this.getPostHog(env));
 		},
 		getPolygons(env: Env) {
-			if (!polygons) {
-				polygons = new PolygonService(env.DB, undefined, this.getPostHog(env));
-			}
-			return polygons;
+			return new PolygonService(env.DB, undefined, this.getPostHog(env));
 		},
 		getSupport(env: Env) {
-			if (!support) {
-				support = new SupportService(env.DB);
-			}
-			return support;
+			return new SupportService(env.DB);
 		},
 		getNotam(env: Env) {
-			if (!notam) {
-				notam = new NotamService(env.DB);
-			}
-			return notam;
+			return new NotamService(env.DB);
 		},
 		getContributions(env: Env) {
-			if (!contributions) {
-				contributions = new ContributionService(
-					env.DB,
-					this.getRoles(env),
-					env.AIRPORTDB_API_KEY,
-					env.BARS_STORAGE,
-					this.getPostHog(env),
-				);
-			}
-			return contributions;
+			return new ContributionService(
+				env.DB,
+				this.getRoles(env),
+				env.AIRPORTDB_API_KEY,
+				env.BARS_STORAGE,
+				this.getPostHog(env),
+			);
 		},
 		getStorage(env: Env) {
 			if (!storage) {
@@ -140,28 +101,16 @@ export const ServicePool = (() => {
 			return posthog;
 		},
 		getFAQs(env: Env) {
-			if (!faqs) {
-				faqs = new FAQService(env.DB);
-			}
-			return faqs;
+			return new FAQService(env.DB);
 		},
 		getReleases(env: Env) {
-			if (!releases) {
-				releases = new ReleaseService(env.DB, this.getStorage(env));
-			}
-			return releases;
+			return new ReleaseService(env.DB, this.getStorage(env));
 		},
 		getContact(env: Env) {
-			if (!contact) {
-				contact = new ContactService(env.DB);
-			}
-			return contact;
+			return new ContactService(env.DB);
 		},
 		getDownloads(env: Env) {
-			if (!downloads) {
-				downloads = new DownloadsService(env.DB);
-			}
-			return downloads;
+			return new DownloadsService(env.DB);
 		},
 		getVatSysProfiles(env: Env) {
 			if (!vatsysProfiles) {
