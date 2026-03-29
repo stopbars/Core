@@ -208,17 +208,7 @@ export class AuthService {
 				{ query: 'DELETE FROM users WHERE vatsim_id = ?', params: [vatsimId] },
 			]);
 
-			const userResult = await dbSession.executeRead<UserRecord>(
-				`SELECT u.*
-				 FROM users u
-				 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id
-				 WHERE u.vatsim_id = ?
-				   AND (
-				 	b.vatsim_id IS NULL
-				 	OR (b.expires_at IS NOT NULL AND datetime(b.expires_at) < datetime('now'))
-				   )`,
-				[vatsimId],
-			);
+			const userResult = await dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ? LIMIT 1', [vatsimId]);
 			return !userResult.results[0];
 		}, { mode: 'first-primary' });
 
