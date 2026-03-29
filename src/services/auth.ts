@@ -1,6 +1,6 @@
 import { VatsimUser, UserRecord } from '../types';
 import { VatsimService } from './vatsim';
-import { DatabaseSessionService } from './database-session';
+import { DatabaseSessionService, type SessionOptions } from './database-session';
 import { PostHogService } from './posthog';
 
 type DisplayModeUser = Pick<UserRecord, 'id' | 'vatsim_id' | 'full_name' | 'display_mode' | 'display_name'>;
@@ -11,14 +11,25 @@ interface ExistingUserLookup {
 }
 
 export class AuthService {
-	private dbSession: DatabaseSessionService;
-
 	constructor(
 		private db: D1Database,
 		private vatsim: VatsimService,
 		private posthog?: PostHogService,
-	) {
-		this.dbSession = new DatabaseSessionService(db);
+	) {}
+
+	private async withDbSession<T>(
+		operation: (dbSession: DatabaseSessionService) => Promise<T>,
+		options?: SessionOptions,
+	): Promise<T> {
+		const dbSession = new DatabaseSessionService(this.db);
+		if (options) {
+			dbSession.startSession(options);
+		}
+		try {
+			return await operation(dbSession);
+		} finally {
+			dbSession.closeSession();
+		}
 	}
 
 	async handleCallback(code: string, executionCtx?: ExecutionContext): Promise<{ vatsimToken: string }> {
@@ -87,13 +98,10 @@ export class AuthService {
 			return { user: lookup.user, created: false };
 		}
 
-		if (lookup?.bookmark) {
-			this.dbSession.startSession({ bookmark: lookup.bookmark });
-		} else {
-			this.dbSession.startSession({ mode: 'first-primary' });
-		}
-
-		const newUser = await this.createNewUser(vatsimUser);
+		const newUser = await this.withDbSession(
+			(dbSession) => this.createNewUser(vatsimUser, dbSession),
+			lookup?.bookmark ? { bookmark: lookup.bookmark } : { mode: 'first-primary' },
+		);
 		return { user: newUser, created: true };
 	}
 
@@ -106,9 +114,9 @@ export class AuthService {
 		return `BARS_${key}`;
 	}
 
-	private async createNewUser(vatsimUser: VatsimUser) {
+	private async createNewUser(vatsimUser: VatsimUser, dbSession: DatabaseSessionService) {
 		// Check for existing VATSIM user using session
-		const existingVatsimUserResult = await this.dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE vatsim_id = ?', [
+		const existingVatsimUserResult = await dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE vatsim_id = ?', [
 			vatsimUser.id,
 		]);
 
@@ -119,7 +127,7 @@ export class AuthService {
 		let apiKey = this.generateApiKey();
 
 		while (true) {
-			const existingKeyResult = await this.dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE api_key = ?', [apiKey]);
+			const existingKeyResult = await dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE api_key = ?', [apiKey]);
 
 			if (!existingKeyResult.results[0]) break;
 			apiKey = this.generateApiKey();
@@ -142,7 +150,7 @@ export class AuthService {
 			vatsimUser,
 		);
 		const { regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName } = this.normalizeLocationFields(vatsimUser);
-		const result = await this.dbSession.executeWrite(
+		const result = await dbSession.executeWrite(
 			'INSERT INTO users (vatsim_id, api_key, email, full_name, display_mode, display_name, region_id, region_name, division_id, division_name, subdivision_id, subdivision_name, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
 			[
 				vatsimUser.id,
@@ -176,32 +184,34 @@ export class AuthService {
 		}
 
 		// Only update when new values are present; do not overwrite with nulls
-		await this.dbSession.executeWrite(
-			`UPDATE users
-			 SET 
-			   region_id = COALESCE(?, region_id),
-			   region_name = COALESCE(?, region_name),
-			   division_id = COALESCE(?, division_id),
-			   division_name = COALESCE(?, division_name),
-			   subdivision_id = COALESCE(?, subdivision_id),
-			   subdivision_name = COALESCE(?, subdivision_name)
-			 WHERE id = ?`,
-			[regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName, userId],
-		);
+		await this.withDbSession(async (dbSession) => {
+			await dbSession.executeWrite(
+				`UPDATE users
+				 SET 
+				   region_id = COALESCE(?, region_id),
+				   region_name = COALESCE(?, region_name),
+				   division_id = COALESCE(?, division_id),
+				   division_name = COALESCE(?, division_name),
+				   subdivision_id = COALESCE(?, subdivision_id),
+				   subdivision_name = COALESCE(?, subdivision_name)
+				 WHERE id = ?`,
+				[regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName, userId],
+			);
+		});
 	}
 
 	async deleteUserAccount(vatsimId: string): Promise<boolean> {
-		// Use primary mode for write operations
-		this.dbSession.startSession({ mode: 'first-primary' });
+		const deleted = await this.withDbSession(async (dbSession) => {
+			await dbSession.executeBatch([
+				{ query: 'DELETE FROM division_members WHERE vatsim_id = ?', params: [vatsimId] },
+				{ query: 'DELETE FROM staff WHERE user_id IN (SELECT id FROM users WHERE vatsim_id = ?)', params: [vatsimId] },
+				{ query: 'DELETE FROM users WHERE vatsim_id = ?', params: [vatsimId] },
+			]);
 
-		await this.dbSession.executeBatch([
-			{ query: 'DELETE FROM division_members WHERE vatsim_id = ?', params: [vatsimId] },
-			{ query: 'DELETE FROM staff WHERE user_id IN (SELECT id FROM users WHERE vatsim_id = ?)', params: [vatsimId] },
-			{ query: 'DELETE FROM users WHERE vatsim_id = ?', params: [vatsimId] },
-		]);
+			const userResult = await dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ? LIMIT 1', [vatsimId]);
+			return !userResult.results[0];
+		}, { mode: 'first-primary' });
 
-		const userExists = await this.getUserByVatsimId(vatsimId);
-		const deleted = !userExists;
 		if (deleted) {
 			try {
 				this.posthog?.track('User Deleted', { vatsimId });
@@ -213,39 +223,45 @@ export class AuthService {
 	}
 
 	async getUserByApiKey(apiKey: string): Promise<UserRecord | null> {
-		const result = await this.dbSession.executeRead<UserRecord>(
-			`SELECT u.*
-			 FROM users u
-			 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id
-			 WHERE u.api_key = ?
-			   AND (
-			 	b.vatsim_id IS NULL
-			 	OR (b.expires_at IS NOT NULL AND datetime(b.expires_at) < datetime('now'))
-			   )`,
-			[apiKey],
-		);
-		return result.results[0] || null;
+		return this.withDbSession(async (dbSession) => {
+			const result = await dbSession.executeRead<UserRecord>(
+				`SELECT u.*
+				 FROM users u
+				 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id
+				 WHERE u.api_key = ?
+				   AND (
+				 	b.vatsim_id IS NULL
+				 	OR (b.expires_at IS NOT NULL AND datetime(b.expires_at) < datetime('now'))
+				   )`,
+				[apiKey],
+			);
+			return result.results[0] || null;
+		});
 	}
 
 	async getUserByVatsimId(vatsimId: string): Promise<UserRecord | null> {
-		const result = await this.dbSession.executeRead<UserRecord>(
-			`SELECT u.*
-			 FROM users u
-			 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id
-			 WHERE u.vatsim_id = ?
-			   AND (
-			 	b.vatsim_id IS NULL
-			 	OR (b.expires_at IS NOT NULL AND datetime(b.expires_at) < datetime('now'))
-			   )`,
-			[vatsimId],
-		);
-		return result.results[0] || null;
+		return this.withDbSession(async (dbSession) => {
+			const result = await dbSession.executeRead<UserRecord>(
+				`SELECT u.*
+				 FROM users u
+				 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id
+				 WHERE u.vatsim_id = ?
+				   AND (
+				 	b.vatsim_id IS NULL
+				 	OR (b.expires_at IS NOT NULL AND datetime(b.expires_at) < datetime('now'))
+				   )`,
+				[vatsimId],
+			);
+			return result.results[0] || null;
+		});
 	}
 
 	// Explicitly fetch user without applying ban filter (for account page visibility)
 	async getUserByVatsimIdEvenIfBanned(vatsimId: string): Promise<UserRecord | null> {
-		const result = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
-		return result.results[0] || null;
+		return this.withDbSession(async (dbSession) => {
+			const result = await dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
+			return result.results[0] || null;
+		});
 	}
 
 	computeDisplayName(user: UserRecord, vatsimUser?: VatsimUser): string {
@@ -266,43 +282,44 @@ export class AuthService {
 	async updateDisplayMode(userId: number, mode: number, existing?: DisplayModeUser) {
 		if (![0, 1, 2].includes(mode)) throw new Error('Invalid display mode');
 
-		// Use primary for consistency on write
-		this.dbSession.startSession({ mode: 'first-primary' });
+		await this.withDbSession(async (dbSession) => {
+			let user: DisplayModeUser | null = null;
+			if (existing && existing.id === userId) {
+				user = existing;
+			} else {
+				const current = await dbSession.executeRead<DisplayModeUser>(
+					'SELECT id, vatsim_id, full_name, display_mode, display_name FROM users WHERE id = ?',
+					[userId],
+				);
+				user = current.results[0] ?? null;
+			}
+			if (!user) return;
 
-		let user: DisplayModeUser | null = null;
-		if (existing && existing.id === userId) {
-			user = existing;
-		} else {
-			const current = await this.dbSession.executeRead<DisplayModeUser>(
-				'SELECT id, vatsim_id, full_name, display_mode, display_name FROM users WHERE id = ?',
-				[userId],
-			);
-			user = current.results[0] ?? null;
-		}
-		if (!user) return;
+			if (user.display_mode === mode) return; // nothing to do
 
-		if (user.display_mode === mode) return; // nothing to do
+			const displayName = this.computeDisplayName({ ...user, display_mode: mode } as UserRecord);
 
-		const displayName = this.computeDisplayName({ ...user, display_mode: mode } as UserRecord);
-
-		await this.dbSession.executeWrite('UPDATE users SET display_mode = ?, display_name = ? WHERE id = ?', [mode, displayName, userId]);
+			await dbSession.executeWrite('UPDATE users SET display_mode = ?, display_name = ? WHERE id = ?', [mode, displayName, userId]);
+		}, { mode: 'first-primary' });
 	}
 
 	async updateFullName(userId: number, fullName: string) {
-		await this.dbSession.executeWrite('UPDATE users SET full_name = ? WHERE id = ?', [fullName, userId]);
-		// Recompute display_name after updating full_name using existing display_mode
-		const current = await this.dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE id = ?', [userId]);
-		const user = current.results[0];
-		if (user) {
-			const vatsimUser: VatsimUser = {
-				id: user.vatsim_id,
-				email: user.email,
-				first_name: fullName.split(' ')[0],
-				last_name: fullName.split(' ').slice(1).join(' '),
-			};
-			const displayName = this.computeDisplayName(user, vatsimUser);
-			await this.dbSession.executeWrite('UPDATE users SET display_name = ? WHERE id = ?', [displayName, userId]);
-		}
+		await this.withDbSession(async (dbSession) => {
+			await dbSession.executeWrite('UPDATE users SET full_name = ? WHERE id = ?', [fullName, userId]);
+			// Recompute display_name after updating full_name using existing display_mode
+			const current = await dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE id = ?', [userId]);
+			const user = current.results[0];
+			if (user) {
+				const vatsimUser: VatsimUser = {
+					id: user.vatsim_id,
+					email: user.email,
+					first_name: fullName.split(' ')[0],
+					last_name: fullName.split(' ').slice(1).join(' '),
+				};
+				const displayName = this.computeDisplayName(user, vatsimUser);
+				await dbSession.executeWrite('UPDATE users SET display_name = ? WHERE id = ?', [displayName, userId]);
+			}
+		}, { mode: 'first-primary' });
 	}
 
 	private async refreshLoginMetadata(userId: number, vatsimUser: VatsimUser): Promise<void> {
@@ -351,31 +368,31 @@ export class AuthService {
 	}
 
 	async regenerateApiKey(userId: number): Promise<string> {
-		// Use primary mode for API key regeneration
-		this.dbSession.startSession({ mode: 'first-primary' });
+		const apiKey = await this.withDbSession(async (dbSession) => {
+			let newApiKey = this.generateApiKey();
 
-		let newApiKey = this.generateApiKey();
+			// Make sure the new API key is unique
+			while (true) {
+				const existingKeyResult = await dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE api_key = ?', [newApiKey]);
 
-		// Make sure the new API key is unique
-		while (true) {
-			const existingKeyResult = await this.dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE api_key = ?', [newApiKey]);
+				if (!existingKeyResult.results[0]) break;
+				newApiKey = this.generateApiKey();
+			}
 
-			if (!existingKeyResult.results[0]) break;
-			newApiKey = this.generateApiKey();
-		}
+			// Update the user's API key in the database
+			const result = await dbSession.executeWrite('UPDATE users SET api_key = ? WHERE id = ? RETURNING api_key', [
+				newApiKey,
+				userId,
+			]);
 
-		// Update the user's API key in the database
-		const result = await this.dbSession.executeWrite('UPDATE users SET api_key = ? WHERE id = ? RETURNING api_key', [
-			newApiKey,
-			userId,
-		]);
+			const rows = result.results as unknown as Array<{ api_key: string }> | null;
+			if (!rows || !rows[0]) {
+				throw new Error('Failed to update API key');
+			}
 
-		const rows = result.results as unknown as Array<{ api_key: string }> | null;
-		if (!rows || !rows[0]) {
-			throw new Error('Failed to update API key');
-		}
+			return rows[0].api_key;
+		}, { mode: 'first-primary' });
 
-		const apiKey = rows[0].api_key;
 		try {
 			this.posthog?.track('User API Key Regenerated', { userId });
 		} catch (e) {
@@ -390,79 +407,78 @@ export class AuthService {
 
 	/** Create or update a ban for a vatsim id. Account is kept so UI can surface ban. */
 	async banUser(vatsimId: string, reason: string | null, issuedBy: string, expiresAt?: string | null): Promise<void> {
-		this.dbSession.startSession({ mode: 'first-primary' });
-		const nowIso = new Date().toISOString();
-		const cid = String(vatsimId).trim();
-		if (!/^\d{3,10}$/.test(cid)) throw new Error('Invalid VATSIM ID format');
-		await this.dbSession.executeWrite(
-			`INSERT INTO bans (vatsim_id, reason, issued_by, created_at, expires_at)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT(vatsim_id) DO UPDATE SET reason=excluded.reason, issued_by=excluded.issued_by, created_at=?, expires_at=excluded.expires_at`,
-			[cid, reason ?? null, issuedBy, nowIso, expiresAt ?? null, nowIso],
-		);
+		await this.withDbSession(async (dbSession) => {
+			const nowIso = new Date().toISOString();
+			const cid = String(vatsimId).trim();
+			if (!/^\d{3,10}$/.test(cid)) throw new Error('Invalid VATSIM ID format');
+			await dbSession.executeWrite(
+				`INSERT INTO bans (vatsim_id, reason, issued_by, created_at, expires_at)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(vatsim_id) DO UPDATE SET reason=excluded.reason, issued_by=excluded.issued_by, created_at=?, expires_at=excluded.expires_at`,
+				[cid, reason ?? null, issuedBy, nowIso, expiresAt ?? null, nowIso],
+			);
+		}, { mode: 'first-primary' });
 	}
 
 	/** Remove a ban for a vatsim id */
 	async unbanUser(vatsimId: string): Promise<void> {
-		this.dbSession.startSession({ mode: 'first-primary' });
-		await this.dbSession.executeWrite('DELETE FROM bans WHERE vatsim_id = ?', [vatsimId]);
+		await this.withDbSession(async (dbSession) => {
+			await dbSession.executeWrite('DELETE FROM bans WHERE vatsim_id = ?', [vatsimId]);
+		}, { mode: 'first-primary' });
 	}
 
 	/** List bans */
 	async listBans(): Promise<
 		Array<{ vatsim_id: string; reason: string | null; issued_by: string; created_at: string; expires_at: string | null }>
 	> {
-		const res = await this.dbSession.executeRead<{
-			vatsim_id: string;
-			reason: string | null;
-			issued_by: string;
-			created_at: string;
-			expires_at: string | null;
-		}>('SELECT vatsim_id, reason, issued_by, created_at, expires_at FROM bans ORDER BY created_at DESC');
-		return res.results;
+		return this.withDbSession(async (dbSession) => {
+			const res = await dbSession.executeRead<{
+				vatsim_id: string;
+				reason: string | null;
+				issued_by: string;
+				created_at: string;
+				expires_at: string | null;
+			}>('SELECT vatsim_id, reason, issued_by, created_at, expires_at FROM bans ORDER BY created_at DESC');
+			return res.results;
+		});
 	}
 
 	/** Return ban details if banned, otherwise null */
 	async getBanInfo(
 		vatsimId: string,
 	): Promise<{ vatsim_id: string; reason: string | null; created_at: string; expires_at: string | null } | null> {
-		const res = await this.dbSession.executeRead<{
-			vatsim_id: string;
-			reason: string | null;
-			created_at: string;
-			expires_at: string | null;
-		}>('SELECT vatsim_id, reason, created_at, expires_at FROM bans WHERE vatsim_id = ?', [vatsimId]);
-		const row = res.results[0];
-		if (!row) return null;
-		if (!row.expires_at) return row; // permanent
-		const now = Date.now();
-		const exp = new Date(row.expires_at).getTime();
-		return now <= exp ? row : null;
+		return this.withDbSession(async (dbSession) => {
+			const res = await dbSession.executeRead<{
+				vatsim_id: string;
+				reason: string | null;
+				created_at: string;
+				expires_at: string | null;
+			}>('SELECT vatsim_id, reason, created_at, expires_at FROM bans WHERE vatsim_id = ?', [vatsimId]);
+			const row = res.results[0];
+			if (!row) return null;
+			if (!row.expires_at) return row; // permanent
+			const now = Date.now();
+			const exp = new Date(row.expires_at).getTime();
+			return now <= exp ? row : null;
+		});
 	}
 
 	private async fetchExistingUser(vatsimId: string): Promise<ExistingUserLookup> {
-		const session = new DatabaseSessionService(this.db);
-		try {
-			session.startSession({ mode: 'first-primary' });
-			const result = await session.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
-			const bookmark = session.getSessionInfo().bookmark;
+		return this.withDbSession(async (dbSession) => {
+			const result = await dbSession.executeRead<UserRecord>('SELECT * FROM users WHERE vatsim_id = ?', [vatsimId]);
+			const bookmark = dbSession.getSessionInfo().bookmark;
 			return { user: result.results[0] ?? null, bookmark };
-		} finally {
-			session.closeSession();
-		}
+		}, { mode: 'first-primary' });
 	}
 
 	private async fetchBanRecord(vatsimId: string): Promise<{ vatsim_id: string; expires_at: string | null } | null> {
-		const session = new DatabaseSessionService(this.db);
-		try {
-			const res = await session.executeRead<{ vatsim_id: string; expires_at: string | null }>(
+		return this.withDbSession(async (dbSession) => {
+			const res = await dbSession.executeRead<{ vatsim_id: string; expires_at: string | null }>(
 				'SELECT vatsim_id, expires_at FROM bans WHERE vatsim_id = ?',
 				[vatsimId],
 			);
 			return res.results[0] ?? null;
-		} finally {
-			session.closeSession();
-		}
+		});
 	}
 
 	private isBanRecordActive(record: { expires_at: string | null } | null): boolean {
