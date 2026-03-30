@@ -24,7 +24,7 @@
 	},
 	"vars": {
 		"VATSIM_CLIENT_ID": "1562", // Change this for local testing
-		"POSTHOG_HOST": "https://eu.i.posthog.com",
+		"POSTHOG_HOST": "https://a.stopbars.com",
 	},
 	"d1_databases": [
 		{

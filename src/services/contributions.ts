@@ -5,6 +5,7 @@ import { SupportService } from './support';
 import { PolygonService } from './polygons';
 import { PostHogService } from './posthog';
 import { sanitizeContributionXml } from './xml-sanitizer';
+import { DivisionService } from './divisions';
 
 export type Simulator = 'msfs2020' | 'msfs2024';
 
@@ -62,6 +63,7 @@ export class ContributionService {
 	private supportService: SupportService;
 	private polygonService: PolygonService;
 	private storageService: StorageService;
+	private divisionService: DivisionService;
 	private dbSession: DatabaseSessionService;
 
 	constructor(
@@ -75,6 +77,7 @@ export class ContributionService {
 		this.supportService = new SupportService(db);
 		this.polygonService = new PolygonService(db, undefined, posthog);
 		this.storageService = new StorageService(storage);
+		this.divisionService = new DivisionService(db, posthog);
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
@@ -114,6 +117,11 @@ export class ContributionService {
 		const airport = await this.airportService.getAirport(normalizedAirportIcao);
 		if (!airport) {
 			throw new Error(`Airport with ICAO ${normalizedAirportIcao} not found`);
+		}
+		const contributionPolicy = await this.divisionService.getContributionPolicyForAirport(normalizedAirportIcao);
+		if (contributionPolicy && !contributionPolicy.contributions_enabled) {
+			const divisionName = contributionPolicy.division_name || 'the owning division';
+			throw new Error(`Contributions for ${normalizedAirportIcao} are currently disabled by ${divisionName}`);
 		}
 
 		let sanitizedNotes: string | null = null;

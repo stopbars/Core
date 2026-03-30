@@ -160,6 +160,10 @@ interface ApproveAirportPayload {
 	approved: boolean;
 }
 
+interface UpdateAirportContributionsPayload {
+	contributionsEnabled: boolean;
+}
+
 interface ContributionSubmissionPayload {
 	airportIcao: string;
 	packageName: string;
@@ -1776,6 +1780,41 @@ app.get(
 
 /**
  * @openapi
+ * /airports/{icao}/contribution-policy:
+ *   get:
+ *     summary: Get airport contribution policy
+ *     tags:
+ *       - Airports
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string, minLength: 4, maxLength: 4 }
+ *     responses:
+ *       200:
+ *         description: Contribution policy returned
+ *       400:
+ *         description: Invalid ICAO
+ */
+app.get('/airports/:icao/contribution-policy', async (c) => {
+	const icao = c.req.param('icao').toUpperCase();
+	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+		return c.text('Invalid airport ICAO format', 400);
+	}
+
+	const divisions = ServicePool.getDivisions(c.env);
+	const policy = await divisions.getContributionPolicyForAirport(icao);
+	return c.json({
+		managed: policy !== null,
+		divisionId: policy?.division_id ?? null,
+		divisionName: policy?.division_name ?? null,
+		icao,
+		contributionsEnabled: policy?.contributions_enabled ?? false,
+	});
+});
+
+/**
+ * @openapi
  * /airports/nearest:
  *   get:
  *     summary: Find nearest airport
@@ -2473,6 +2512,71 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 
 	const { approved } = (await c.req.json()) as ApproveAirportPayload;
 	const airport = await divisions.approveAirport(airportId, vatsimUser.id, approved);
+	return c.json(airport);
+});
+
+/**
+ * @openapi
+ * /divisions/{id}/airports/{airportId}/contributions:
+ *   patch:
+ *     summary: Update airport contribution availability
+ *     tags:
+ *       - Divisions
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: airportId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [contributionsEnabled]
+ *             properties:
+ *               contributionsEnabled:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Contribution setting updated
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Division or airport request not found
+ */
+divisionsApp.patch('/:id/airports/:airportId/contributions', async (c) => {
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	const divisionId = parseInt(c.req.param('id'));
+	const airportId = parseInt(c.req.param('airportId'));
+	const vatsim = ServicePool.getVatsim(c.env);
+	const divisions = ServicePool.getDivisions(c.env);
+
+	const division = await divisions.getDivision(divisionId);
+	if (!division) {
+		return c.text('Division not found', 404);
+	}
+
+	const vatsimUser = await vatsim.getUser(vatsimToken);
+	const payload = (await c.req.json()) as UpdateAirportContributionsPayload;
+	if (typeof payload.contributionsEnabled !== 'boolean') {
+		return c.json({ error: 'contributionsEnabled must be a boolean' }, 400);
+	}
+
+	const airport = await divisions.updateAirportContributionsEnabled(
+		divisionId,
+		airportId,
+		vatsimUser.id,
+		payload.contributionsEnabled,
+	);
 	return c.json(airport);
 });
 
@@ -3852,6 +3956,7 @@ staffDivisionsApp.get('/airports', async (c) => {
 		status: airport.status,
 		requested_by: airport.requested_by,
 		approved_by: airport.approved_by ?? null,
+		contributions_enabled: airport.contributions_enabled,
 	}));
 	return c.json({ airports: shaped });
 });

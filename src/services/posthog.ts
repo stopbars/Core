@@ -36,7 +36,7 @@ export class PostHogService {
 
 	constructor(env: Env) {
 		this.apiKey = (env as unknown as { POSTHOG_API_KEY?: string }).POSTHOG_API_KEY;
-		this.host = (env as unknown as { POSTHOG_HOST?: string }).POSTHOG_HOST || 'https://eu.i.posthog.com';
+		this.host = (env as unknown as { POSTHOG_HOST?: string }).POSTHOG_HOST || 'https://a.stopbars.com';
 		this.enabled = !!this.apiKey;
 	}
 

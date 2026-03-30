@@ -24,12 +24,33 @@ interface DivisionAirport {
 	requested_by: string;
 	approved_by?: string;
 	has_objects: boolean;
+	contributions_enabled: boolean;
 	created_at: string;
 	updated_at: string;
 }
 
 type DivisionAirportWithDivision = DivisionAirport & {
 	division_name: string;
+};
+
+type DivisionAirportRow = {
+	id: number | null;
+	division_id: number | null;
+	icao: string | null;
+	status: 'pending' | 'approved' | 'rejected' | null;
+	requested_by: string | null;
+	approved_by?: string | null;
+	has_objects: number | null;
+	contributions_enabled: number | null;
+	created_at: string | null;
+	updated_at: string | null;
+};
+
+type AirportContributionPolicy = {
+	division_id: number;
+	division_name: string;
+	icao: string;
+	contributions_enabled: boolean;
 };
 
 export class DivisionService {
@@ -40,6 +61,103 @@ export class DivisionService {
 		private posthog?: PostHogService,
 	) {
 		this.dbSession = new DatabaseSessionService(db);
+	}
+
+	private normalizeIcao(icao: string): string {
+		return icao.toUpperCase().replace(/[^A-Z0-9]/g, '');
+	}
+
+	private mapDivisionAirportRow(row: DivisionAirportRow): DivisionAirport | null {
+		if (
+			row.id === null ||
+			row.division_id === null ||
+			row.icao === null ||
+			row.status === null ||
+			row.requested_by === null ||
+			row.has_objects === null ||
+			row.contributions_enabled === null ||
+			row.created_at === null ||
+			row.updated_at === null
+		) {
+			return null;
+		}
+
+		return {
+			id: row.id,
+			division_id: row.division_id,
+			icao: row.icao,
+			status: row.status,
+			requested_by: row.requested_by,
+			approved_by: row.approved_by ?? undefined,
+			has_objects: row.has_objects === 1,
+			contributions_enabled: row.contributions_enabled === 1,
+			created_at: row.created_at,
+			updated_at: row.updated_at,
+		};
+	}
+
+	private async getDivisionAirportById(divisionId: number, airportId: number): Promise<DivisionAirport | null> {
+		const result = await this.dbSession.executeRead<DivisionAirportRow>(
+			`SELECT
+				da.id,
+				da.division_id,
+				da.icao,
+				da.status,
+				da.requested_by,
+				da.approved_by,
+				CASE
+					WHEN po.airport_id IS NOT NULL THEN 1
+					ELSE 0
+				END AS has_objects,
+				da.contributions_enabled,
+				da.created_at,
+				da.updated_at
+			FROM division_airports da
+			LEFT JOIN (
+				SELECT DISTINCT airport_id FROM points
+			) po ON po.airport_id = da.icao
+			WHERE da.division_id = ? AND da.id = ?
+			LIMIT 1`,
+			[divisionId, airportId],
+		);
+
+		const row = result.results[0];
+		return row ? this.mapDivisionAirportRow(row) : null;
+	}
+
+	private async ensureAirportOwnershipAvailable(icao: string, divisionId: number, excludeAirportId?: number): Promise<void> {
+		const params: Array<string | number> = [icao, divisionId];
+		let query = `
+			SELECT da.status, d.name AS division_name
+			FROM division_airports da
+			JOIN divisions d ON d.id = da.division_id
+			WHERE da.icao = ?
+			AND da.division_id != ?
+			AND da.status IN ('pending', 'approved')
+		`;
+
+		if (typeof excludeAirportId === 'number') {
+			query += ' AND da.id != ?';
+			params.push(excludeAirportId);
+		}
+
+		query += ' LIMIT 1';
+
+		const result = await this.dbSession.executeRead<{
+			status: 'pending' | 'approved';
+			division_name: string | null;
+		}>(query, params);
+		const conflict = result.results[0];
+		if (!conflict) {
+			return;
+		}
+
+		const divisionName = conflict.division_name ?? 'another division';
+		if (conflict.status === 'approved') {
+			throw new HttpError(409, `Airport ${icao} is already owned by ${divisionName}`);
+		}
+
+		throw new HttpError(409, `Airport ${icao} already has a pending ownership request from ${divisionName}`);
 	}
 
 	async createDivision(name: string, headVatsimId: string): Promise<Division> {
@@ -140,39 +258,63 @@ export class DivisionService {
 	async requestAirport(divisionId: number, icao: string, requestedBy: string): Promise<DivisionAirport> {
 		const role = await this.getMemberRole(divisionId, requestedBy);
 		if (!role) throw new HttpError(403, 'Forbidden: User is not a member of this division');
+		const normalizedIcao = this.normalizeIcao(icao);
+		await this.ensureAirportOwnershipAvailable(normalizedIcao, divisionId);
 
 		const result = await this.dbSession.executeWrite(
 			'INSERT INTO division_airports (division_id, icao, requested_by) VALUES (?, ?, ?) RETURNING *',
-			[divisionId, icao, requestedBy],
+			[divisionId, normalizedIcao, requestedBy],
 		);
 
-		const rows = result.results as unknown as DivisionAirport[] | null;
+		const rows = result.results as Array<{ id: number }> | null;
 		const request = rows && rows[0];
 		if (!request) throw new Error('Failed to create airport request');
+		const divisionAirport = await this.getDivisionAirportById(divisionId, request.id);
+		if (!divisionAirport) throw new Error('Failed to load airport request');
 		try {
-			this.posthog?.track('Division Airport Access Requested', { divisionId, icao, requestedBy });
+			this.posthog?.track('Division Airport Access Requested', { divisionId, icao: normalizedIcao, requestedBy });
 		} catch (e) {
 			console.warn('Posthog track failed (Division Airport Access Requested)', e);
 		}
-		return request;
+		return divisionAirport;
 	}
 	async requestAirportAsStaff(divisionId: number, icao: string, requestedBy: string): Promise<DivisionAirport> {
+		const normalizedIcao = this.normalizeIcao(icao);
+		await this.ensureAirportOwnershipAvailable(normalizedIcao, divisionId);
+
 		const result = await this.dbSession.executeWrite(
 			'INSERT INTO division_airports (division_id, icao, requested_by) VALUES (?, ?, ?) RETURNING *',
-			[divisionId, icao, requestedBy],
+			[divisionId, normalizedIcao, requestedBy],
 		);
 
-		const rows = result.results as unknown as DivisionAirport[] | null;
+		const rows = result.results as Array<{ id: number }> | null;
 		const request = rows && rows[0];
 		if (!request) throw new Error('Failed to create airport request');
+		const divisionAirport = await this.getDivisionAirportById(divisionId, request.id);
+		if (!divisionAirport) throw new Error('Failed to load airport request');
 		try {
-			this.posthog?.track('Division Airport Access Requested', { divisionId, icao, requestedBy, privileged: true });
+			this.posthog?.track('Division Airport Access Requested', {
+				divisionId,
+				icao: normalizedIcao,
+				requestedBy,
+				privileged: true,
+			});
 		} catch (e) {
 			console.warn('Posthog track failed (Division Airport Access Requested)', e);
 		}
-		return request;
+		return divisionAirport;
 	}
 	async approveAirport(airportId: number, approvedBy: string, approved: boolean): Promise<DivisionAirport> {
+		const existingResult = await this.dbSession.executeRead<{ division_id: number; icao: string }>(
+			'SELECT division_id, icao FROM division_airports WHERE id = ?',
+			[airportId],
+		);
+		const existing = existingResult.results[0];
+		if (!existing) throw new HttpError(404, 'Airport request not found');
+		if (approved) {
+			await this.ensureAirportOwnershipAvailable(existing.icao, existing.division_id, airportId);
+		}
+
 		const result = await this.dbSession.executeWrite(
 			`
             UPDATE division_airports 
@@ -183,8 +325,9 @@ export class DivisionService {
 			[approved ? 'approved' : 'rejected', approvedBy, airportId],
 		);
 
-		const rows = result.results as unknown as DivisionAirport[] | null;
-		const airport = rows && rows[0];
+		const rows = result.results as Array<{ id: number }> | null;
+		const updatedAirport = rows && rows[0];
+		const airport = updatedAirport ? await this.getDivisionAirportById(existing.division_id, updatedAirport.id) : null;
 		if (!airport) throw new Error('Airport request not found');
 		try {
 			this.posthog?.track(approved ? 'Division Airport Request Approved' : 'Division Airport Request Rejected', {
@@ -195,6 +338,59 @@ export class DivisionService {
 		} catch (e) {
 			console.warn('Posthog track failed (Approve Airport)', e);
 		}
+		return airport;
+	}
+
+	async updateAirportContributionsEnabled(
+		divisionId: number,
+		airportId: number,
+		requesterId: string,
+		contributionsEnabled: boolean,
+	): Promise<DivisionAirport> {
+		const role = await this.getMemberRole(divisionId, requesterId);
+		if (!role) {
+			throw new HttpError(403, 'Forbidden: User is not a member of this division');
+		}
+
+		const existing = await this.getDivisionAirportById(divisionId, airportId);
+		if (!existing) {
+			throw new HttpError(404, 'Airport request not found');
+		}
+		if (existing.status !== 'approved') {
+			throw new HttpError(400, 'Only approved airports can update contribution settings');
+		}
+
+		const result = await this.dbSession.executeWrite(
+			`
+			UPDATE division_airports
+			SET contributions_enabled = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND division_id = ?
+			RETURNING id
+			`,
+			[contributionsEnabled ? 1 : 0, airportId, divisionId],
+		);
+		const rows = result.results as Array<{ id: number }> | null;
+		const updated = rows?.[0];
+		if (!updated) {
+			throw new Error('Failed to update contribution setting');
+		}
+
+		const airport = await this.getDivisionAirportById(divisionId, updated.id);
+		if (!airport) {
+			throw new Error('Failed to load updated airport request');
+		}
+
+		try {
+			this.posthog?.track('Division Airport Contribution Setting Updated', {
+				divisionId,
+				airportId,
+				requesterId,
+				contributionsEnabled,
+			});
+		} catch (e) {
+			console.warn('Posthog track failed (Division Airport Contribution Setting Updated)', e);
+		}
+
 		return airport;
 	}
 
@@ -247,20 +443,11 @@ export class DivisionService {
 	}
 
 	async getDivisionAirports(divisionId: number): Promise<DivisionAirport[] | null> {
-		type DivisionAirportRow = {
+		type DivisionAirportWithExistenceRow = DivisionAirportRow & {
 			division_exists: number | null;
-			id: number | null;
-			division_id: number | null;
-			icao: string | null;
-			status: 'pending' | 'approved' | 'rejected' | null;
-			requested_by: string | null;
-			approved_by?: string | null;
-			has_objects: number | null;
-			created_at: string | null;
-			updated_at: string | null;
 		};
 
-		const result = await this.dbSession.executeRead<DivisionAirportRow>(
+		const result = await this.dbSession.executeRead<DivisionAirportWithExistenceRow>(
 			`SELECT
 				d.id AS division_exists,
 				da.id,
@@ -273,6 +460,7 @@ export class DivisionService {
 					WHEN po.airport_id IS NOT NULL THEN 1
 					ELSE 0
 				END AS has_objects,
+				da.contributions_enabled,
 				da.created_at,
 				da.updated_at
 			FROM divisions d
@@ -290,46 +478,14 @@ export class DivisionService {
 		}
 
 		return result.results
-			.filter(
-				(
-					row,
-				): row is DivisionAirportRow & {
-					id: number;
-					division_id: number;
-					icao: string;
-					status: 'pending' | 'approved' | 'rejected';
-					requested_by: string;
-					has_objects: number;
-					created_at: string;
-					updated_at: string;
-				} =>
-					row.id !== null &&
-					row.division_id !== null &&
-					row.icao !== null &&
-					row.status !== null &&
-					row.requested_by !== null &&
-					row.has_objects !== null &&
-					row.created_at !== null &&
-					row.updated_at !== null,
-			)
-			.map((row) => ({
-				id: row.id,
-				division_id: row.division_id,
-				icao: row.icao,
-				status: row.status,
-				requested_by: row.requested_by,
-				approved_by: row.approved_by ?? undefined,
-				has_objects: row.has_objects === 1,
-				created_at: row.created_at,
-				updated_at: row.updated_at,
-			}));
+			.map((row) => this.mapDivisionAirportRow(row))
+			.filter((row): row is DivisionAirport => row !== null);
 	}
 
 	async getAllDivisionAirports(): Promise<DivisionAirportWithDivision[]> {
 		const result = await this.dbSession.executeRead<
-			Omit<DivisionAirportWithDivision, 'has_objects'> & {
+			DivisionAirportRow & {
 				division_name: string | null;
-				has_objects: number | null;
 			}
 		>(
 			`SELECT
@@ -344,6 +500,7 @@ export class DivisionService {
 					WHEN po.airport_id IS NOT NULL THEN 1
 					ELSE 0
 				END AS has_objects,
+				da.contributions_enabled,
 				da.created_at,
 				da.updated_at
 			FROM division_airports da
@@ -354,18 +511,19 @@ export class DivisionService {
 			ORDER BY d.name ASC, da.created_at DESC`,
 		);
 
-		return result.results.map((row) => ({
-			id: row.id,
-			division_id: row.division_id,
-			division_name: row.division_name ?? '',
-			icao: row.icao,
-			status: row.status,
-			requested_by: row.requested_by,
-			approved_by: row.approved_by ?? undefined,
-			has_objects: row.has_objects === 1,
-			created_at: row.created_at,
-			updated_at: row.updated_at,
-		}));
+		return result.results
+			.map((row) => {
+				const airport = this.mapDivisionAirportRow(row);
+				if (!airport) {
+					return null;
+				}
+
+				return {
+					...airport,
+					division_name: row.division_name ?? '',
+				};
+			})
+			.filter((row): row is DivisionAirportWithDivision => row !== null);
 	}
 
 	async getDivisionMembers(divisionId: number): Promise<(DivisionMember & { display_name: string })[] | null> {
@@ -439,6 +597,40 @@ export class DivisionService {
 			[vatsimId],
 		);
 		return result.results;
+	}
+	async getContributionPolicyForAirport(airportIcao: string): Promise<AirportContributionPolicy | null> {
+		const normalizedIcao = this.normalizeIcao(airportIcao);
+		const result = await this.dbSession.executeRead<{
+			division_id: number;
+			division_name: string | null;
+			icao: string;
+			contributions_enabled: number;
+		}>(
+			`
+			SELECT
+				da.division_id,
+				d.name AS division_name,
+				da.icao,
+				da.contributions_enabled
+			FROM division_airports da
+			JOIN divisions d ON d.id = da.division_id
+			WHERE da.icao = ?
+			AND da.status = 'approved'
+			LIMIT 1
+			`,
+			[normalizedIcao],
+		);
+		const row = result.results[0];
+		if (!row) {
+			return null;
+		}
+
+		return {
+			division_id: row.division_id,
+			division_name: row.division_name ?? '',
+			icao: row.icao,
+			contributions_enabled: row.contributions_enabled === 1,
+		};
 	}
 	async userHasAirportAccess(userId: string, airportIcao: string): Promise<boolean> {
 		const result = await this.dbSession.executeRead<{ id: number }>(

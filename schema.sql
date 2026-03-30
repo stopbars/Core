@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS division_airports (
   ) NOT NULL DEFAULT 'pending',
   requested_by TEXT NOT NULL,
   approved_by TEXT,
+  contributions_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (
