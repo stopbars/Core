@@ -655,6 +655,32 @@
 				}
 			}
 		},
+		"/airports/{icao}/contribution-policy": {
+			"get": {
+				"summary": "Get airport contribution policy",
+				"tags": ["Airports"],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "icao",
+						"required": true,
+						"schema": {
+							"type": "string",
+							"minLength": 4,
+							"maxLength": 4
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Contribution policy returned"
+					},
+					"400": {
+						"description": "Invalid ICAO"
+					}
+				}
+			}
+		},
 		"/airports/nearest": {
 			"get": {
 				"summary": "Find nearest airport",
@@ -1155,6 +1181,62 @@
 					},
 					"403": {
 						"description": "Forbidden"
+					}
+				}
+			}
+		},
+		"/divisions/{id}/airports/{airportId}/contributions": {
+			"patch": {
+				"summary": "Update airport contribution availability",
+				"tags": ["Divisions"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					},
+					{
+						"in": "path",
+						"name": "airportId",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["contributionsEnabled"],
+								"properties": {
+									"contributionsEnabled": {
+										"type": "boolean"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Contribution setting updated"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "Division or airport request not found"
 					}
 				}
 			}
@@ -2042,6 +2124,12 @@
 							"type": "boolean"
 						},
 						"description": "Include aggregate counts for contribution statuses when true."
+					},
+					{
+						"in": "header",
+						"name": "Authorization",
+						"required": false,
+						"description": "Bearer API key. When provided, returns only that user's contributions and includes summary counts."
 					}
 				],
 				"responses": {
@@ -2588,6 +2676,43 @@
 				"responses": {
 					"200": {
 						"description": "Profiles listed"
+					}
+				}
+			}
+		},
+		"/vatsys/profiles/generate": {
+			"post": {
+				"summary": "Generate vatSys profiles from BARS airport data",
+				"tags": ["vatSys"],
+				"security": [
+					{
+						"ApiKeyAuth": []
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["icao"],
+								"properties": {
+									"icao": {
+										"type": "string",
+										"minLength": 4,
+										"maxLength": 4
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Generated legacy or INTAS profiles"
+					},
+					"401": {
+						"description": "Unauthorized"
 					}
 				}
 			}
