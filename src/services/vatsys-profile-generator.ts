@@ -82,6 +82,12 @@ type ProfileAxis = {
 	bearing: number;
 };
 
+type AxisProjection = {
+	originLatCos: number;
+	unitEast: number;
+	unitNorth: number;
+};
+
 type ProjectedPoint = {
 	point: ParsedPoint;
 	runwayId: number;
@@ -113,6 +119,13 @@ type StopbarBoundaryPoint = {
 type StopbarRunwayExclusionArea = {
 	axis: ProfileAxis;
 	polygon: StopbarBoundaryPoint[];
+};
+
+type GeoBounds = {
+	minLat: number;
+	minLon: number;
+	maxLat: number;
+	maxLon: number;
 };
 
 export type GeneratedVatSysProfile = {
@@ -151,6 +164,8 @@ export class VatSysProfileGeneratorService {
 	private static readonly INTAS_LEAD_ON_EXCLUSION_METERS = 10;
 	private static readonly INTAS_LEAD_ON_END_EXCLUSION_METERS = 20;
 
+	private readonly axisProjectionCache = new WeakMap<ProfileAxis, AxisProjection>();
+
 	constructor(private db: D1Database) { }
 
 	async generate(icao: string): Promise<VatSysProfileGenerationResult> {
@@ -188,8 +203,11 @@ export class VatSysProfileGeneratorService {
 			}
 
 			const towerPosition = this.getTowerPosition(runways);
+			const runwayAxes = this.buildRunwayAxisCache(runways, towerPosition);
+			const linkedLeadOns = this.buildLeadOnLookup(leadOns);
+			const bestRunwayMatches = this.buildBestRunwayMatchLookup(stopbars, runways, towerPosition, runwayAxes);
 			const profiles = runways.map((runway) =>
-				this.generateLegacyProfile(normalizedIcao, runway, runways, towerPosition, stopbars, leadOns),
+				this.generateLegacyProfile(normalizedIcao, runway, runways, towerPosition, stopbars, linkedLeadOns, runwayAxes, bestRunwayMatches),
 			);
 			const warnings = profiles.flatMap((profile) => profile.warnings.map((warning) => `${profile.filename}: ${warning}`));
 
@@ -276,9 +294,11 @@ export class VatSysProfileGeneratorService {
 		allRunways: RunwayRow[],
 		towerPosition: GeoPoint,
 		stopbars: ParsedPoint[],
-		leadOns: ParsedPoint[],
+		linkedLeadOns: Map<string, ParsedPoint[]>,
+		runwayAxes: Map<number, ProfileAxis>,
+		bestRunwayMatches: Map<string, ProjectedPoint>,
 	): GeneratedVatSysProfile {
-		const axis = this.getRunwayAxis(runway, towerPosition);
+		const axis = runwayAxes.get(runway.id) ?? this.getRunwayAxis(runway, towerPosition);
 		if (!axis) {
 			throw new HttpError(422, `Runway ${runway.le_ident}/${runway.he_ident} has invalid geometry`);
 		}
@@ -286,10 +306,15 @@ export class VatSysProfileGeneratorService {
 		const leftEndName = axis.leftEndName;
 		const rightEndName = axis.rightEndName;
 		const crossbar = this.getCrossbarConfig(runway, allRunways, axis, stopbars);
-		const linkedLeadOns = this.buildLeadOnLookup(leadOns);
-		const projectedStopbars = this.getStopbarsForRunway(runway, allRunways, towerPosition, stopbars, linkedLeadOns).filter(
-			(stopbar) => !this.isCrossbarPoint(stopbar.point, crossbar),
-		);
+		const projectedStopbars = this.getStopbarsForRunway(
+			runway,
+			allRunways,
+			towerPosition,
+			stopbars,
+			linkedLeadOns,
+			runwayAxes,
+			bestRunwayMatches,
+		).filter((stopbar) => !this.isCrossbarPoint(stopbar.point, crossbar));
 
 		const warnings: string[] = [];
 		if (projectedStopbars.length === 0) {
@@ -590,24 +615,25 @@ export class VatSysProfileGeneratorService {
 				}
 
 				const json = (await response.json()) as OverpassResponse;
-				const taxiwayLines =
-					json.elements
-						?.filter((element) => element.type === 'way' && element.tags?.aeroway === 'taxiway' && Array.isArray(element.geometry))
-						.map((element) =>
-							this.normalizeTaxiwayLine(
-								element.geometry!.map((point) => ({
-									lat: point.lat,
-									lon: point.lon,
-								})),
-							),
-						)
-						.filter((line): line is GeoPoint[] => line !== null) ?? [];
-				const windsocks = this.deduplicatePoints(
-					json.elements
-						?.filter((element) => element.tags?.aeroway === 'windsock')
-						.map((element) => this.getOsmElementPoint(element))
-						.filter((point): point is GeoPoint => point !== null) ?? [],
-				);
+				const taxiwayLines: GeoPoint[][] = [];
+				const windSockPoints: GeoPoint[] = [];
+				for (const element of json.elements ?? []) {
+					if (element.type === 'way' && element.tags?.aeroway === 'taxiway' && Array.isArray(element.geometry)) {
+						const line = this.normalizeTaxiwayLine(element.geometry.map((point) => ({ lat: point.lat, lon: point.lon })));
+						if (line) {
+							taxiwayLines.push(line);
+						}
+						continue;
+					}
+
+					if (element.tags?.aeroway === 'windsock') {
+						const point = this.getOsmElementPoint(element);
+						if (point) {
+							windSockPoints.push(point);
+						}
+					}
+				}
+				const windsocks = this.deduplicatePoints(windSockPoints);
 
 				return { taxiwayLines, windsocks };
 			} catch (error) {
@@ -689,11 +715,12 @@ export class VatSysProfileGeneratorService {
 			for (let index = 0; index < line.length - 1; index++) {
 				const start = line[index];
 				const end = line[index + 1];
-				if (calculateDistance(start, end) < VatSysProfileGeneratorService.INTAS_MIN_TAXIWAY_FRAGMENT_METERS) {
+				const segmentLength = calculateDistance(start, end);
+				if (segmentLength < VatSysProfileGeneratorService.INTAS_MIN_TAXIWAY_FRAGMENT_METERS) {
 					continue;
 				}
 
-				const keptRanges = this.getTaxiwaySegmentKeptRanges(start, end, runwayExclusionAreas);
+				const keptRanges = this.getTaxiwaySegmentKeptRanges(start, end, runwayExclusionAreas, segmentLength);
 				for (const range of keptRanges) {
 					const rangeStart = this.interpolateGeoPoint(start, end, range.start);
 					const rangeEnd = this.interpolateGeoPoint(start, end, range.end);
@@ -729,21 +756,24 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private removeTinyDisconnectedTaxiways(lines: GeoPoint[][]): GeoPoint[][] {
+		const lengths = lines.map((line) => this.getTaxiwayLineLength(line));
+		const bounds = lines.map((line) => this.getExpandedGeoBounds(line, 5));
 		return lines.filter((line, lineIndex) => {
-			if (this.getTaxiwayLineLength(line) >= VatSysProfileGeneratorService.INTAS_TINY_DISCONNECTED_TAXIWAY_METERS) {
+			if (lengths[lineIndex] >= VatSysProfileGeneratorService.INTAS_TINY_DISCONNECTED_TAXIWAY_METERS) {
 				return true;
 			}
 
-			return this.isTaxiwayLineConnected(line, lineIndex, lines);
+			return this.isTaxiwayLineConnected(line, lineIndex, lines, bounds);
 		});
 	}
 
-	private isTaxiwayLineConnected(line: GeoPoint[], lineIndex: number, allLines: GeoPoint[][]): boolean {
+	private isTaxiwayLineConnected(line: GeoPoint[], lineIndex: number, allLines: GeoPoint[][], allBounds: GeoBounds[]): boolean {
 		const endpoints = [line[0], line[line.length - 1]].filter((point): point is GeoPoint => point !== undefined);
 		return endpoints.some((endpoint) =>
 			allLines.some(
 				(candidateLine, candidateIndex) =>
 					candidateIndex !== lineIndex &&
+					this.isPointWithinBounds(endpoint, allBounds[candidateIndex]) &&
 					candidateLine.some(
 						(candidatePoint) =>
 							calculateDistance(endpoint, candidatePoint) <=
@@ -751,6 +781,37 @@ export class VatSysProfileGeneratorService {
 					),
 			),
 		);
+	}
+
+	private getExpandedGeoBounds(points: GeoPoint[], paddingMeters: number): GeoBounds {
+		let minLat = Infinity;
+		let minLon = Infinity;
+		let maxLat = -Infinity;
+		let maxLon = -Infinity;
+
+		for (const point of points) {
+			minLat = Math.min(minLat, point.lat);
+			minLon = Math.min(minLon, point.lon);
+			maxLat = Math.max(maxLat, point.lat);
+			maxLon = Math.max(maxLon, point.lon);
+		}
+
+		const metersPerDegreeLat = 111_320;
+		const maxAbsLat = Math.max(Math.abs(minLat), Math.abs(maxLat));
+		const metersPerDegreeLon = Math.max(1, metersPerDegreeLat * Math.cos((maxAbsLat * Math.PI) / 180));
+		const latPadding = paddingMeters / metersPerDegreeLat;
+		const lonPadding = paddingMeters / metersPerDegreeLon;
+
+		return {
+			minLat: minLat - latPadding,
+			minLon: minLon - lonPadding,
+			maxLat: maxLat + latPadding,
+			maxLon: maxLon + lonPadding,
+		};
+	}
+
+	private isPointWithinBounds(point: GeoPoint, bounds: GeoBounds): boolean {
+		return point.lat >= bounds.minLat && point.lat <= bounds.maxLat && point.lon >= bounds.minLon && point.lon <= bounds.maxLon;
 	}
 
 	private getTaxiwayLineLength(line: GeoPoint[]): number {
@@ -764,8 +825,8 @@ export class VatSysProfileGeneratorService {
 		start: GeoPoint,
 		end: GeoPoint,
 		runwayExclusionAreas: StopbarRunwayExclusionArea[],
+		segmentLength = calculateDistance(start, end),
 	): Array<{ start: number; end: number }> {
-		const segmentLength = calculateDistance(start, end);
 		if (segmentLength < VatSysProfileGeneratorService.INTAS_MIN_TAXIWAY_FRAGMENT_METERS) {
 			return [];
 		}
@@ -797,11 +858,13 @@ export class VatSysProfileGeneratorService {
 		leadOns: ParsedPoint[],
 	): StopbarRunwayExclusionArea[] {
 		const towerPosition = this.getTowerPosition(runways);
+		const runwayAxes = this.buildRunwayAxisCache(runways, towerPosition);
 		const linkedLeadOns = this.buildLeadOnLookup(leadOns);
+		const bestRunwayMatches = this.buildBestRunwayMatchLookup(stopbars, runways, towerPosition, runwayAxes);
 		const areas: StopbarRunwayExclusionArea[] = [];
 
 		for (const runway of runways) {
-			const axis = this.getRunwayAxis(runway, towerPosition);
+			const axis = runwayAxes.get(runway.id) ?? this.getRunwayAxis(runway, towerPosition);
 			if (!axis) continue;
 
 			const runwayWidthMeters = Number.parseFloat(runway.width_ft) * 0.3048;
@@ -811,7 +874,15 @@ export class VatSysProfileGeneratorService {
 				polygon: this.buildRunwayPavementPolygon(axis, halfWidthMeters),
 			});
 
-			const matchedStopbars = this.getStopbarsForRunway(runway, runways, towerPosition, stopbars, linkedLeadOns);
+			const matchedStopbars = this.getStopbarsForRunway(
+				runway,
+				runways,
+				towerPosition,
+				stopbars,
+				linkedLeadOns,
+				runwayAxes,
+				bestRunwayMatches,
+			);
 			for (const stopbar of matchedStopbars) {
 				const polygon = this.buildStopbarRunwaySidePolygon(stopbar.point, axis, halfWidthMeters);
 				if (polygon.length >= 3) {
@@ -899,10 +970,19 @@ export class VatSysProfileGeneratorService {
 		}
 
 		const ranges: Array<{ start: number; end: number }> = [];
+		const projectedByAxis = new Map<ProfileAxis, { start: StopbarBoundaryPoint; end: StopbarBoundaryPoint }>();
 
 		for (const runway of runwayExclusionAreas) {
-			const projectedStart = this.projectToAxis(start, runway.axis);
-			const projectedEnd = this.projectToAxis(end, runway.axis);
+			let projected = projectedByAxis.get(runway.axis);
+			if (!projected) {
+				projected = {
+					start: this.projectToAxis(start, runway.axis),
+					end: this.projectToAxis(end, runway.axis),
+				};
+				projectedByAxis.set(runway.axis, projected);
+			}
+			const projectedStart = projected.start;
+			const projectedEnd = projected.end;
 			const intersections = this.getLinePolygonIntersectionTs(projectedStart, projectedEnd, runway.polygon);
 			const splitTs = [...new Set([0, 1, ...intersections].map((value) => Number(value.toFixed(6))))]
 				.sort((a, b) => a - b);
@@ -1040,9 +1120,17 @@ export class VatSysProfileGeneratorService {
 	private getOsmElementPoint(element: { lat?: number; lon?: number; geometry?: Array<{ lat?: number; lon?: number }> }): GeoPoint | null {
 		const nodePoint = this.normalizeGeoPoint({ lat: element.lat, lon: element.lon });
 		if (nodePoint) return nodePoint;
-		const geometry = element.geometry ?? [];
-		const points = geometry.map((point) => this.normalizeGeoPoint(point)).filter((point): point is GeoPoint => point !== null);
-		return points.length > 0 ? this.getMidpoint(points) : null;
+		let latTotal = 0;
+		let lonTotal = 0;
+		let pointCount = 0;
+		for (const point of element.geometry ?? []) {
+			const normalized = this.normalizeGeoPoint(point);
+			if (!normalized) continue;
+			latTotal += normalized.lat;
+			lonTotal += normalized.lon;
+			pointCount++;
+		}
+		return pointCount > 0 ? { lat: latTotal / pointCount, lon: lonTotal / pointCount } : null;
 	}
 
 	private deduplicatePoints(points: GeoPoint[]): GeoPoint[] {
@@ -1076,16 +1164,16 @@ export class VatSysProfileGeneratorService {
 		try {
 			const parsed = JSON.parse(rawCoordinates) as unknown;
 			const rawPoints = Array.isArray(parsed) ? parsed : [parsed];
-			return rawPoints
-				.map((value) => {
-					if (!value || typeof value !== 'object') return null;
-					const point = value as { lat?: unknown; lng?: unknown; lon?: unknown };
-					const lat = typeof point.lat === 'number' ? point.lat : null;
-					const lon = typeof point.lng === 'number' ? point.lng : typeof point.lon === 'number' ? point.lon : null;
-					if (lat === null || lon === null || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-					return { lat, lon };
-				})
-				.filter((point): point is GeoPoint => point !== null);
+			const coordinates: GeoPoint[] = [];
+			for (const value of rawPoints) {
+				if (!value || typeof value !== 'object') continue;
+				const point = value as { lat?: unknown; lng?: unknown; lon?: unknown };
+				const lat = typeof point.lat === 'number' ? point.lat : null;
+				const lon = typeof point.lng === 'number' ? point.lng : typeof point.lon === 'number' ? point.lon : null;
+				if (lat === null || lon === null || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+				coordinates.push({ lat, lon });
+			}
+			return coordinates;
 		} catch {
 			return [];
 		}
@@ -1216,12 +1304,41 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private getTowerPosition(runways: RunwayRow[]): GeoPoint {
-		const runwayPoints = runways.flatMap((runway) => {
+		const runwayPoints: GeoPoint[] = [];
+		for (const runway of runways) {
 			const leEnd = this.parseRunwayPoint(runway.le_latitude_deg, runway.le_longitude_deg);
 			const heEnd = this.parseRunwayPoint(runway.he_latitude_deg, runway.he_longitude_deg);
-			return [leEnd, heEnd].filter((point): point is GeoPoint => point !== null);
-		});
+			if (leEnd) runwayPoints.push(leEnd);
+			if (heEnd) runwayPoints.push(heEnd);
+		}
 		return this.getMidpoint(runwayPoints);
+	}
+
+	private buildRunwayAxisCache(runways: RunwayRow[], towerPosition: GeoPoint): Map<number, ProfileAxis> {
+		const axes = new Map<number, ProfileAxis>();
+		for (const runway of runways) {
+			const axis = this.getRunwayAxis(runway, towerPosition);
+			if (axis) {
+				axes.set(runway.id, axis);
+			}
+		}
+		return axes;
+	}
+
+	private buildBestRunwayMatchLookup(
+		stopbars: ParsedPoint[],
+		runways: RunwayRow[],
+		towerPosition: GeoPoint,
+		runwayAxes: Map<number, ProfileAxis>,
+	): Map<string, ProjectedPoint> {
+		const lookup = new Map<string, ProjectedPoint>();
+		for (const stopbar of stopbars) {
+			const match = this.getBestRunwayMatch(stopbar, runways, towerPosition, runwayAxes);
+			if (match) {
+				lookup.set(stopbar.id, match);
+			}
+		}
+		return lookup;
 	}
 
 	private getStopbarsForRunway(
@@ -1230,13 +1347,15 @@ export class VatSysProfileGeneratorService {
 		towerPosition: GeoPoint,
 		stopbars: ParsedPoint[],
 		linkedLeadOns: Map<string, ParsedPoint[]>,
+		runwayAxes?: Map<number, ProfileAxis>,
+		bestRunwayMatches?: Map<string, ProjectedPoint>,
 	): ProjectedPoint[] {
-		const selectedAxis = this.getRunwayAxis(selectedRunway, towerPosition);
+		const selectedAxis = runwayAxes?.get(selectedRunway.id) ?? this.getRunwayAxis(selectedRunway, towerPosition);
 		if (!selectedAxis) return [];
 
 		return stopbars
 			.map((stopbar) => {
-				const bestMatch = this.getBestRunwayMatch(stopbar, allRunways, towerPosition);
+				const bestMatch = bestRunwayMatches?.get(stopbar.id) ?? this.getBestRunwayMatch(stopbar, allRunways, towerPosition, runwayAxes);
 				if (bestMatch?.runwayId === selectedRunway.id) {
 					return bestMatch;
 				}
@@ -1275,18 +1394,24 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private getLeadOnRunwayTouchProjection(linkedLeadOns: ParsedPoint[], axis: ProfileAxis): { x: number; y: number } | null {
-		const touches = linkedLeadOns
-			.flatMap((leadOn) => this.getLeadOnEndpoints(leadOn))
-			.map((endpoint) => this.projectToAxis(endpoint, axis))
-			.filter(
-				(projected) =>
-					projected.x >= -VatSysProfileGeneratorService.LEAD_ON_RUNWAY_TOUCH_DISTANCE_METERS &&
-					projected.x <= axis.lengthMeters + VatSysProfileGeneratorService.LEAD_ON_RUNWAY_TOUCH_DISTANCE_METERS &&
-					Math.abs(projected.y) <= VatSysProfileGeneratorService.LEAD_ON_RUNWAY_TOUCH_DISTANCE_METERS,
-			)
-			.sort((a, b) => Math.abs(a.y) - Math.abs(b.y) || a.x - b.x);
+		let bestTouch: { x: number; y: number } | null = null;
+		for (const leadOn of linkedLeadOns) {
+			for (const endpoint of this.getLeadOnEndpoints(leadOn)) {
+				const projected = this.projectToAxis(endpoint, axis);
+				if (
+					projected.x < -VatSysProfileGeneratorService.LEAD_ON_RUNWAY_TOUCH_DISTANCE_METERS ||
+					projected.x > axis.lengthMeters + VatSysProfileGeneratorService.LEAD_ON_RUNWAY_TOUCH_DISTANCE_METERS ||
+					Math.abs(projected.y) > VatSysProfileGeneratorService.LEAD_ON_RUNWAY_TOUCH_DISTANCE_METERS
+				) {
+					continue;
+				}
+				if (!bestTouch || Math.abs(projected.y) < Math.abs(bestTouch.y) || (Math.abs(projected.y) === Math.abs(bestTouch.y) && projected.x < bestTouch.x)) {
+					bestTouch = projected;
+				}
+			}
+		}
 
-		return touches[0] ?? null;
+		return bestTouch;
 	}
 
 	private getLeadOnEndpoints(leadOn: ParsedPoint): GeoPoint[] {
@@ -1297,19 +1422,24 @@ export class VatSysProfileGeneratorService {
 		return [first, last];
 	}
 
-	private getBestRunwayMatch(stopbar: ParsedPoint, runways: RunwayRow[], towerPosition: GeoPoint): ProjectedPoint | null {
-		const matches = runways
-			.map((runway) => {
-				const axis = this.getRunwayAxis(runway, towerPosition);
-				if (!axis) return null;
-				const projected = this.projectStopbar(stopbar, runway, axis);
-				if (!projected || !this.isStopbarRelevant(projected, axis, runway)) return null;
-				return projected;
-			})
-			.filter((match): match is ProjectedPoint => match !== null)
-			.sort((a, b) => a.score - b.score || a.runwayId - b.runwayId);
+	private getBestRunwayMatch(
+		stopbar: ParsedPoint,
+		runways: RunwayRow[],
+		towerPosition: GeoPoint,
+		runwayAxes?: Map<number, ProfileAxis>,
+	): ProjectedPoint | null {
+		let bestMatch: ProjectedPoint | null = null;
+		for (const runway of runways) {
+			const axis = runwayAxes?.get(runway.id) ?? this.getRunwayAxis(runway, towerPosition);
+			if (!axis) continue;
+			const projected = this.projectStopbar(stopbar, runway, axis);
+			if (!projected || !this.isStopbarRelevant(projected, axis, runway)) continue;
+			if (!bestMatch || projected.score < bestMatch.score || (projected.score === bestMatch.score && projected.runwayId < bestMatch.runwayId)) {
+				bestMatch = projected;
+			}
+		}
 
-		return matches[0] ?? null;
+		return bestMatch;
 	}
 
 	private projectStopbar(stopbar: ParsedPoint, runway: RunwayRow, axis: ProfileAxis, position = stopbar.midpoint): ProjectedPoint | null {
@@ -1333,13 +1463,23 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private getStopbarPositionForAxis(stopbar: ParsedPoint, axis: ProfileAxis): GeoPoint {
-		return [stopbar.midpoint, ...stopbar.coordinates].sort((a, b) => {
-			const projectedA = this.projectToAxis(a, axis);
-			const projectedB = this.projectToAxis(b, axis);
-			const lateralDiff = Math.abs(projectedA.y) - Math.abs(projectedB.y);
-			if (lateralDiff !== 0) return lateralDiff;
-			return Math.abs(projectedA.x - axis.lengthMeters / 2) - Math.abs(projectedB.x - axis.lengthMeters / 2);
-		})[0];
+		let bestPoint = stopbar.midpoint;
+		const midpointProjection = this.projectToAxis(bestPoint, axis);
+		let bestLateralDistance = Math.abs(midpointProjection.y);
+		let bestCenterDistance = Math.abs(midpointProjection.x - axis.lengthMeters / 2);
+
+		for (const point of stopbar.coordinates) {
+			const projected = this.projectToAxis(point, axis);
+			const lateralDistance = Math.abs(projected.y);
+			const centerDistance = Math.abs(projected.x - axis.lengthMeters / 2);
+			if (lateralDistance < bestLateralDistance || (lateralDistance === bestLateralDistance && centerDistance < bestCenterDistance)) {
+				bestPoint = point;
+				bestLateralDistance = lateralDistance;
+				bestCenterDistance = centerDistance;
+			}
+		}
+
+		return bestPoint;
 	}
 
 	private isStopbarRelevant(stopbar: ProjectedPoint, axis: ProfileAxis, runway: RunwayRow): boolean {
@@ -1364,15 +1504,34 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private projectToAxis(point: GeoPoint, axis: ProfileAxis): { x: number; y: number } {
-		const { east, north } = this.toLocalMeters(point, axis.start);
-		const bearingRad = (axis.bearing * Math.PI) / 180;
-		const unitEast = Math.sin(bearingRad);
-		const unitNorth = Math.cos(bearingRad);
+		const projection = this.getAxisProjection(axis);
+		const earthRadiusMeters = 6371000;
+		const deltaLat = ((point.lat - axis.start.lat) * Math.PI) / 180;
+		const deltaLon = ((point.lon - axis.start.lon) * Math.PI) / 180;
+		const east = deltaLon * projection.originLatCos * earthRadiusMeters;
+		const north = deltaLat * earthRadiusMeters;
 
 		return {
-			x: east * unitEast + north * unitNorth,
-			y: east * -unitNorth + north * unitEast,
+			x: east * projection.unitEast + north * projection.unitNorth,
+			y: east * -projection.unitNorth + north * projection.unitEast,
 		};
+	}
+
+	private getAxisProjection(axis: ProfileAxis): AxisProjection {
+		const cached = this.axisProjectionCache.get(axis);
+		if (cached) {
+			return cached;
+		}
+
+		const bearingRad = (axis.bearing * Math.PI) / 180;
+		const originLatRad = (axis.start.lat * Math.PI) / 180;
+		const projection = {
+			originLatCos: Math.cos(originLatRad),
+			unitEast: Math.sin(bearingRad),
+			unitNorth: Math.cos(bearingRad),
+		};
+		this.axisProjectionCache.set(axis, projection);
+		return projection;
 	}
 
 	private toLocalMeters(point: GeoPoint, origin: GeoPoint): { east: number; north: number } {
@@ -1578,10 +1737,13 @@ export class VatSysProfileGeneratorService {
 				}
 				return true;
 			})
+			.map((leadOn) => ({
+				id: leadOn.id,
+				distance: calculateDistance(leadOn.midpoint, stopbar.point.midpoint),
+			}))
 			.sort((a, b) => {
-				const distanceDiff = calculateDistance(a.midpoint, stopbar.point.midpoint) - calculateDistance(b.midpoint, stopbar.point.midpoint);
-				if (distanceDiff !== 0) return distanceDiff;
-				return a.id.localeCompare(b.id);
+				const distanceDiff = a.distance - b.distance;
+				return distanceDiff !== 0 ? distanceDiff : a.id.localeCompare(b.id);
 			})
 			.map((leadOn) => leadOn.id);
 
@@ -1625,19 +1787,22 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private findCrossbarPoint(name: string, crossingX: number, axis: ProfileAxis, stopbars: ParsedPoint[]): ParsedPoint | null {
-		const candidates = stopbars
-			.filter((stopbar) => stopbar.name.trim().toUpperCase() === name.trim().toUpperCase())
-			.map((stopbar) => {
-				const projected = this.projectToAxis(stopbar.midpoint, axis);
-				return {
-					stopbar,
-					distance: Math.hypot(projected.x - crossingX, projected.y),
-				};
-			})
-			.filter((candidate) => candidate.distance <= 300)
-			.sort((a, b) => a.distance - b.distance || a.stopbar.id.localeCompare(b.stopbar.id));
+		const normalizedName = name.trim().toUpperCase();
+		let bestStopbar: ParsedPoint | null = null;
+		let bestDistance = Infinity;
 
-		return candidates[0]?.stopbar ?? null;
+		for (const stopbar of stopbars) {
+			if (stopbar.name.trim().toUpperCase() !== normalizedName) continue;
+			const projected = this.projectToAxis(stopbar.midpoint, axis);
+			const distance = Math.hypot(projected.x - crossingX, projected.y);
+			if (distance > 300) continue;
+			if (!bestStopbar || distance < bestDistance || (distance === bestDistance && stopbar.id.localeCompare(bestStopbar.id) < 0)) {
+				bestStopbar = stopbar;
+				bestDistance = distance;
+			}
+		}
+
+		return bestStopbar;
 	}
 
 	private isCrossbarPoint(point: ParsedPoint, crossbar: CrossbarConfig | null): boolean {
