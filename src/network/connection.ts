@@ -19,7 +19,76 @@ const MAX_STATE_SIZE = 1000000; // 1MB limit for persisted payloads
 const MAX_MULTI_STATE_UPDATES = 200;
 const OBJECT_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 const DISALLOWED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const STATE_FLUSH_DEBOUNCE_MS = 1500;
+const ACTIVE_OBJECT_TOUCH_INTERVAL_MS = 5000;
+const SOCKET_STATUS_CHECK_INTERVAL_MS = 120000;
+const MAX_CONSECUTIVE_STATUS_FAILURES = 2;
+const OFFLINE_STATE_CACHE_TTL_MS = 300000;
+const SEND_FAILURE_LIMIT = 3;
+const EFFECTIVE_HEARTBEAT_TIMEOUT = Math.max(HEARTBEAT_TIMEOUT, HEARTBEAT_INTERVAL * 3);
 const createNullObject = (): Record<string, unknown> => Object.create(null) as Record<string, unknown>;
+
+type SocketInfo = {
+	controllerId: string;
+	type: ClientType;
+	airport: string;
+	lastHeartbeat: number;
+	lastStatusCheck: number;
+	statusCheckInFlight: boolean;
+	consecutiveVatsimFailures: number;
+	sendFailures: number;
+};
+
+type OfflineStateTemplate = Array<{ id: string; state: boolean }>;
+
+function describeErrorForLog(error: unknown): Record<string, unknown> | string {
+	if (error instanceof Error) {
+		return {
+			name: error.name,
+			message: error.message,
+			stack: error.stack,
+		};
+	}
+
+	if (error === null || error === undefined) {
+		return String(error);
+	}
+
+	if (typeof error === 'object') {
+		try {
+			return JSON.parse(JSON.stringify(error)) as Record<string, unknown>;
+		} catch {
+			return Object.prototype.toString.call(error);
+		}
+	}
+
+	return String(error);
+}
+
+function describeWebSocketErrorEvent(
+	evt: ErrorEvent,
+	socket: WebSocket,
+	socketInfo?: { controllerId: string; type: ClientType; airport: string },
+): Record<string, unknown> {
+	const details: Record<string, unknown> = {
+		eventType: evt.type,
+		readyState: socket.readyState,
+	};
+
+	if (socketInfo) {
+		details.controllerId = socketInfo.controllerId;
+		details.clientType = socketInfo.type;
+		details.airport = socketInfo.airport;
+	}
+
+	if (evt.message) details.message = evt.message;
+	if (evt.filename) details.filename = evt.filename;
+	if (evt.lineno) details.lineno = evt.lineno;
+	if (evt.colno) details.colno = evt.colno;
+	if (evt.error !== undefined && evt.error !== null) details.error = describeErrorForLog(evt.error);
+
+	return details;
+}
 
 // Add recursive merge utility function with safety checks
 function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): unknown {
@@ -108,21 +177,28 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 }
 
 export class Connection {
-	private sockets = new Map<
-		WebSocket,
-		{
-			controllerId: string;
-			type: ClientType;
-			airport: string;
-			lastHeartbeat: number;
-		}
-	>();
+	private sockets = new Map<WebSocket, SocketInfo>();
 
 	private airportStates = new Map<string, AirportState>();
 	private airportSharedStates = new Map<string, Record<string, unknown>>(); // New shared state storage
 	private readonly TWO_MINUTES = 120000; // Add constant at class level
 	private objectId: string; // Store the DO's ID
 	private lastActiveObjectsUpdate = 0; // Throttle D1 updates
+	private activeObjectTouchInFlight = false;
+	private airportStateFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private airportSharedStateFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private dirtyAirportStates = new Set<string>();
+	private dirtySharedStates = new Set<string>();
+	private socketQueues = new Map<WebSocket, Promise<void>>();
+	private controllerSockets = new Map<string, Map<string, Set<WebSocket>>>();
+	private offlineStateCache = new Map<
+		string,
+		{
+			template?: OfflineStateTemplate;
+			expiresAt: number;
+			inFlight?: Promise<OfflineStateTemplate>;
+		}
+	>();
 	private connectionCounts: Record<'controllers' | 'pilots' | 'observers', number> = {
 		controllers: 0,
 		pilots: 0,
@@ -139,13 +215,28 @@ export class Connection {
 	) {
 		this.objectId = state.id.toString();
 		this.posthog = new PostHogService(env);
-		this.loadPersistedState();
+		this.state.blockConcurrencyWhile(async () => {
+			await this.loadPersistedState();
+		});
 	}
 
-	private registerSocket(socket: WebSocket, info: { controllerId: string; type: ClientType; airport: string; lastHeartbeat: number }) {
-		this.sockets.set(socket, info);
-		this.adjustConnectionCount(info.type, 1);
-		this.lastKnownAirport = info.airport;
+	private registerSocket(
+		socket: WebSocket,
+		info: { controllerId: string; type: ClientType; airport: string; lastHeartbeat: number },
+	) {
+		const socketInfo: SocketInfo = {
+			...info,
+			lastStatusCheck: 0,
+			statusCheckInFlight: false,
+			consecutiveVatsimFailures: 0,
+			sendFailures: 0,
+		};
+		this.sockets.set(socket, socketInfo);
+		this.adjustConnectionCount(socketInfo.type, 1);
+		this.lastKnownAirport = socketInfo.airport;
+		if (socketInfo.type === 'controller') {
+			this.addControllerSocket(socket, socketInfo);
+		}
 	}
 
 	private unregisterSocket(socket: WebSocket) {
@@ -156,6 +247,10 @@ export class Connection {
 
 		this.adjustConnectionCount(info.type, -1);
 		this.sockets.delete(socket);
+		this.socketQueues.delete(socket);
+		if (info.type === 'controller') {
+			this.removeControllerSocket(socket, info);
+		}
 		if (this.sockets.size === 0) {
 			this.lastKnownAirport = 'unknown';
 		} else if (info.airport === this.lastKnownAirport) {
@@ -185,6 +280,76 @@ export class Connection {
 				this.connectionCounts.observers = Math.max(0, this.connectionCounts.observers + delta);
 				break;
 		}
+	}
+
+	private addControllerSocket(socket: WebSocket, info: SocketInfo) {
+		let airportControllers = this.controllerSockets.get(info.airport);
+		if (!airportControllers) {
+			airportControllers = new Map();
+			this.controllerSockets.set(info.airport, airportControllers);
+		}
+
+		let controllerSockets = airportControllers.get(info.controllerId);
+		if (!controllerSockets) {
+			controllerSockets = new Set();
+			airportControllers.set(info.controllerId, controllerSockets);
+		}
+
+		controllerSockets.add(socket);
+		this.getOrCreateAirportState(info.airport).controllers.add(info.controllerId);
+	}
+
+	private removeControllerSocket(socket: WebSocket, info: SocketInfo) {
+		const airportControllers = this.controllerSockets.get(info.airport);
+		const controllerSockets = airportControllers?.get(info.controllerId);
+		if (!airportControllers || !controllerSockets) return;
+
+		controllerSockets.delete(socket);
+		if (controllerSockets.size === 0) {
+			airportControllers.delete(info.controllerId);
+		}
+		if (airportControllers.size === 0) {
+			this.controllerSockets.delete(info.airport);
+		}
+	}
+
+	private hasOtherControllerSocket(airport: string, controllerId: string, currentSocket: WebSocket): boolean {
+		const sockets = this.controllerSockets.get(airport)?.get(controllerId);
+		if (!sockets) return false;
+		for (const socket of sockets) {
+			if (socket !== currentSocket && this.sockets.has(socket)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private hasLiveControllers(airport: string): boolean {
+		const airportControllers = this.controllerSockets.get(airport);
+		if (!airportControllers) return false;
+		for (const sockets of airportControllers.values()) {
+			for (const socket of sockets) {
+				if (this.sockets.has(socket)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private getLiveControllerIds(airport: string): string[] {
+		const airportControllers = this.controllerSockets.get(airport);
+		if (!airportControllers) return [];
+		const controllerIds: string[] = [];
+		for (const [controllerId, sockets] of airportControllers) {
+			for (const socket of sockets) {
+				if (this.sockets.has(socket)) {
+					controllerIds.push(controllerId);
+					break;
+				}
+			}
+		}
+		return controllerIds;
 	}
 
 	private emitAnalytics(event: string, properties: Record<string, unknown>) {
@@ -241,8 +406,6 @@ export class Connection {
 	private async loadPersistedState() {
 		const states = new Map<string, AirportState>();
 		const sharedStates = new Map<string, Record<string, unknown>>();
-		this.airportStates = states;
-		this.airportSharedStates = sharedStates;
 
 		try {
 			const [stateEntries, sharedEntries] = await Promise.all([
@@ -263,6 +426,8 @@ export class Connection {
 					sharedStates.set(airport, stored as Record<string, unknown>);
 				}
 			}
+			this.airportStates = states;
+			this.airportSharedStates = sharedStates;
 		} catch (error) {
 			console.error('Failed to load persisted state:', error);
 		}
@@ -330,6 +495,71 @@ export class Connection {
 		}
 	}
 
+	private markAirportStateDirty(airport: string, immediate = false) {
+		this.dirtyAirportStates.add(airport);
+		if (immediate) {
+			void this.flushAirportState(airport);
+			return;
+		}
+		if (this.airportStateFlushTimers.has(airport)) return;
+		const timer = setTimeout(() => {
+			void this.flushAirportState(airport);
+		}, STATE_FLUSH_DEBOUNCE_MS);
+		this.airportStateFlushTimers.set(airport, timer);
+	}
+
+	private markSharedStateDirty(airport: string, immediate = false) {
+		this.dirtySharedStates.add(airport);
+		if (immediate) {
+			void this.flushSharedState(airport);
+			return;
+		}
+		if (this.airportSharedStateFlushTimers.has(airport)) return;
+		const timer = setTimeout(() => {
+			void this.flushSharedState(airport);
+		}, STATE_FLUSH_DEBOUNCE_MS);
+		this.airportSharedStateFlushTimers.set(airport, timer);
+	}
+
+	private async flushAirportState(airport: string) {
+		const timer = this.airportStateFlushTimers.get(airport);
+		if (timer) {
+			clearTimeout(timer);
+			this.airportStateFlushTimers.delete(airport);
+		}
+		if (!this.dirtyAirportStates.has(airport)) return;
+		this.dirtyAirportStates.delete(airport);
+		await this.persistAirportState(airport);
+		if (this.dirtyAirportStates.has(airport) && !this.airportStateFlushTimers.has(airport)) {
+			this.markAirportStateDirty(airport);
+		}
+	}
+
+	private async flushSharedState(airport: string) {
+		const timer = this.airportSharedStateFlushTimers.get(airport);
+		if (timer) {
+			clearTimeout(timer);
+			this.airportSharedStateFlushTimers.delete(airport);
+		}
+		if (!this.dirtySharedStates.has(airport)) return;
+		this.dirtySharedStates.delete(airport);
+		await this.persistSharedState(airport);
+		if (this.dirtySharedStates.has(airport) && !this.airportSharedStateFlushTimers.has(airport)) {
+			this.markSharedStateDirty(airport);
+		}
+	}
+
+	private async flushAirportDurableState(airport: string) {
+		await Promise.all([this.flushAirportState(airport), this.flushSharedState(airport)]);
+	}
+
+	private resolvePacketAirport(packet: Packet, connectionAirport: string): string {
+		if (packet.airport !== undefined && packet.airport !== connectionAirport) {
+			throw new Error('Packet airport does not match connected airport');
+		}
+		return connectionAirport;
+	}
+
 	private async broadcast(packet: Packet, sender?: WebSocket) {
 		const airport = packet.airport;
 		if (!airport) {
@@ -345,26 +575,16 @@ export class Connection {
 			return;
 		}
 
-		const promises: Promise<void>[] = [];
+		let recipients = 0;
 
 		this.sockets.forEach((client, socket) => {
 			if (socket !== sender && socket.readyState === WebSocket.OPEN && client.airport === airport) {
-				promises.push(
-					new Promise((resolve) => {
-						try {
-							socket.send(packetString);
-						} catch (error) {
-							console.error(`Failed to send packet to client ${client.controllerId}:`, error);
-							// Don't disconnect the client for send failures, just log the error
-						} finally {
-							resolve();
-						}
-					}),
-				);
+				recipients++;
+				this.sendSerializedPacket(socket, packetString, 'broadcast');
 			}
 		});
 
-		await Promise.all(promises);
+		this.trackBroadcast(packet.type, airport, recipients);
 	}
 
 	private getOrCreateAirportState(airport: string): AirportState {
@@ -425,10 +645,16 @@ export class Connection {
 				throw new Error(`Patch data must be an object or null for object ${objectId}`);
 			}
 
+			if (patch === null) {
+				state.objects.delete(objectId);
+				state.lastUpdate = now;
+				return { objectId, patch: null };
+			}
+
 			const baseState =
 				typeof existingObject.state === 'object' && existingObject.state !== null ? existingObject.state : {};
-			const merged = patch === null ? null : recursivelyMergeObjects(baseState, patch as Record<string, unknown>);
-			newState = merged as Record<string, unknown> | null;
+			const merged = recursivelyMergeObjects(baseState, patch as Record<string, unknown>);
+			newState = merged as Record<string, unknown>;
 			normalized = { objectId, patch: patch as Record<string, unknown> | null };
 		} else {
 			const stateValue = (update as { state?: unknown }).state;
@@ -466,16 +692,17 @@ export class Connection {
 				throw new Error('Invalid packet data structure');
 			}
 
-			const airport = packet.airport || connectionAirport;
+			const airport = this.resolvePacketAirport(packet, connectionAirport);
 			if (!airport || typeof airport !== 'string' || airport.length === 0) {
 				throw new Error('Invalid airport identifier');
 			}
 
 			const now = Date.now();
 			const state = this.getOrCreateAirportState(airport);
-			this.applyStateUpdateToAirport(state, packet.data as Record<string, unknown>, controllerId, now);
+			const normalized = this.applyStateUpdateToAirport(state, packet.data as Record<string, unknown>, controllerId, now);
+			await this.pruneDefaultStateOverride(airport, state, normalized.objectId);
 
-			await this.persistAirportState(airport);
+			this.markAirportStateDirty(airport);
 			return now;
 		} catch (error) {
 			console.error(`State update error for controller ${controllerId}`);
@@ -487,7 +714,7 @@ export class Connection {
 	}
 
 	private async handleMultiStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
-		const airport = packet.airport || connectionAirport;
+		const airport = this.resolvePacketAirport(packet, connectionAirport);
 		if (!airport || typeof airport !== 'string' || airport.length === 0) {
 			throw new Error('Invalid airport identifier');
 		}
@@ -517,6 +744,7 @@ export class Connection {
 					controllerId,
 					now,
 				);
+				await this.pruneDefaultStateOverride(airport, state, normalized.objectId);
 				normalizedUpdates.push(normalized);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : 'Unknown error';
@@ -524,7 +752,7 @@ export class Connection {
 			}
 		}
 
-		await this.persistAirportState(airport);
+		this.markAirportStateDirty(airport);
 
 		return { updates: normalizedUpdates, timestamp: now, airport };
 	}
@@ -535,6 +763,11 @@ export class Connection {
 
 		const state = this.airportStates.get(socketInfo.airport);
 		if (state) {
+			const controllerStillConnected = this.hasOtherControllerSocket(socketInfo.airport, socketInfo.controllerId, socket);
+			if (controllerStillConnected) {
+				return;
+			}
+
 			state.controllers.delete(socketInfo.controllerId);
 
 			// Update timestamp when last controller disconnects
@@ -542,7 +775,8 @@ export class Connection {
 				state.lastUpdate = Date.now();
 			}
 
-			await this.persistAirportState(socketInfo.airport);
+			this.markAirportStateDirty(socketInfo.airport);
+			await this.flushAirportDurableState(socketInfo.airport);
 
 			await this.broadcast(
 				{
@@ -574,7 +808,7 @@ export class Connection {
 			try {
 				// Check if we haven't received a heartbeat in too long
 				const now = Date.now();
-				if (now - socketInfo.lastHeartbeat > HEARTBEAT_TIMEOUT) {
+				if (now - socketInfo.lastHeartbeat > EFFECTIVE_HEARTBEAT_TIMEOUT) {
 					socket.close(1000, 'Heartbeat timeout');
 					clearInterval(interval);
 					return;
@@ -584,99 +818,15 @@ export class Connection {
 				vatsimCheckCounter++;
 				if (vatsimCheckCounter >= VATSIM_CHECK_FREQUENCY) {
 					vatsimCheckCounter = 0;
-					// Ban check: disconnect if the user has been banned since connect
-					try {
-						if (await this.auth.isVatsimIdBanned(socketInfo.controllerId)) {
-							console.log(`User ${socketInfo.controllerId} banned, closing connection`);
-							socket.send(
-								JSON.stringify({
-									type: 'ERROR',
-									data: { message: 'Account banned' },
-									timestamp: now,
-								}),
-							);
-							if (socketInfo.type === 'controller') {
-								await this.handleControllerDisconnect(socket);
-							}
-							const removed = this.unregisterSocket(socket);
-							if (removed) {
-								await this.trackDisconnection(removed, 'banned');
-							}
-							socket.close(1008, 'Banned');
-							clearInterval(interval);
-							return;
-						}
-					} catch (e) {
-						console.warn('Ban check failed (non-fatal):', e);
-					}
-					// Get the latest VATSIM status
-					const status = await this.vatsim.getUserStatus(socketInfo.controllerId);
-
-					if (!status) {
-						// User is no longer on VATSIM, disconnect them
-						console.log(`User ${socketInfo.controllerId} no longer connected to VATSIM, closing connection`);
-						socket.send(
-							JSON.stringify({
-								type: 'ERROR',
-								data: { message: 'No longer connected to VATSIM' },
-								timestamp: now,
-							}),
-						);
-
-						// Handle cleanup for controllers
-						if (socketInfo.type === 'controller') {
-							await this.handleControllerDisconnect(socket);
-						}
-
-						const removed = this.unregisterSocket(socket);
-						if (removed) {
-							await this.trackDisconnection(removed, 'vatsim_offline');
-						}
-						socket.close(1000, 'No longer connected to VATSIM');
-						clearInterval(interval);
-						return;
-					}
-					// If user is still connected but role changed, handle that case
-					const isController = this.vatsim.isController(status);
-					const isPilot = this.vatsim.isPilot(status);
-					const isObserver = this.vatsim.isObserver(status);
-
-					if (
-						(socketInfo.type === 'controller' && !isController) ||
-						(socketInfo.type === 'pilot' && !isPilot) ||
-						(socketInfo.type === 'observer' && !isObserver)
-					) {
-						console.log(`User ${socketInfo.controllerId} role changed on VATSIM, closing connection`);
-						socket.send(
-							JSON.stringify({
-								type: 'ERROR',
-								data: { message: 'Role changed on VATSIM, please reconnect' },
-								timestamp: now,
-							}),
-						);
-
-						if (socketInfo.type === 'controller') {
-							await this.handleControllerDisconnect(socket);
-						}
-
-						const removed = this.unregisterSocket(socket);
-						if (removed) {
-							await this.trackDisconnection(removed, 'role_changed');
-						}
-						socket.close(1000, 'Role changed on VATSIM');
-						clearInterval(interval);
-						return;
-					}
+					await this.checkSocketStatus(socket, socketInfo, now);
 				}
 
 				// Send heartbeat with error handling
 				try {
-					socket.send(
-						JSON.stringify({
-							type: 'HEARTBEAT',
-							// Server will handle timestamp
-						}),
-					);
+					this.sendPacket(socket, {
+						type: 'HEARTBEAT',
+						// Server will handle timestamp
+					});
 				} catch (sendError) {
 					console.error(`Failed to send heartbeat to ${socketInfo.controllerId}:`, sendError);
 					socket.close(1011, 'Failed to send heartbeat');
@@ -697,9 +847,69 @@ export class Connection {
 
 		// Add error handler
 		socket.addEventListener('error', (evt) => {
-			console.error('WebSocket error:', evt);
+			console.error('WebSocket error:', describeWebSocketErrorEvent(evt, socket, this.sockets.get(socket)));
 		});
 	}
+
+	private async checkSocketStatus(socket: WebSocket, socketInfo: SocketInfo, now: number) {
+		if (socketInfo.statusCheckInFlight || now - socketInfo.lastStatusCheck < SOCKET_STATUS_CHECK_INTERVAL_MS) {
+			return;
+		}
+
+		socketInfo.statusCheckInFlight = true;
+		socketInfo.lastStatusCheck = now;
+		try {
+			if (await this.auth.isVatsimIdBanned(socketInfo.controllerId)) {
+				this.sendPacket(socket, {
+					type: 'ERROR',
+					data: { message: 'Account banned' },
+					timestamp: now,
+				});
+				socket.close(1008, 'Banned');
+				await this.cleanupSocket(socket, 'banned');
+				return;
+			}
+
+			const status = await this.vatsim.getUserStatus(socketInfo.controllerId);
+			if (!status) {
+				socketInfo.consecutiveVatsimFailures++;
+				if (socketInfo.consecutiveVatsimFailures >= MAX_CONSECUTIVE_STATUS_FAILURES) {
+					this.sendPacket(socket, {
+						type: 'ERROR',
+						data: { message: 'No longer connected to VATSIM' },
+						timestamp: now,
+					});
+					socket.close(1000, 'No longer connected to VATSIM');
+					await this.cleanupSocket(socket, 'vatsim_offline');
+				}
+				return;
+			}
+
+			socketInfo.consecutiveVatsimFailures = 0;
+			const isController = this.vatsim.isController(status);
+			const isPilot = this.vatsim.isPilot(status);
+			const isObserver = this.vatsim.isObserver(status);
+
+			if (
+				(socketInfo.type === 'controller' && !isController) ||
+				(socketInfo.type === 'pilot' && !isPilot) ||
+				(socketInfo.type === 'observer' && !isObserver)
+			) {
+				this.sendPacket(socket, {
+					type: 'ERROR',
+					data: { message: 'Role changed on VATSIM, please reconnect' },
+					timestamp: now,
+				});
+				socket.close(1000, 'Role changed on VATSIM');
+				await this.cleanupSocket(socket, 'role_changed');
+			}
+		} catch (error) {
+			console.warn('Socket status check failed (non-fatal):', error);
+		} finally {
+			socketInfo.statusCheckInFlight = false;
+		}
+	}
+
 	private clearStaleState(airport: string) {
 		const state = this.airportStates.get(airport);
 		if (!state) return;
@@ -707,7 +917,7 @@ export class Connection {
 		const now = Date.now();
 
 		// Use class constant
-		if (now - state.lastUpdate > this.TWO_MINUTES && state.controllers.size === 0) {
+		if (now - state.lastUpdate > this.TWO_MINUTES && !this.hasLiveControllers(airport)) {
 			// Clear objects but keep the airport state structure
 			state.objects.clear();
 			state.lastUpdate = now;
@@ -715,40 +925,109 @@ export class Connection {
 			// Also clear shared state when no controllers are present for 2 minutes
 			this.airportSharedStates.set(airport, {});
 
-			void this.persistAirportState(airport);
-			void this.persistSharedState(airport);
+			this.markAirportStateDirty(airport);
+			this.markSharedStateDirty(airport);
 		}
 	}
 
 	private async getOfflineStateFromPoints(airport: string): Promise<AirportObject[]> {
 		try {
-			// Create the necessary services to fetch points
-			const idService = new IDService();
-			const divisions = new DivisionService(this.env.DB);
-			const pointsService = new PointsService(this.env.DB, idService, divisions);
-
-			// Fetch all points for this airport
-			const airportPoints = await pointsService.getAirportPoints(airport);
-
-			// Create default state objects based on point types
-			return airportPoints.map((point) => {
-				// Set default state based on point type
-				let defaultState = false;
-				if (point.type === 'taxiway' || point.type === 'lead_on' || point.type === 'stand') {
-					defaultState = true;
-				} else if (point.type === 'stopbar') {
-					defaultState = false;
-				}
-
-				return {
-					id: point.id,
-					state: defaultState,
-					timestamp: Date.now(),
-				};
-			});
+			const template = await this.getOfflineStateTemplate(airport);
+			return this.buildOfflineObjectsFromTemplate(template);
 		} catch (error) {
 			console.error(`Error fetching offline state for ${airport}:`, error);
 			return []; // Return empty array if there's an error
+		}
+	}
+
+	private async getOfflineStateTemplate(airport: string): Promise<OfflineStateTemplate> {
+		const normalizedAirport = airport.toUpperCase();
+		const cached = this.offlineStateCache.get(normalizedAirport);
+		const now = Date.now();
+		if (cached?.template && cached.expiresAt > now) {
+			return cached.template;
+		}
+		if (cached?.inFlight) {
+			return await cached.inFlight;
+		}
+
+		const inFlight = this.loadOfflineStateTemplate(normalizedAirport);
+		this.offlineStateCache.set(normalizedAirport, { expiresAt: now + OFFLINE_STATE_CACHE_TTL_MS, inFlight });
+		try {
+			const template = await inFlight;
+			this.offlineStateCache.set(normalizedAirport, {
+				template,
+				expiresAt: Date.now() + OFFLINE_STATE_CACHE_TTL_MS,
+			});
+			return template;
+		} catch (error) {
+			console.error(`Error fetching offline state for ${airport}:`, error);
+			this.offlineStateCache.delete(normalizedAirport);
+			return [];
+		}
+	}
+
+	private async loadOfflineStateTemplate(airport: string): Promise<OfflineStateTemplate> {
+		// Create the necessary services to fetch points
+		const idService = new IDService();
+		const divisions = new DivisionService(this.env.DB);
+		const pointsService = new PointsService(this.env.DB, idService, divisions);
+
+		// Fetch all points for this airport
+		const airportPoints = await pointsService.getAirportPoints(airport);
+
+		return airportPoints.map((point) => ({
+			id: point.id,
+			state: point.type === 'taxiway' || point.type === 'lead_on' || point.type === 'stand',
+		}));
+	}
+
+	private buildOfflineObjectsFromTemplate(template: OfflineStateTemplate): AirportObject[] {
+		const timestamp = Date.now();
+		return template.map((point) => ({
+			id: point.id,
+			state: point.state,
+			timestamp,
+		}));
+	}
+
+	private async getOnlineStateObjects(airport: string, state: AirportState): Promise<AirportObject[]> {
+		await this.pruneDefaultStateOverrides(airport, state);
+		return Array.from(state.objects.values());
+	}
+
+	private async pruneDefaultStateOverride(airport: string, state: AirportState, objectId: string) {
+		const object = state.objects.get(objectId);
+		if (!object || typeof object.state !== 'boolean') {
+			return;
+		}
+
+		const template = await this.getOfflineStateTemplate(airport);
+		const defaultState = template.find((point) => point.id === objectId)?.state;
+		if (defaultState === object.state) {
+			state.objects.delete(objectId);
+		}
+	}
+
+	private async pruneDefaultStateOverrides(airport: string, state: AirportState) {
+		const template = await this.getOfflineStateTemplate(airport);
+		const defaultStates = new Map(template.map((point) => [point.id, point.state]));
+		let pruned = false;
+
+		for (const object of state.objects.values()) {
+			if (typeof object.state !== 'boolean') {
+				continue;
+			}
+
+			const defaultState = defaultStates.get(object.id);
+			if (defaultState === object.state) {
+				state.objects.delete(object.id);
+				pruned = true;
+			}
+		}
+
+		if (pruned) {
+			this.markAirportStateDirty(airport);
 		}
 	}
 
@@ -793,6 +1072,10 @@ export class Connection {
 
 		server.accept();
 
+		// Load or create airport state and clear stale persisted state before this new socket makes it look live.
+		const state = this.getOrCreateAirportState(airport);
+		this.clearStaleState(airport);
+
 		// Initialize socket info with the airport and heartbeat
 		this.registerSocket(server, {
 			controllerId: user.vatsim_id,
@@ -809,16 +1092,10 @@ export class Connection {
 			console.error('trackConnection failed:', err);
 		});
 
-		// Load or create airport state
-		const state = this.getOrCreateAirportState(airport);
-
-		// Check and clear stale state before processing connection
-		this.clearStaleState(airport);
-
 		// Handle controller connection
 		if (clientType === 'controller') {
 			state.controllers.add(user.vatsim_id);
-			await this.persistAirportState(airport);
+			this.markAirportStateDirty(airport, true);
 
 			// Notify others about new controller
 			await this.broadcast(
@@ -832,14 +1109,15 @@ export class Connection {
 			);
 		} // Determine if there's an active state with controllers
 		const now = Date.now();
-		const hasActiveControllers = state.controllers.size > 0;
+		const liveControllers = this.getLiveControllerIds(airport);
+		const hasActiveControllers = liveControllers.length > 0;
 		const hasActiveState = hasActiveControllers;
 
 		let stateObjects;
 		let isOffline = false;
 
 		if (clientType === 'controller' || hasActiveState) {
-			stateObjects = Array.from(state.objects.values());
+			stateObjects = await this.getOnlineStateObjects(airport, state);
 			isOffline = false;
 		} else {
 			// For pilots when no controllers are online, get offline state
@@ -853,16 +1131,21 @@ export class Connection {
 				objects: stateObjects,
 				connectionType: clientType,
 				controllerId: clientType === 'controller' ? user.vatsim_id : undefined,
-				controllers: Array.from(state.controllers),
+				controllers: liveControllers,
 				offline: isOffline,
 				sharedState: this.getSharedStateSnapshot(airport), // Add shared state to initial state
 			},
 			timestamp: now,
 		};
 
-		server.send(JSON.stringify(initialState));
+		if (!this.sendPacket(server, initialState, 'initial_state')) {
+			await this.cleanupSocket(server, 'initial_state_send_failed');
+			server.close(1011, 'Unable to send initial state');
+			return new Response(null, { status: 101, webSocket: client });
+		}
 
-		server.addEventListener('message', async (event) => {
+		server.addEventListener('message', (event) => {
+			void this.enqueueSocketTask(server, async () => {
 			const socketInfo = this.sockets.get(server);
 			if (!socketInfo) {
 				console.warn('Received message from unregistered socket');
@@ -902,38 +1185,22 @@ export class Connection {
 				socketInfo.lastHeartbeat = now;
 
 				// Update object status on each message to keep last_updated current (non-fatal on failure)
-				try {
-					await this.updateObjectStatus();
-				} catch (e) {
-					console.warn('updateObjectStatus failed (non-fatal):', e instanceof Error ? e.message : e);
-				}
+				this.touchActiveObjectStatus();
+				void this.checkSocketStatus(server, socketInfo, now);
 
-				// Before handling, re-check ban in case it was applied after connect
-				if (await this.auth.isVatsimIdBanned(user.vatsim_id)) {
-					server.send(
-						JSON.stringify({
-							type: 'ERROR',
-							data: { message: 'Account banned' },
-							timestamp: Date.now(),
-						}),
-					);
-					const removed = this.unregisterSocket(server);
-					if (removed) {
-						await this.trackDisconnection(removed, 'banned');
-					}
-					server.close(1008, 'Banned');
-					return;
-				}
+				const packetAirport = this.resolvePacketAirport(packet as Packet, socketInfo.airport);
 				// Handle different packet types
 				switch ((packet as Packet).type) {
 					case 'HEARTBEAT':
 						// Respond to heartbeat with acknowledgment, adding server timestamp
-						server.send(
-							JSON.stringify({
-								type: 'HEARTBEAT_ACK',
-								timestamp: now,
-							}),
-						);
+						this.sendPacket(server, {
+							type: 'HEARTBEAT_ACK',
+							timestamp: now,
+						});
+						break;
+
+					case 'HEARTBEAT_ACK':
+						// Accept acknowledgments from clients that respond to server heartbeats.
 						break;
 
 					case 'STOPBAR_CROSSING': {
@@ -977,19 +1244,17 @@ export class Connection {
 
 					case 'GET_STATE': {
 						// Provide current state snapshot (controllers + pilots can request; observers too)
-						const airport = (packet as Packet).airport || socketInfo.airport;
+						const airport = packetAirport;
 						const state = this.airportStates.get(airport);
 						let offline = false;
 						let objects: AirportObject[] = [];
 
 						// Determine if controllers currently connected for this airport
-						const hasControllers = Array.from(this.sockets.values()).some(
-							(c) => c.airport === airport && c.type === 'controller',
-						);
+						const hasControllers = this.hasLiveControllers(airport);
 
 						if (state && hasControllers) {
 							// If any controller currently connected, treat state as online regardless of recency
-							objects = Array.from(state.objects.values());
+							objects = await this.getOnlineStateObjects(airport, state);
 						} else {
 							offline = true;
 							objects = await this.getOfflineStateFromPoints(airport);
@@ -1001,13 +1266,13 @@ export class Connection {
 							data: {
 								objects,
 								sharedState: this.getSharedStateSnapshot(airport),
-								controllers: state ? Array.from(state.controllers) : undefined,
+								controllers: this.getLiveControllerIds(airport),
 								offline,
 								requestedAt: (packet as Packet).timestamp || now,
 							},
 							timestamp: Date.now(),
 						};
-						server.send(JSON.stringify(snapshot));
+						this.sendPacket(server, snapshot, 'state_snapshot');
 						break;
 					}
 
@@ -1023,7 +1288,7 @@ export class Connection {
 							const { updates, timestamp, airport } = await this.handleMultiStateUpdate(
 								packet as Packet,
 								user.vatsim_id,
-								socketInfo.airport,
+								packetAirport,
 							);
 							const broadcastPacket: Packet = {
 								type: 'MULTI_STATE_UPDATE',
@@ -1054,10 +1319,10 @@ export class Connection {
 						}
 
 						try {
-							const timestamp = await this.handleStateUpdate(packet as Packet, user.vatsim_id, socketInfo.airport);
+							const timestamp = await this.handleStateUpdate(packet as Packet, user.vatsim_id, packetAirport);
 							const broadcastPacket = {
 								...(packet as Packet),
-								airport: (packet as Packet).airport || socketInfo.airport,
+								airport: packetAirport,
 								timestamp,
 							};
 							await this.broadcast(broadcastPacket, server);
@@ -1103,7 +1368,7 @@ export class Connection {
 						}
 
 						try {
-							this.handleSharedStateUpdate(packet as Packet, user.vatsim_id, socketInfo.airport);
+							await this.handleSharedStateUpdate(packet as Packet, user.vatsim_id, packetAirport);
 						} catch (updateError) {
 							throw new Error(
 								`Shared state update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
@@ -1120,20 +1385,17 @@ export class Connection {
 				console.error(`Message handling error for ${socketInfo.controllerId}:`, errorMessage);
 
 				// Send error response to client
-				try {
-					server.send(
-						JSON.stringify({
-							type: 'ERROR',
-							data: { message: errorMessage },
-							timestamp: Date.now(),
-						}),
-					);
-				} catch (sendError) {
-					console.error('Failed to send error message to client:', sendError);
-					// If we can't send an error message, close the connection
+				if (
+					!this.sendPacket(server, {
+						type: 'ERROR',
+						data: { message: errorMessage },
+						timestamp: Date.now(),
+					})
+				) {
 					server.close(1011, 'Internal error - unable to communicate');
 				}
 			}
+			});
 		});
 
 		server.addEventListener('close', async () => {
@@ -1177,6 +1439,108 @@ export class Connection {
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	private enqueueSocketTask(socket: WebSocket, task: () => Promise<void>): Promise<void> {
+		const previous = this.socketQueues.get(socket) ?? Promise.resolve();
+		const next = previous
+			.catch(() => undefined)
+			.then(async () => {
+				if (!this.sockets.has(socket)) return;
+				await task();
+			})
+			.catch((error) => {
+				console.error('Queued socket task failed:', error instanceof Error ? error.message : error);
+			})
+			.finally(() => {
+				if (this.socketQueues.get(socket) === next) {
+					this.socketQueues.delete(socket);
+				}
+			});
+
+		this.socketQueues.set(socket, next);
+		return next;
+	}
+
+	private sendPacket(socket: WebSocket, packet: Packet, context = 'send'): boolean {
+		try {
+			return this.sendSerializedPacket(socket, JSON.stringify(packet), context);
+		} catch (error) {
+			this.handleSendFailure(socket, context, error);
+			return false;
+		}
+	}
+
+	private sendSerializedPacket(socket: WebSocket, packetString: string, context: string): boolean {
+		if (socket.readyState !== WebSocket.OPEN) {
+			return false;
+		}
+		try {
+			socket.send(packetString);
+			const info = this.sockets.get(socket);
+			if (info) {
+				info.sendFailures = 0;
+			}
+			return true;
+		} catch (error) {
+			this.handleSendFailure(socket, context, error);
+			return false;
+		}
+	}
+
+	private handleSendFailure(socket: WebSocket, context: string, error: unknown) {
+		const info = this.sockets.get(socket);
+		console.error(`Failed to send WebSocket packet during ${context}:`, error);
+		if (!info) return;
+
+		info.sendFailures++;
+		if (info.sendFailures >= SEND_FAILURE_LIMIT) {
+			socket.close(1011, 'Repeated send failures');
+			void this.cleanupSocket(socket, 'send_failure');
+		}
+	}
+
+	private async cleanupSocket(socket: WebSocket, reason: string) {
+		const info = this.sockets.get(socket);
+		if (!info) return;
+
+		if (info.type === 'controller') {
+			try {
+				await this.handleControllerDisconnect(socket);
+			} catch (error) {
+				console.warn('handleControllerDisconnect failed during cleanup (non-fatal):', error);
+			}
+		}
+
+		const removed = this.unregisterSocket(socket);
+		if (!removed) return;
+
+		try {
+			await this.trackDisconnection(removed, reason);
+		} catch (error) {
+			console.warn('trackDisconnection failed during cleanup (non-fatal):', error);
+		}
+	}
+
+	private touchActiveObjectStatus() {
+		if (this.activeObjectTouchInFlight) return;
+		const now = Date.now();
+		if (now - this.lastActiveObjectsUpdate < ACTIVE_OBJECT_TOUCH_INTERVAL_MS) return;
+
+		this.activeObjectTouchInFlight = true;
+		void this.updateObjectStatus().finally(() => {
+			this.activeObjectTouchInFlight = false;
+		});
+	}
+
+	private trackBroadcast(messageType: Packet['type'], airport: string, recipients: number) {
+		if (recipients === 0) return;
+		this.emitAnalytics('ws_broadcast', {
+			airport,
+			messageType,
+			recipients,
+			socket_count: this.sockets.size,
+		});
 	}
 
 	private async trackConnection(clientType: ClientType, airport: string) {
@@ -1243,7 +1607,7 @@ export class Connection {
 		if (this.sockets.size > 0) {
 			// Throttle updates to avoid excessive D1 writes
 			const now = Date.now();
-			if (now - this.lastActiveObjectsUpdate < 5000) return; // 5s throttle
+			if (now - this.lastActiveObjectsUpdate < ACTIVE_OBJECT_TOUCH_INTERVAL_MS) return;
 
 			// Update the object's name and last_updated timestamp
 			const name = this.getObjectName();
@@ -1353,16 +1717,11 @@ export class Connection {
 			let objects: AirportObject[] = [];
 
 			// If there are no controllers connected, always use offline mode
-			const connectedControllers = connectedClients.controllers.length > 0;
+			const connectedControllers = this.hasLiveControllers(airport);
 
 			if (state && connectedControllers) {
 				// Return active state with all objects regardless of recency since controllers are connected
-				objects = Array.from(state.objects.values()).map((obj) => ({
-					id: obj.id,
-					state: obj.state,
-					controllerId: obj.controllerId,
-					timestamp: obj.timestamp,
-				}));
+				objects = await this.getOnlineStateObjects(airport, state);
 			} else {
 				// No controllers connected or no state exists, mark as offline
 				isOffline = true;
@@ -1396,26 +1755,23 @@ export class Connection {
 		const airport = packet.airport;
 		if (!airport) return;
 
-		const packetString = JSON.stringify(packet);
-		const promises: Promise<void>[] = [];
+		let packetString: string;
+		try {
+			packetString = JSON.stringify(packet);
+		} catch (error) {
+			console.error('Failed to serialize controller broadcast packet:', error);
+			return;
+		}
+		let recipients = 0;
 
 		this.sockets.forEach((client, socket) => {
 			if (socket !== sender && socket.readyState === WebSocket.OPEN && client.airport === airport && client.type === 'controller') {
-				promises.push(
-					new Promise((resolve) => {
-						try {
-							socket.send(packetString);
-						} catch (error) {
-							console.error('Failed to send packet to controller:', error);
-						} finally {
-							resolve();
-						}
-					}),
-				);
+				recipients++;
+				this.sendSerializedPacket(socket, packetString, 'controller_broadcast');
 			}
 		});
 
-		await Promise.all(promises);
+		this.trackBroadcast(packet.type, airport, recipients);
 	}
 
 	private getOrCreateSharedState(airport: string): Record<string, unknown> {
@@ -1426,7 +1782,7 @@ export class Connection {
 		}
 		return sharedState;
 	}
-	private handleSharedStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
+	private async handleSharedStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
 		try {
 			// Validate required fields
 			if (!packet?.data || typeof packet.data !== 'object' || Array.isArray(packet.data)) {
@@ -1438,7 +1794,7 @@ export class Connection {
 			}
 
 			// Validate airport parameter
-			const airport = packet.airport || connectionAirport;
+			const airport = this.resolvePacketAirport(packet, connectionAirport);
 			if (!airport || typeof airport !== 'string' || airport.length === 0) {
 				throw new Error('Invalid airport identifier');
 			}
@@ -1468,11 +1824,10 @@ export class Connection {
 			// Update the stored state
 			this.airportSharedStates.set(airport, updatedState as Record<string, unknown>);
 
-			// Persist to storage
-			void this.persistSharedState(airport);
+			this.markSharedStateDirty(airport);
 
 			// Broadcast to all clients (including sender)
-			this.broadcastSharedState(airport, patch, controllerId);
+			await this.broadcastSharedState(airport, patch, controllerId);
 
 			this.trackMessage({
 				clientType: 'controller',
@@ -1510,26 +1865,15 @@ export class Connection {
 			return;
 		}
 
-		const promises: Promise<void>[] = [];
+		let recipients = 0;
 		this.sockets.forEach((client, socket) => {
 			if (socket.readyState === WebSocket.OPEN && client.airport === airport) {
-				promises.push(
-					new Promise((resolve) => {
-						try {
-							socket.send(packetString);
-						} catch (error) {
-							console.error(
-								`Failed to send packet over WebSocket: ${error instanceof Error ? error.message : String(error)}`,
-							);
-						} finally {
-							resolve();
-						}
-					}),
-				);
+				recipients++;
+				this.sendSerializedPacket(socket, packetString, 'shared_state_broadcast');
 			}
 		});
 
-		await Promise.all(promises);
+		this.trackBroadcast(packet.type, airport, recipients);
 	}
 
 	private getSharedStateSnapshot(airport: string): Record<string, unknown> {

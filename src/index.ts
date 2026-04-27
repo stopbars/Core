@@ -6,6 +6,7 @@ import { AuthService } from './services/auth';
 import { CacheKeys, withCache } from './services/cache';
 import { DatabaseContextFactory } from './services/database-context';
 import { HttpError } from './services/errors';
+import { cancelResponseBody } from './services/http';
 import { getLightsByObject, type RadarLight } from './services/lights-cache';
 import { rateLimit } from './services/rate-limit';
 import { InstallerProduct } from './services/releases';
@@ -2959,7 +2960,7 @@ app.delete('/airports/:icao/points/:stopbarId/link/:leadOnId', async (c) => {
 	const points = ServicePool.getPoints(c.env);
 
 	try {
-		await points.unlinkLeadOn(leadOnId, user.vatsim_id);
+		await points.unlinkLeadOn(leadOnId, user.vatsim_id, stopbarId);
 		return c.body(null, 204);
 	} catch (error) {
 		if (error instanceof HttpError) {
@@ -5154,6 +5155,63 @@ app.get('/vatsys/profiles', withCache(CacheKeys.fromUrl, 600, 'airports'), async
 	return c.json({ profiles });
 });
 
+/**
+ * @openapi
+ * /vatsys/profiles/generate:
+ *   post:
+ *     summary: Generate vatSys profiles from BARS airport data
+ *     tags:
+ *       - vatSys
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [icao]
+ *             properties:
+ *               icao: { type: string, minLength: 4, maxLength: 4 }
+ *     responses:
+ *       200:
+ *         description: Generated legacy or INTAS profiles
+ *       401:
+ *         description: Unauthorized
+ */
+app.post('/vatsys/profiles/generate', async (c) => {
+	const authz = c.req.header('Authorization') || '';
+	if (!authz.toLowerCase().startsWith('bearer ')) {
+		return c.json({ error: 'Unauthorized' }, 401);
+	}
+
+	const apiKey = authz.slice(7).trim();
+	if (!apiKey) {
+		return c.json({ error: 'Unauthorized' }, 401);
+	}
+
+	const auth = ServicePool.getAuth(c.env);
+	const user = await auth.getUserByApiKey(apiKey);
+	if (!user) {
+		return c.json({ error: 'Unauthorized' }, 401);
+	}
+
+	let body: { icao?: unknown };
+	try {
+		body = (await c.req.json()) as { icao?: unknown };
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
+
+	if (typeof body.icao !== 'string') {
+		return c.json({ error: 'icao is required' }, 400);
+	}
+
+	const generator = ServicePool.getVatSysProfileGenerator(c.env);
+	const result = await generator.generate(body.icao);
+	return c.json(result);
+});
+
 const vatsysStaffApp = new Hono<{ Bindings: Env; Variables: { user?: UserRecord; vatsimUser?: VatsimUser } }>();
 
 vatsysStaffApp.use('*', async (c, next) => {
@@ -6303,8 +6361,10 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 			});
 
 			if (!response.ok && response.status !== 401) {
+				await cancelResponseBody(response);
 				throw new Error(`VATSIM API returned ${response.status}`);
 			}
+			await cancelResponseBody(response);
 		},
 	};
 

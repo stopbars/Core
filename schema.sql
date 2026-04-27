@@ -148,6 +148,9 @@ CREATE TABLE IF NOT EXISTS division_airports (
   requested_by TEXT NOT NULL,
   approved_by TEXT,
   contributions_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  vatsys TEXT NOT NULL DEFAULT '{"is_vatsys":false,"is_legacy":false,"is_intas":false,"intas_osm_taxiways":null}' CHECK (
+    json_valid(vatsys)
+  ),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (

@@ -267,8 +267,8 @@ export class StopbarHandler extends BarsTypeHandler {
 			ELEVATED_LIGHT_INWARD_OFFSET,
 			(baseLineHeading - 90 + 360) % 360,
 		);
-		const firstElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 180 + 90) % 360;
-		const lastElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 180) % 360;
+		const firstElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE) % 360;
+		const lastElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
 
 		// Add the elevated lights with correct positions and inward headings
 		elevatedLights.push({

@@ -1,6 +1,7 @@
 // Lightweight PostHog wrapper: fire-and-forget event capture with automatic { product: 'Core' }.
 
 import { waitUntil as cfWaitUntil } from 'cloudflare:workers';
+import { cancelResponseBody } from './http';
 
 interface PostHogCapturePayload {
 	api_key: string;
@@ -128,6 +129,7 @@ export class PostHogService {
 					if (!res.ok) {
 						console.warn('[PostHog] Non-OK response', res.status);
 					}
+					return cancelResponseBody(res);
 				})
 				.catch((err) => {
 					console.warn('[PostHog] Track failed', err instanceof Error ? err.message : err);

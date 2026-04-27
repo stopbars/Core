@@ -1,4 +1,5 @@
 import type { Context, Next } from 'hono';
+import { cancelResponseBody } from './http';
 
 export class RateLimiter implements DurableObject {
 	private buckets: Record<string, { count: number; resetAt: number }> = {};
@@ -85,7 +86,10 @@ export const rateLimit = (opts: RateLimitOptions = {}) => {
 			body: JSON.stringify({ key, maxRequests, intervalMs }),
 		});
 
-		if (!resp.ok) return c.text('Rate limiter unavailable', 502);
+		if (!resp.ok) {
+			await cancelResponseBody(resp);
+			return c.text('Rate limiter unavailable', 502);
+		}
 
 		const data = (await resp.json().catch(() => ({ wait: 0 }))) as { wait: number };
 

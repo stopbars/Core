@@ -18,6 +18,7 @@ import { FAQService } from './faqs';
 import { ReleaseService } from './releases';
 import { ContactService } from './contact';
 import { DownloadsService } from './downloads';
+import { VatSysProfileGeneratorService } from './vatsys-profile-generator';
 import { VatSysProfilesService } from './vatsys-profiles';
 
 export const ServicePool = (() => {
@@ -117,6 +118,9 @@ export const ServicePool = (() => {
 				vatsysProfiles = new VatSysProfilesService(this.getStorage(env));
 			}
 			return vatsysProfiles;
+		},
+		getVatSysProfileGenerator(env: Env) {
+			return new VatSysProfileGeneratorService(env.DB);
 		},
 	};
 })();

@@ -2,6 +2,8 @@
  * GitHub service for fetching contributor and repository information
  */
 
+import { cancelResponseBody } from './http';
+
 interface GitHubContributor {
 	id: number;
 	login: string;
@@ -78,6 +80,7 @@ export class GitHubService {
 			});
 
 			if (!res.ok) {
+				await cancelResponseBody(res);
 				throw new Error(`Failed to fetch GitHub org repos: ${res.status}`);
 			}
 
@@ -123,6 +126,7 @@ export class GitHubService {
 			});
 
 			if (!res.ok) {
+				await cancelResponseBody(res);
 				if (res.status === 404) {
 					// Repository might not exist or be accessible, skip it
 					return [];

@@ -26,6 +26,28 @@ type PointRow = {
 export class PointsService {
 	private dbSession: DatabaseSessionService;
 
+	private static parseLinkedTo(value: string | null | undefined): string[] {
+		if (!value) return [];
+		try {
+			const parsed = JSON.parse(value);
+			if (Array.isArray(parsed)) {
+				return parsed.filter((id): id is string => typeof id === 'string');
+			}
+			if (typeof parsed === 'string') {
+				return [parsed];
+			}
+		} catch {
+			// Legacy rows stored a single ID directly instead of JSON.
+			return [value];
+		}
+		return [];
+	}
+
+	private static serializeLinkedTo(ids: string[]): string | null {
+		const uniqueIds = [...new Set(ids.filter((id) => id.length > 0))];
+		return uniqueIds.length > 0 ? JSON.stringify(uniqueIds) : null;
+	}
+
 	private static isCoordinate(value: unknown): value is { lat: number; lng: number } {
 		if (!value || typeof value !== 'object') return false;
 		const obj = value as Record<string, unknown>;
@@ -210,8 +232,14 @@ export class PointsService {
 			throw new HttpError(403, 'Forbidden: You do not have permission to delete this point');
 		}
 
-		// Delete from database
-		await this.dbSession.executeWrite('DELETE FROM points WHERE id = ?', [pointId]);
+		const now = new Date().toISOString();
+		const statements = await this.buildUnlinkDeletedPointStatements(point.airportId, [pointId], now);
+		statements.push({
+			query: 'DELETE FROM points WHERE id = ?',
+			params: [pointId],
+		});
+
+		await this.dbSession.executeBatch(statements);
 		try {
 			this.posthog?.track('Point Deleted', { pointId, airportId: point.airportId, userId });
 		} catch (e) {
@@ -351,6 +379,8 @@ export class PointsService {
 
 		const deleteIds = changeset.delete ?? [];
 		if (deleteIds.length > 0) {
+			statements.push(...(await this.buildUnlinkDeletedPointStatements(airportId, deleteIds, now)));
+
 			const maxIdsPerDelete = 99;
 			for (let index = 0; index < deleteIds.length; index += maxIdsPerDelete) {
 				const chunk = deleteIds.slice(index, index + maxIdsPerDelete);
@@ -534,24 +564,8 @@ export class PointsService {
 			coordinates = [raw];
 		}
 
-		// Parse linkedTo - can be JSON array, single string, or null
-		let linkedTo: string[] | undefined;
-		if (dbPoint.linked_to) {
-			try {
-				const parsed = JSON.parse(dbPoint.linked_to);
-				if (Array.isArray(parsed)) {
-					linkedTo = parsed.filter((id): id is string => typeof id === 'string');
-				} else if (typeof parsed === 'string') {
-					linkedTo = [parsed];
-				}
-			} catch {
-				// Not JSON - treat as single ID (legacy format)
-				linkedTo = [dbPoint.linked_to];
-			}
-			if (linkedTo && linkedTo.length === 0) {
-				linkedTo = undefined;
-			}
-		}
+		const parsedLinkedTo = PointsService.parseLinkedTo(dbPoint.linked_to);
+		const linkedTo = parsedLinkedTo.length > 0 ? parsedLinkedTo : undefined;
 
 		return {
 			id: dbPoint.id,
@@ -875,5 +889,41 @@ export class PointsService {
 		}
 
 		return { linked: link.length, unlinked: unlink.length };
+	}
+
+	private async buildUnlinkDeletedPointStatements(
+		airportId: string,
+		pointIds: string[],
+		now: string,
+	): Promise<Array<{ query: string; params: DatabaseSerializable[] }>> {
+		const deletedIds = new Set(pointIds);
+		if (deletedIds.size === 0) {
+			return [];
+		}
+
+		const linkedRows = await this.dbSession.executeRead<{ id: string; linked_to: string | null }>(
+			'SELECT id, linked_to FROM points WHERE airport_id = ? AND linked_to IS NOT NULL',
+			[airportId],
+		);
+
+		const statements: Array<{ query: string; params: DatabaseSerializable[] }> = [];
+		for (const row of linkedRows.results) {
+			if (deletedIds.has(row.id)) {
+				continue;
+			}
+
+			const existingLinks = PointsService.parseLinkedTo(row.linked_to);
+			const remainingLinks = existingLinks.filter((id) => !deletedIds.has(id));
+			if (remainingLinks.length === existingLinks.length) {
+				continue;
+			}
+
+			statements.push({
+				query: 'UPDATE points SET linked_to = ?, updated_at = ? WHERE airport_id = ? AND id = ?',
+				params: [PointsService.serializeLinkedTo(remainingLinks), now, airportId, row.id],
+			});
+		}
+
+		return statements;
 	}
 }

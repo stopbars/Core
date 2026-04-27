@@ -1,5 +1,6 @@
 import { AuthResponse, VatsimUser, VatsimUserResponse } from '../types';
 import { HttpError } from './errors';
+import { cancelResponseBody } from './http';
 
 export class VatsimService {
 	private userCache = new Map<string, { user: VatsimUser; expiresAt: number }>();
@@ -28,6 +29,7 @@ export class VatsimService {
 		});
 
 		if (!res.ok) {
+			await cancelResponseBody(res);
 			throw new Error('Failed to get VATSIM token');
 		}
 		return res.json();
@@ -53,6 +55,7 @@ export class VatsimService {
 			// Map common statuses to client-friendly errors
 			const status = res.status;
 			const text = res.statusText || 'VATSIM API error';
+			await cancelResponseBody(res);
 			if (status === 401) {
 				throw new HttpError(401, 'Unauthorized: invalid or expired VATSIM token');
 			}
@@ -113,6 +116,7 @@ export class VatsimService {
 			});
 
 			if (!response.ok) {
+				await cancelResponseBody(response);
 				return null;
 			}
 
@@ -151,6 +155,7 @@ export class VatsimService {
 			});
 
 			if (!response.ok) {
+				await cancelResponseBody(response);
 				return null;
 			}
 

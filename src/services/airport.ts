@@ -2,6 +2,7 @@ import { DatabaseSessionService } from './database-session';
 import { PostHogService } from './posthog';
 import { calculateDistance } from './bars/geoUtils';
 import { HttpError } from './errors';
+import { cancelResponseBody } from './http';
 
 interface AirportData {
 	latitude_deg?: number;
@@ -171,6 +172,7 @@ export class AirportService {
 					method: 'GET',
 				});
 				if (!response.ok) {
+					await cancelResponseBody(response);
 					if (response.status === 404) return null;
 					throw new HttpError(503, 'Bounding box unavailable');
 				}
@@ -473,6 +475,7 @@ export class AirportService {
 			try {
 				const res = await fetch(url, { method: 'GET', headers: { 'User-Agent': 'BARS-Core/1.0 (bbox lookup)' } });
 				if (!res.ok) {
+					await cancelResponseBody(res);
 					if (res.status === 429 || res.status >= 500) {
 						if (attempt < maxAttempts - 1) {
 							await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt)));
@@ -564,7 +567,10 @@ export class AirportService {
 	): Promise<{ country_code: string | null; country_name: string | null; region_name: string | null } | null> {
 		try {
 			const response = await fetch(`https://airportdb.io/api/v1/airport/${icao}?apiToken=${this.apiToken}`, { method: 'GET' });
-			if (!response.ok) return null;
+			if (!response.ok) {
+				await cancelResponseBody(response);
+				return null;
+			}
 			const data = (await response.json()) as AirportData;
 
 			const country_code = data.iso_country?.trim().toUpperCase() || data.country?.code?.trim().toUpperCase() || null;
@@ -596,7 +602,10 @@ export class AirportService {
 	): Promise<{ elevation_ft: number; elevation_m: number } | null> {
 		try {
 			const response = await fetch(`https://airportdb.io/api/v1/airport/${icao}?apiToken=${this.apiToken}`, { method: 'GET' });
-			if (!response.ok) return null;
+			if (!response.ok) {
+				await cancelResponseBody(response);
+				return null;
+			}
 			const data = (await response.json()) as AirportData;
 			if (!data.elevation_ft) return null;
 
