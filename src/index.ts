@@ -3994,6 +3994,10 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *         schema:
  *           type: boolean
  *         description: Include aggregate counts for contribution statuses when true.
+ *       - in: header
+ *         name: Authorization
+ *         required: false
+ *         description: Bearer API key. When provided, returns only that user's contributions and includes summary counts.
  *     responses:
  *       200:
  *         description: Contributions listed
@@ -4002,7 +4006,8 @@ contributionsApp.get(
 	'/',
 	withCache(CacheKeys.fromUrl, 60, 'contributions', (req) => {
 		const url = new URL(req.url);
-		return (url.searchParams.get('summary') || 'false').toLowerCase() === 'true';
+		const hasBearerApiKey = (req.headers.get('Authorization') || '').toLowerCase().startsWith('bearer ');
+		return hasBearerApiKey || (url.searchParams.get('summary') || 'false').toLowerCase() === 'true';
 	}),
 	async (c) => {
 		const contributions = ServicePool.getContributions(c.env);
@@ -4010,9 +4015,28 @@ contributionsApp.get(
 		// Parse query parameters for filtering
 		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
 		const airportIcao = c.req.query('airport') || undefined;
-		const userId = c.req.query('user') || undefined;
+		const requestedUserId = c.req.query('user') || undefined;
 		const simple = (c.req.query('simple') || 'false').toLowerCase() === 'true';
-		const includeSummary = (c.req.query('summary') || 'false').toLowerCase() === 'true';
+		const authz = c.req.header('Authorization') || '';
+		let authenticatedUserId: string | undefined;
+
+		if (authz.toLowerCase().startsWith('bearer ')) {
+			const apiKey = authz.slice(7).trim();
+			if (!apiKey) {
+				return c.text('Unauthorized', 401);
+			}
+
+			const auth = ServicePool.getAuth(c.env);
+			const user = await auth.getUserByApiKey(apiKey);
+			if (!user) {
+				return c.text('Unauthorized', 401);
+			}
+
+			authenticatedUserId = user.vatsim_id;
+		}
+
+		const userId = authenticatedUserId ?? requestedUserId;
+		const includeSummary = authenticatedUserId !== undefined || (c.req.query('summary') || 'false').toLowerCase() === 'true';
 
 		if (simple && includeSummary) {
 			return c.json({ error: 'summary cannot be combined with simple view' }, 400);
