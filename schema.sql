@@ -255,6 +255,15 @@ CREATE TABLE IF NOT EXISTS contact_messages (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS contribution_generations (
+  token TEXT PRIMARY KEY,
+  icao TEXT NOT NULL,
+  supports_key TEXT NOT NULL,
+  bars_key TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL DEFAULT (datetime('now', '+1 day'))
+);
+
 CREATE TABLE IF NOT EXISTS downloads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT NOT NULL,
@@ -466,6 +475,10 @@ CREATE INDEX IF NOT EXISTS idx_contact_messages_ip_created ON contact_messages (
 
 CREATE INDEX IF NOT EXISTS idx_contact_messages_status ON contact_messages (
   status
+);
+
+CREATE INDEX IF NOT EXISTS idx_contribution_generations_expires_at ON contribution_generations (
+  expires_at
 );
 
 CREATE INDEX IF NOT EXISTS idx_downloads_product ON downloads (

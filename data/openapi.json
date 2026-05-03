@@ -2129,6 +2129,9 @@
 						"in": "header",
 						"name": "Authorization",
 						"required": false,
+						"schema": {
+							"type": "string"
+						},
 						"description": "Bearer API key. When provided, returns only that user's contributions and includes summary counts."
 					}
 				],

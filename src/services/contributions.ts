@@ -6,6 +6,7 @@ import { PolygonService } from './polygons';
 import { PostHogService } from './posthog';
 import { sanitizeContributionXml } from './xml-sanitizer';
 import { DivisionService } from './divisions';
+import { DatabaseContextFactory } from './database-context';
 
 export type Simulator = 'msfs2020' | 'msfs2024';
 
@@ -57,6 +58,47 @@ import { DatabaseSessionService } from './database-session';
 export const MAX_CONTRIBUTION_NOTES_CHARS = 1000;
 export const MAX_CONTRIBUTION_PACKAGE_CHARS = 64;
 const ICAO_REGEX = /^[A-Z0-9]{4}$/;
+/** URL-safe base64 (no padding) of SHA-256(msfsXml|ICAO). */
+export const CONTRIBUTION_GENERATION_TOKEN_REGEX = /^[A-Za-z0-9_-]{43}$/;
+
+function sha256ToBase64Url(hashBuf: ArrayBuffer): string {
+	const bytes = new Uint8Array(hashBuf);
+	let binary = '';
+	for (let i = 0; i < bytes.length; i += 1) {
+		binary += String.fromCharCode(bytes[i]);
+	}
+	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export async function deriveContributionGenerationTokenFromMsfsXml(sanitizedXml: string, icaoUpper: string): Promise<string> {
+	const enc = new TextEncoder();
+	const icao = icaoUpper.trim().toUpperCase();
+	const data = enc.encode(`${sanitizedXml}|${icao}`);
+	const hashBuf = await crypto.subtle.digest('SHA-256', data);
+	return sha256ToBase64Url(hashBuf);
+}
+
+interface StoredContributionGenerationRow {
+	icao: string;
+	supports_key?: string;
+	bars_key?: string;
+	supports_xml?: string;
+	bars_xml?: string;
+	expires_at: string;
+}
+
+export type ContributionGenerationLookupResult =
+	| {
+		status: 'ok';
+		token: string;
+		icao: string;
+		supportsXml: string;
+		barsXml: string;
+		expiresAt: string;
+	}
+	| { status: 'invalid-token' }
+	| { status: 'not-found' }
+	| { status: 'payload-not-found' };
 
 export class ContributionService {
 	private airportService: AirportService;
@@ -70,15 +112,201 @@ export class ContributionService {
 		private db: D1Database,
 		private roleService: RoleService,
 		apiKey: string,
-		storage: R2Bucket,
+		private storage: R2Bucket,
 		private posthog?: PostHogService,
 	) {
 		this.airportService = new AirportService(db, apiKey);
 		this.supportService = new SupportService(db);
 		this.polygonService = new PolygonService(db, undefined, posthog);
-		this.storageService = new StorageService(storage);
+		this.storageService = new StorageService(this.storage);
 		this.divisionService = new DivisionService(db, posthog);
 		this.dbSession = new DatabaseSessionService(db);
+	}
+
+	private async insertContributionGenerationRow(
+		session: ReturnType<typeof DatabaseContextFactory.createSessionService>,
+		token: string,
+		icao: string,
+		supportsKey: string,
+		barsKey: string,
+	): Promise<void> {
+		try {
+			await session.executeWrite(
+				`
+			INSERT INTO contribution_generations (token, icao, supports_key, bars_key, expires_at)
+			VALUES (?, ?, ?, ?, datetime('now', '+1 day'))
+		`,
+				[token, icao.toUpperCase(), supportsKey, barsKey],
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message.toLowerCase() : '';
+			if (!message.includes('no such column')) {
+				throw error;
+			}
+
+			// Compatibility for the initial production table, which used XML column names.
+			await session.executeWrite(
+				`
+			INSERT INTO contribution_generations (token, icao, supports_xml, bars_xml, expires_at)
+			VALUES (?, ?, ?, ?, datetime('now', '+1 day'))
+		`,
+				[token, icao.toUpperCase(), supportsKey, barsKey],
+			);
+		}
+	}
+
+	private async readContributionGenerationXml(keyOrXml: string | undefined): Promise<string | null> {
+		if (!keyOrXml) {
+			return null;
+		}
+		if (!keyOrXml.startsWith('contribution-generations/')) {
+			return keyOrXml;
+		}
+
+		const object = await this.storage.get(keyOrXml);
+		return object ? object.text() : null;
+	}
+
+	async cleanupExpiredGenerations(): Promise<void> {
+		const session = DatabaseContextFactory.createSessionService(this.db);
+		try {
+			let expiredKeys: string[] = [];
+			try {
+				const expired = await session.executeLatest<Pick<StoredContributionGenerationRow, 'supports_key' | 'bars_key'>>(
+					"SELECT supports_key, bars_key FROM contribution_generations WHERE expires_at <= datetime('now')",
+				);
+				expiredKeys = expired.results.flatMap((row) => [row.supports_key, row.bars_key].filter((key): key is string => Boolean(key)));
+			} catch (error) {
+				const message = error instanceof Error ? error.message.toLowerCase() : '';
+				if (!message.includes('no such column')) {
+					throw error;
+				}
+
+				const expired = await session.executeLatest<Pick<StoredContributionGenerationRow, 'supports_xml' | 'bars_xml'>>(
+					"SELECT supports_xml, bars_xml FROM contribution_generations WHERE expires_at <= datetime('now')",
+				);
+				expiredKeys = expired.results.flatMap((row) => [row.supports_xml, row.bars_xml].filter((key): key is string => Boolean(key)));
+			}
+
+			await session.executeWrite("DELETE FROM contribution_generations WHERE expires_at <= datetime('now')");
+			await Promise.all(expiredKeys.filter((key) => key.startsWith('contribution-generations/')).map((key) => this.storage.delete(key)));
+		} catch (error) {
+			try {
+				console.warn('[Cron] Failed to clean up contribution_generations:', error instanceof Error ? error.message : error);
+			} catch {
+				/* ignore logging issues */
+			}
+		} finally {
+			session.closeSession();
+		}
+	}
+
+	async storeGeneration(icao: string, supportsXml: string, barsXml: string, contentToken: string): Promise<string> {
+		const token = contentToken;
+		const icaoUpper = icao.trim().toUpperCase();
+
+		const session = DatabaseContextFactory.createSessionService(this.db);
+		try {
+			await session.executeWrite("DELETE FROM contribution_generations WHERE token = ? AND expires_at <= datetime('now')", [token]);
+
+			const existing = await session.executeLatest<{ one: number }>(
+				`
+			SELECT 1 AS one FROM contribution_generations
+			WHERE token = ? AND expires_at > datetime('now')
+			LIMIT 1
+		`,
+				[token],
+			);
+			if (existing.results[0]) {
+				return token;
+			}
+
+			const supportsKey = `contribution-generations/${token}/supports.xml`;
+			const barsKey = `contribution-generations/${token}/bars.xml`;
+
+			await Promise.all([
+				this.storage.put(supportsKey, supportsXml, {
+					httpMetadata: { contentType: 'application/xml' },
+				}),
+				this.storage.put(barsKey, barsXml, {
+					httpMetadata: { contentType: 'application/xml' },
+				}),
+			]);
+
+			try {
+				await this.insertContributionGenerationRow(session, token, icaoUpper, supportsKey, barsKey);
+			} catch (error) {
+				const message = error instanceof Error ? error.message.toLowerCase() : '';
+				if (!message.includes('unique') && !message.includes('constraint')) {
+					await Promise.all([this.storage.delete(supportsKey), this.storage.delete(barsKey)]).catch(() => undefined);
+					throw error;
+				}
+			}
+			return token;
+		} finally {
+			session.closeSession();
+		}
+	}
+
+	async getStoredGeneration(tokenParam: string | undefined): Promise<ContributionGenerationLookupResult> {
+		const token = tokenParam?.trim() || '';
+		if (!CONTRIBUTION_GENERATION_TOKEN_REGEX.test(token)) {
+			return { status: 'invalid-token' };
+		}
+
+		const session = DatabaseContextFactory.createSessionService(this.db);
+		try {
+			let result;
+			try {
+				result = await session.executeLatest<StoredContributionGenerationRow>(
+					`
+				SELECT icao, supports_key, bars_key, expires_at
+				FROM contribution_generations
+				WHERE token = ? AND expires_at > datetime('now')
+				LIMIT 1
+			`,
+					[token],
+				);
+			} catch (error) {
+				const message = error instanceof Error ? error.message.toLowerCase() : '';
+				if (!message.includes('no such column')) {
+					throw error;
+				}
+
+				result = await session.executeLatest<StoredContributionGenerationRow>(
+					`
+				SELECT icao, supports_xml, bars_xml, expires_at
+				FROM contribution_generations
+				WHERE token = ? AND expires_at > datetime('now')
+				LIMIT 1
+			`,
+					[token],
+				);
+			}
+			const generation = result.results[0];
+			if (!generation) {
+				return { status: 'not-found' };
+			}
+
+			const [supportsXml, barsXml] = await Promise.all([
+				this.readContributionGenerationXml(generation.supports_key ?? generation.supports_xml),
+				this.readContributionGenerationXml(generation.bars_key ?? generation.bars_xml),
+			]);
+			if (!supportsXml || !barsXml) {
+				return { status: 'payload-not-found' };
+			}
+
+			return {
+				status: 'ok',
+				token,
+				icao: generation.icao,
+				supportsXml,
+				barsXml,
+				expiresAt: generation.expires_at,
+			};
+		} finally {
+			session.closeSession();
+		}
 	}
 
 	private normalizeAirportIcao(raw: string): string {

@@ -14,6 +14,7 @@ import { StaffRole } from './services/roles';
 import { ServicePool } from './services/service-pool';
 import { UserService } from './services/users';
 import { VatsimService } from './services/vatsim';
+import { deriveContributionGenerationTokenFromMsfsXml } from './services/contributions';
 import { MAX_CONTRIBUTION_XML_BYTES, sanitizeContributionXml } from './services/xml-sanitizer';
 import { AirportObject, PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
@@ -178,6 +179,17 @@ interface ContributionDecisionPayload {
 	rejectionReason?: string;
 	newPackageName?: string;
 }
+
+interface ContributionGenerationCacheEntry {
+	icao: string;
+	expiresAt: string;
+	supportsXml: string;
+	barsXml: string;
+}
+
+const CONTRIBUTION_GENERATION_CACHE_NAMESPACE = 'generation';
+const CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS = 86400;
+const MIN_CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS = 1;
 
 type VatsimConnectionStatus = {
 	callsign: string;
@@ -2572,12 +2584,7 @@ divisionsApp.patch('/:id/airports/:airportId/contributions', async (c) => {
 		return c.json({ error: 'contributionsEnabled must be a boolean' }, 400);
 	}
 
-	const airport = await divisions.updateAirportContributionsEnabled(
-		divisionId,
-		airportId,
-		vatsimUser.id,
-		payload.contributionsEnabled,
-	);
+	const airport = await divisions.updateAirportContributionsEnabled(divisionId, airportId, vatsimUser.id, payload.contributionsEnabled);
 	return c.json(airport);
 });
 
@@ -3290,6 +3297,61 @@ app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
 	});
 });
 
+const getStoredContributionGenerationResponse = async (c: Context): Promise<Response> => {
+	const result = await ServicePool.getContributions(c.env).getStoredGeneration(c.req.query('token'));
+	switch (result.status) {
+		case 'invalid-token':
+			return c.json({ error: 'Invalid generation token' }, 400);
+		case 'not-found':
+			return c.json({ error: 'Generation not found or expired' }, 404);
+		case 'payload-not-found':
+			return c.json({ error: 'Generation payload not found' }, 404);
+		case 'ok':
+			c.header('X-Cache-Gen', 'TOKEN');
+			return c.json({
+				token: result.token,
+				icao: result.icao,
+				supportsXml: result.supportsXml,
+				barsXml: result.barsXml,
+				expiresAt: result.expiresAt,
+			});
+	}
+};
+
+const getContributionGenerationCacheKey = (token: string): string => `supports-gen:${token}`;
+
+const getContributionGenerationExpiresAt = (): string => new Date(Date.now() + CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS * 1000).toISOString();
+
+const getContributionGenerationTtlSeconds = (expiresAt?: string): number => {
+	if (!expiresAt) {
+		return CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS;
+	}
+	const expiresAtMs = Date.parse(`${expiresAt.replace(' ', 'T')}Z`);
+	if (!Number.isFinite(expiresAtMs)) {
+		return CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS;
+	}
+	const remainingSeconds = Math.floor((expiresAtMs - Date.now()) / 1000);
+	return Math.max(MIN_CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS, Math.min(CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS, remainingSeconds));
+};
+
+const cacheContributionGeneration = (c: Context, token: string, entry: ContributionGenerationCacheEntry, ttl?: number): void => {
+	const cacheService = ServicePool.getCache(c.env);
+	const cacheWrite = cacheService.set(getContributionGenerationCacheKey(token), entry, {
+		ttl: ttl ?? CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS,
+		namespace: CONTRIBUTION_GENERATION_CACHE_NAMESPACE,
+	});
+
+	try {
+		if (c.executionCtx) {
+			c.executionCtx.waitUntil(cacheWrite);
+		} else {
+			cacheWrite.catch(() => undefined);
+		}
+	} catch {
+		cacheWrite.catch(() => undefined);
+	}
+};
+
 /**
  * @openapi
  * /supports/generate:
@@ -3298,6 +3360,13 @@ app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
  *     tags:
  *       - Generation
  *     description: Upload raw XML and generate both light supports XML and processed BARS XML.
+ *     parameters:
+ *       - in: query
+ *         name: token
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: Fetch a stored generation by token instead of uploading XML.
  *     requestBody:
  *       required: true
  *       content:
@@ -3317,126 +3386,181 @@ app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
  *       400:
  *         description: Validation error
  */
-app.post('/supports/generate', rateLimit({ maxRequests: 2 }), async (c) => {
-	try {
-		const formData = await c.req.formData();
-		const xmlFile = formData.get('xmlFile');
-		const icao = formData.get('icao')?.toString();
+app.get('/supports/generate', async (c) => {
+	if (c.req.query('token') === undefined) {
+		return c.json({ error: 'Generation token is required' }, 400);
+	}
+	return getStoredContributionGenerationResponse(c);
+});
 
-		if (!xmlFile || !(xmlFile instanceof File)) {
-			return c.json({ error: 'XML file is required' }, 400);
+const contributionGenerateRateLimit = rateLimit({ maxRequests: 2 });
+
+app.post(
+	'/supports/generate',
+	async (c, next) => {
+		if (c.req.query('token') !== undefined) {
+			return getStoredContributionGenerationResponse(c);
 		}
-		if (!icao) {
-			return c.json({ error: 'ICAO code is required' }, 400);
-		}
-
-		// Enforce XML content type or .xml extension for safety
-		const fileType = (xmlFile as File).type?.toLowerCase() || '';
-		const fileName = (xmlFile as File).name || '';
-		const looksXml =
-			fileType === 'application/xml' || fileType === 'text/xml' || fileType === 'application/x-xml' || /\.xml$/i.test(fileName);
-		if (!looksXml) {
-			return c.json({ error: 'Invalid file type. Please upload an XML file.' }, 400);
-		}
-
-		const MAX_XML_BYTES = MAX_CONTRIBUTION_XML_BYTES; // 5 MB
-		if (xmlFile.size > MAX_XML_BYTES) {
-			return c.json({ error: `XML file too large (>${MAX_XML_BYTES} bytes)` }, 400);
-		}
-
-		const rawXml = await xmlFile.text();
-
-		let sanitized: string;
+		return contributionGenerateRateLimit(c, next);
+	},
+	async (c) => {
 		try {
-			sanitized = sanitizeContributionXml(rawXml, { maxBytes: MAX_XML_BYTES });
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : 'Invalid XML';
-			return c.json({ error: msg }, 400);
-		}
+			const formData = await c.req.formData();
+			const xmlFile = formData.get('xmlFile');
+			const icao = formData.get('icao')?.toString();
 
-		// const enc = new TextEncoder();
-		// const data = enc.encode(sanitized + '|' + icao.toUpperCase());
-		// const hashBuf = await crypto.subtle.digest('SHA-256', data);
-		// const hashArr = Array.from(new Uint8Array(hashBuf));
-		// const hashHex = hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
-		// const cacheKey = `supports-gen:${icao.toUpperCase()}:${hashHex}`;
-		// const cacheNamespace = 'generation';
-		// const cacheTtlSeconds = 86400;
+			if (!xmlFile || !(xmlFile instanceof File)) {
+				return c.json({ error: 'XML file is required' }, 400);
+			}
+			if (!icao) {
+				return c.json({ error: 'ICAO code is required' }, 400);
+			}
 
-		// const cacheService = ServicePool.getCache(c.env);
-		// const cached = await cacheService.get<{ supportsXml: string; barsXml: string }>(cacheKey, cacheNamespace).catch(() => null);
-		// if (cached) {
-		// 	c.header('X-Cache-Gen', 'HIT');
-		// 	return c.json(cached);
-		// }
+			// Enforce XML content type or .xml extension for safety
+			const fileType = (xmlFile as File).type?.toLowerCase() || '';
+			const fileName = (xmlFile as File).name || '';
+			const looksXml =
+				fileType === 'application/xml' || fileType === 'text/xml' || fileType === 'application/x-xml' || /\.xml$/i.test(fileName);
+			if (!looksXml) {
+				return c.json({ error: 'Invalid file type. Please upload an XML file.' }, 400);
+			}
 
-		const supportService = ServicePool.getSupport(c.env);
-		const polygonService = ServicePool.getPolygons(c.env);
+			const MAX_XML_BYTES = MAX_CONTRIBUTION_XML_BYTES; // 5 MB
+			if (xmlFile.size > MAX_XML_BYTES) {
+				return c.json({ error: `XML file too large (>${MAX_XML_BYTES} bytes)` }, 400);
+			}
 
-		const totalStart = performance.now();
-		let supportsDuration = 0;
-		let barsDuration = 0;
+			const rawXml = await xmlFile.text();
 
-		const supportsPromise = (async () => {
-			const start = performance.now();
-			const result = await supportService.generateLightSupportsXML(sanitized, icao);
-			supportsDuration = performance.now() - start;
-			return result;
-		})();
-
-		const barsPromise = (async () => {
-			const start = performance.now();
-			const result = await polygonService.processBarsXML(sanitized, icao);
-			barsDuration = performance.now() - start;
-			return result;
-		})();
-
-		const [supportsXml, barsXml] = await Promise.all([supportsPromise, barsPromise]);
-		const totalDuration = performance.now() - totalStart;
-
-		const serverTiming: string[] = [];
-		serverTiming.push(`supports;dur=${supportsDuration.toFixed(2)}`);
-		serverTiming.push(`bars;dur=${barsDuration.toFixed(2)}`);
-		serverTiming.push(`total;dur=${totalDuration.toFixed(2)}`);
-		c.header('Server-Timing', serverTiming.join(', '));
-
-		//cacheService.set(cacheKey, { supportsXml, barsXml }, { ttl: cacheTtlSeconds, namespace: cacheNamespace }).catch(() => { });
-		c.header('X-Cache-Gen', 'MISS');
-		return c.json({ supportsXml, barsXml });
-	} catch (error) {
-		if (error instanceof HttpError) {
-			throw error;
-		}
-		const rawMessage = error instanceof Error ? error.message : 'Unknown error';
-		const normalized = rawMessage.toLowerCase();
-		const userFacingPatterns = [
-			'no remove polygons',
-			'no valid remove polygons',
-			'no bars polygons',
-			'no valid bars objects',
-			'no bars points found within',
-			'airport with icao',
-			'invalid xml',
-		];
-		const matchesUserError = userFacingPatterns.some((pattern) => normalized.includes(pattern));
-		if (matchesUserError) {
-			const lastColonIndex = rawMessage.lastIndexOf(':');
-			const friendlyMessage = lastColonIndex >= 0 ? rawMessage.slice(lastColonIndex + 1).trim() || rawMessage : rawMessage;
+			let sanitized: string;
 			try {
-				console.warn('Support generation validation error:', rawMessage);
+				sanitized = sanitizeContributionXml(rawXml, { maxBytes: MAX_XML_BYTES });
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : 'Invalid XML';
+				return c.json({ error: msg }, 400);
+			}
+
+			const icaoUpper = icao.trim().toUpperCase();
+			const contentToken = await deriveContributionGenerationTokenFromMsfsXml(sanitized, icaoUpper);
+
+			const cacheService = ServicePool.getCache(c.env);
+			const cacheKey = getContributionGenerationCacheKey(contentToken);
+
+			const cachedEdge = await cacheService
+				.get<ContributionGenerationCacheEntry>(cacheKey, CONTRIBUTION_GENERATION_CACHE_NAMESPACE)
+				.catch(() => null);
+			if (cachedEdge) {
+				c.header('X-Cache-Gen', 'HIT');
+				return c.json({
+					token: contentToken,
+					icao: cachedEdge.icao,
+					expiresAt: cachedEdge.expiresAt,
+					supportsXml: cachedEdge.supportsXml,
+					barsXml: cachedEdge.barsXml,
+				});
+			}
+
+			const contributionsService = ServicePool.getContributions(c.env);
+			const storedGen = await contributionsService.getStoredGeneration(contentToken);
+			if (storedGen.status === 'ok') {
+				const cacheTtlSeconds = getContributionGenerationTtlSeconds(storedGen.expiresAt);
+				c.header('X-Cache-Gen', 'HIT');
+				cacheContributionGeneration(
+					c,
+					storedGen.token,
+					{
+						icao: storedGen.icao,
+						expiresAt: storedGen.expiresAt,
+						supportsXml: storedGen.supportsXml,
+						barsXml: storedGen.barsXml,
+					},
+					cacheTtlSeconds,
+				);
+				return c.json({
+					token: storedGen.token,
+					icao: storedGen.icao,
+					expiresAt: storedGen.expiresAt,
+					supportsXml: storedGen.supportsXml,
+					barsXml: storedGen.barsXml,
+				});
+			}
+
+			const supportService = ServicePool.getSupport(c.env);
+			const polygonService = ServicePool.getPolygons(c.env);
+
+			const totalStart = performance.now();
+			let supportsDuration = 0;
+			let barsDuration = 0;
+
+			const supportsPromise = (async () => {
+				const start = performance.now();
+				const result = await supportService.generateLightSupportsXML(sanitized, icaoUpper);
+				supportsDuration = performance.now() - start;
+				return result;
+			})();
+
+			const barsPromise = (async () => {
+				const start = performance.now();
+				const result = await polygonService.processBarsXML(sanitized, icaoUpper);
+				barsDuration = performance.now() - start;
+				return result;
+			})();
+
+			const [supportsXml, barsXml] = await Promise.all([supportsPromise, barsPromise]);
+			const totalDuration = performance.now() - totalStart;
+
+			const serverTiming: string[] = [];
+			serverTiming.push(`supports;dur=${supportsDuration.toFixed(2)}`);
+			serverTiming.push(`bars;dur=${barsDuration.toFixed(2)}`);
+			serverTiming.push(`total;dur=${totalDuration.toFixed(2)}`);
+			c.header('Server-Timing', serverTiming.join(', '));
+
+			await contributionsService.storeGeneration(icaoUpper, supportsXml, barsXml, contentToken);
+			const expiresAt = getContributionGenerationExpiresAt();
+			cacheContributionGeneration(c, contentToken, { icao: icaoUpper, expiresAt, supportsXml, barsXml });
+			c.header('X-Cache-Gen', 'MISS');
+			return c.json({
+				token: contentToken,
+				icao: icaoUpper,
+				expiresAt,
+				supportsXml,
+				barsXml,
+			});
+		} catch (error) {
+			if (error instanceof HttpError) {
+				throw error;
+			}
+			const rawMessage = error instanceof Error ? error.message : 'Unknown error';
+			const normalized = rawMessage.toLowerCase();
+			const userFacingPatterns = [
+				'no remove polygons',
+				'no valid remove polygons',
+				'no bars polygons',
+				'no valid bars objects',
+				'no bars points found within',
+				'airport with icao',
+				'invalid xml',
+			];
+			const matchesUserError = userFacingPatterns.some((pattern) => normalized.includes(pattern));
+			if (matchesUserError) {
+				const lastColonIndex = rawMessage.lastIndexOf(':');
+				const friendlyMessage = lastColonIndex >= 0 ? rawMessage.slice(lastColonIndex + 1).trim() || rawMessage : rawMessage;
+				try {
+					console.warn('Support generation validation error:', rawMessage);
+				} catch {
+					/* ignore logging failures */
+				}
+				return c.json({ error: friendlyMessage }, 400);
+			}
+			try {
+				console.error('Error generating XMLs:', error);
 			} catch {
 				/* ignore logging failures */
 			}
-			return c.json({ error: friendlyMessage }, 400);
+			return c.json({ error: 'Internal server error while generating XMLs' }, 500);
 		}
-		try {
-			console.error('Error generating XMLs:', error);
-		} catch {
-			/* ignore logging failures */
-		}
-		return c.json({ error: 'Internal server error while generating XMLs' }, 500);
-	}
-});
+	},
+);
 
 /**
  * @openapi
@@ -5840,7 +5964,12 @@ app.post('/staff/bars-packages/upload', async (c) => {
 app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) => {
 	try {
 		const storage = ServicePool.getStorage(c.env);
-		const KEYS = ['packages/bars-models-2024.zip', 'packages/bars-models-2020.zip', 'packages/bars-removals-2020.zip', 'packages/bars-removals-2024.zip'];
+		const KEYS = [
+			'packages/bars-models-2024.zip',
+			'packages/bars-models-2020.zip',
+			'packages/bars-removals-2020.zip',
+			'packages/bars-removals-2024.zip',
+		];
 		const results = await Promise.all(
 			KEYS.map(async (key) => {
 				try {
@@ -6440,6 +6569,8 @@ export default {
 		return app.fetch(request, env, ctx);
 	},
 	async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-		ctx.waitUntil(cleanupStaleActiveObjects(env));
+		ctx.waitUntil(
+			Promise.all([cleanupStaleActiveObjects(env), ServicePool.getContributions(env).cleanupExpiredGenerations()]).then(() => undefined),
+		);
 	},
 };
