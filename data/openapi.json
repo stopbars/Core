@@ -2140,7 +2140,10 @@
 						"in": "header",
 						"name": "Authorization",
 						"required": false,
-						"description": "Bearer API key. When provided, returns only that user's contributions and includes summary counts."
+						"description": "Bearer API key. When provided, returns only that user's contributions and includes summary counts.",
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {

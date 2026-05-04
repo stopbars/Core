@@ -4122,6 +4122,8 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *         name: Authorization
  *         required: false
  *         description: Bearer API key. When provided, returns only that user's contributions and includes summary counts.
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
  *         description: Contributions listed
