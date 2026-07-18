@@ -4,6 +4,8 @@ import { cancelResponseBody } from './http';
 
 export class VatsimService {
 	private userCache = new Map<string, { user: VatsimUser; expiresAt: number }>();
+	private pendingUserRequests = new Map<string, Promise<VatsimUser>>();
+	private pendingConnectionRequests = new Map<string, Promise<string | null>>();
 	private readonly userCacheTtlMs: number;
 
 	constructor(
@@ -45,7 +47,21 @@ export class VatsimService {
 				this.userCache.delete(token);
 			}
 		}
+		const pending = this.pendingUserRequests.get(token);
+		if (pending) return pending;
 
+		const request = this.fetchAndCacheUser(token);
+		this.pendingUserRequests.set(token, request);
+		try {
+			return await request;
+		} finally {
+			if (this.pendingUserRequests.get(token) === request) {
+				this.pendingUserRequests.delete(token);
+			}
+		}
+	}
+
+	private async fetchAndCacheUser(token: string): Promise<VatsimUser> {
 		const res = await fetch('https://auth.vatsim.net/api/user', {
 			headers: { Authorization: `Bearer ${token}` },
 		});
@@ -88,13 +104,20 @@ export class VatsimService {
 		};
 
 		if (this.userCacheTtlMs > 0) {
-			if (this.userCache.size > 1024) {
+			if (this.userCache.size >= 1024) {
 				const now = Date.now();
 				for (const [cacheToken, entry] of this.userCache) {
 					if (entry.expiresAt <= now) {
 						this.userCache.delete(cacheToken);
 					}
-					if (this.userCache.size <= 512) break;
+				}
+				if (this.userCache.size >= 1024) {
+					const entriesToEvict = this.userCache.size - 511;
+					let evicted = 0;
+					for (const cacheToken of this.userCache.keys()) {
+						this.userCache.delete(cacheToken);
+						if (++evicted >= entriesToEvict) break;
+					}
 				}
 			}
 			this.userCache.set(token, { user, expiresAt: Date.now() + this.userCacheTtlMs });
@@ -104,28 +127,14 @@ export class VatsimService {
 	}
 	async getUserStatus(userId: string): Promise<{ cid: string; callsign: string; type: string } | null> {
 		try {
-			if (!/^\d+$/.test(userId)) {
+			const text = await this.getUserConnectionsCsv(userId);
+			if (text === null) return null;
+			const trimmed = text.trim();
+			if (!trimmed) {
 				return null;
 			}
 
-			const params = new URLSearchParams({ CID: userId });
-			const url = `https://slurper.vatsim.net/users/info?${params.toString()}`;
-
-			const response = await fetch(url, {
-				signal: AbortSignal.timeout(5000),
-			});
-
-			if (!response.ok) {
-				await cancelResponseBody(response);
-				return null;
-			}
-
-			const text = await response.text();
-			if (!text.trim()) {
-				return null;
-			}
-
-			const parts = text.trim().split(',');
+			const parts = trimmed.split(',');
 			if (parts.length < 3) {
 				return null;
 			}
@@ -142,11 +151,26 @@ export class VatsimService {
 	}
 
 	async getUserConnectionsCsv(userId: string): Promise<string | null> {
-		try {
-			if (!/^\d+$/.test(userId)) {
-				return null;
-			}
+		if (!/^\d+$/.test(userId)) {
+			return null;
+		}
 
+		const pending = this.pendingConnectionRequests.get(userId);
+		if (pending) return pending;
+
+		const request = this.fetchUserConnectionsCsv(userId);
+		this.pendingConnectionRequests.set(userId, request);
+		try {
+			return await request;
+		} finally {
+			if (this.pendingConnectionRequests.get(userId) === request) {
+				this.pendingConnectionRequests.delete(userId);
+			}
+		}
+	}
+
+	private async fetchUserConnectionsCsv(userId: string): Promise<string | null> {
+		try {
 			const params = new URLSearchParams({ cid: userId });
 			const url = `https://slurper.vatsim.net/users/info?${params.toString()}`;
 
@@ -164,26 +188,14 @@ export class VatsimService {
 			return null;
 		}
 	}
-	private readonly ControllerSuffixes = new Set([
-		'DEL',
-		'RMP',
-		'GND',
-		'TWR',
-		'DEP',
-		'APP',
-		'CTR',
-		'FSS',
-		'RDO',
-		'TMU',
-		'FMP',
-	]);
+	private readonly ControllerSuffixes = new Set(['DEL', 'RMP', 'GND', 'TWR', 'DEP', 'APP', 'CTR', 'FSS', 'RDO', 'TMU', 'FMP']);
 
 	private getCallsignSuffix(callsign?: string | null): string | null {
 		if (!callsign) return null;
 		const upper = callsign.toUpperCase();
-		const parts = upper.split('_');
-		if (parts.length < 2) return null;
-		return parts[parts.length - 1] || null;
+		const separator = upper.lastIndexOf('_');
+		if (separator < 0 || separator === upper.length - 1) return null;
+		return upper.slice(separator + 1);
 	}
 
 	private isControllerCallsign(callsign?: string | null): boolean {

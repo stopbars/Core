@@ -18,42 +18,39 @@ export interface TrackOptions {
 	inline?: boolean; // if true, don't background
 }
 
+export interface BatchTrackEvent {
+	event: string;
+	properties?: Record<string, unknown>;
+	distinctId?: string;
+	timestamp?: Date | string;
+}
+
+const PII_KEYS = new Set(['userid', 'vatsimid', 'requestedby', 'approvedby', 'decidedby', 'createdby', 'email', 'cid', 'callsign']);
+const UTF8_ENCODER = new TextEncoder();
+const BYTE_TO_HEX = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, '0'));
+
 export class PostHogService {
 	private readonly apiKey: string | undefined;
 	private readonly host: string;
 	private readonly enabled: boolean;
-	private readonly piiKeyMatchers: Array<(k: string) => boolean> = [
-		(k) => k === 'userId',
-		(k) => k === 'vatsimId',
-		(k) => k === 'requestedBy',
-		(k) => k === 'approvedBy',
-		(k) => k === 'decidedBy',
-		(k) => k === 'createdBy',
-		(k) => k === 'email',
-		(k) => k === 'cid',
-		(k) => k === 'callsign',
-		(k) => k.includes('vatsim'),
-	];
-
 	constructor(env: Env) {
-		this.apiKey = (env as unknown as { POSTHOG_API_KEY?: string }).POSTHOG_API_KEY;
-		this.host = (env as unknown as { POSTHOG_HOST?: string }).POSTHOG_HOST || 'https://a.stopbars.com';
+		this.apiKey = env.POSTHOG_API_KEY;
+		this.host = (env.POSTHOG_HOST || 'https://a.stopbars.com').replace(/\/$/, '');
 		this.enabled = !!this.apiKey;
 	}
 
 	private isPIIKey(key: string): boolean {
 		const lk = key.toLowerCase();
-		return this.piiKeyMatchers.some((fn) => fn(lk));
+		return PII_KEYS.has(lk) || lk.includes('vatsim');
 	}
 
 	private async hashValue(value: unknown): Promise<string> {
 		try {
-			const encoder = new TextEncoder();
-			const data = encoder.encode(String(value));
+			const data = UTF8_ENCODER.encode(String(value));
 			const digest = await crypto.subtle.digest('SHA-256', data);
-			return Array.from(new Uint8Array(digest))
-				.map((b) => b.toString(16).padStart(2, '0'))
-				.join('');
+			let hex = '';
+			for (const byte of new Uint8Array(digest)) hex += BYTE_TO_HEX[byte];
+			return hex;
 		} catch {
 			// Fallback simple hash (non-crypto) if subtle fails
 			const s = String(value);
@@ -66,16 +63,53 @@ export class PostHogService {
 	}
 
 	private async sanitizeProperties(props: Record<string, unknown>): Promise<Record<string, unknown>> {
-		const entries = await Promise.all(
-			Object.entries(props).map(async ([k, v]) => {
-				if (v == null) return [k, v];
-				if (this.isPIIKey(k)) {
-					return [k, await this.hashValue(v)];
-				}
-				return [k, v];
-			}),
-		);
-		return Object.fromEntries(entries);
+		const sanitized: Record<string, unknown> = {};
+		const pendingHashes: Promise<void>[] = [];
+		for (const [key, value] of Object.entries(props)) {
+			sanitized[key] = value;
+			if (value != null && this.isPIIKey(key)) {
+				pendingHashes.push(this.hashValue(value).then((hash) => void (sanitized[key] = hash)));
+			}
+		}
+		await Promise.all(pendingHashes);
+		return sanitized;
+	}
+
+	private async prepareProperties(
+		properties: Record<string, unknown>,
+		distinctId: string,
+		options: Pick<TrackOptions, 'product' | 'omitProduct'>,
+	): Promise<Record<string, unknown>> {
+		const mergedProps: Record<string, unknown> = { ...properties };
+		if (!options.omitProduct && mergedProps.product === undefined) {
+			mergedProps.product = options.product || 'Core';
+		}
+		try {
+			if (JSON.stringify(mergedProps).length > 45_000) mergedProps._truncated = true;
+		} catch {
+			/* ignore */
+		}
+		return {
+			distinct_id: distinctId,
+			...(await this.sanitizeProperties(mergedProps)),
+		};
+	}
+
+	private dispatch(doFetch: () => Promise<void>, inline = false): void | Promise<void> {
+		if (inline) return doFetch();
+		try {
+			if (typeof (cfWaitUntil as unknown) === 'function') {
+				cfWaitUntil(doFetch());
+				return;
+			}
+		} catch {
+			/* ignore */
+		}
+		try {
+			(globalThis as unknown as { waitUntil?: (p: Promise<unknown>) => void }).waitUntil?.(doFetch());
+		} catch {
+			/* ignore */
+		}
 	}
 
 	track(
@@ -85,29 +119,11 @@ export class PostHogService {
 		options: TrackOptions = {},
 	): void | Promise<void> {
 		if (!this.enabled) return;
-		const mergedProps: Record<string, unknown> = {
-			...properties,
-		};
-		if (!options.omitProduct) {
-			if (mergedProps.product === undefined) mergedProps.product = options.product || 'Core';
-		}
-		try {
-			const approxSize = JSON.stringify(mergedProps).length;
-			if (approxSize > 45_000) {
-				mergedProps._truncated = true;
-			}
-		} catch {
-			/* ignore */
-		}
 		const buildBody = async () => {
-			const sanitized = await this.sanitizeProperties(mergedProps);
 			const payload: PostHogCapturePayload = {
 				api_key: this.apiKey!,
 				event,
-				properties: {
-					distinct_id: distinctId,
-					...sanitized,
-				},
+				properties: await this.prepareProperties(properties, distinctId, options),
 				$process_person_profile: false,
 			};
 			if (options.timestamp) {
@@ -119,7 +135,7 @@ export class PostHogService {
 		const doFetch = () =>
 			buildBody()
 				.then((body) =>
-					fetch(`${this.host.replace(/\/$/, '')}/capture/`, {
+					fetch(`${this.host}/capture/`, {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
 						body,
@@ -134,20 +150,41 @@ export class PostHogService {
 				.catch((err) => {
 					console.warn('[PostHog] Track failed', err instanceof Error ? err.message : err);
 				});
-		if (options.inline) return doFetch();
-		try {
-			if (typeof (cfWaitUntil as unknown) === 'function') {
-				cfWaitUntil(doFetch());
-				return;
-			}
-		} catch {
-			/* ignore */
-		}
-		try {
-			(globalThis as unknown as { waitUntil?: (p: Promise<unknown>) => void }).waitUntil?.(doFetch());
-		} catch {
-			/* ignore */
-		}
-		return;
+		return this.dispatch(doFetch, options.inline);
+	}
+
+	trackBatch(
+		events: readonly BatchTrackEvent[],
+		options: Pick<TrackOptions, 'product' | 'omitProduct' | 'inline'> = {},
+	): void | Promise<void> {
+		if (!this.enabled || events.length === 0) return;
+
+		const doFetch = async () => {
+			const batch = await Promise.all(
+				events.map(async (item) => ({
+					event: item.event,
+					properties: await this.prepareProperties(item.properties ?? {}, item.distinctId ?? 'anonymous', options),
+					...(item.timestamp
+						? { timestamp: typeof item.timestamp === 'string' ? item.timestamp : item.timestamp.toISOString() }
+						: {}),
+					$process_person_profile: false,
+				})),
+			);
+
+			return fetch(`${this.host}/batch/`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ api_key: this.apiKey!, batch }),
+			})
+				.then((res) => {
+					if (!res.ok) console.warn('[PostHog] Non-OK batch response', res.status);
+					return cancelResponseBody(res);
+				})
+				.catch((err) => {
+					console.warn('[PostHog] Batch track failed', err instanceof Error ? err.message : err);
+				});
+		};
+
+		return this.dispatch(doFetch, options.inline);
 	}
 }
