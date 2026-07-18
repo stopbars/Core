@@ -88,17 +88,21 @@ export class PolygonService {
 		const baseQuery =
 			'SELECT id, type, airport_id, directionality, orientation, color, elevated, ihp, name, coordinates FROM points WHERE id IN (';
 
+		const statements: Array<{ query: string; params: string[] }> = [];
 		for (let i = 0; i < unique.length; i += chunkSize) {
 			const chunk = unique.slice(i, i + chunkSize);
 			const placeholders = chunk.map(() => '?').join(', ');
-			try {
-				const result = await this.dbSession.executeRead<PointRow>(`${baseQuery}${placeholders})`, chunk);
-				for (const row of result.results) {
+			statements.push({ query: `${baseQuery}${placeholders})`, params: chunk });
+		}
+		try {
+			const results = await this.dbSession.executeReadBatch(statements);
+			for (const result of results) {
+				for (const row of result.results as PointRow[]) {
 					records.set(row.id, this.mapBarsRecordFromDb(row));
 				}
-			} catch {
-				// Ignore chunk failures to mirror legacy behaviour
 			}
+		} catch {
+			// Ignore lookup failures to mirror legacy behaviour.
 		}
 
 		return records;

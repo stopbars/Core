@@ -109,28 +109,10 @@ export function generateEquidistantPoints(
 	let startOffset = (totalPathLength - totalSpan) / 2;
 	if (startOffset < 0) startOffset = 0;
 
-	const getPointAtDistance = (distance: number): GeoPoint => {
-		if (distance <= 0) {
-			return { ...points[0] };
-		}
-
-		let remaining = distance;
-		let segmentIndex = 0;
-
-		while (segmentIndex < segmentLengths.length) {
-			const length = segmentLengths[segmentIndex];
-			if (remaining <= length) {
-				return calculateDestinationPoint(points[segmentIndex], remaining, segmentBearings[segmentIndex]);
-			}
-			remaining -= length;
-			segmentIndex++;
-		}
-
-		return { ...points[points.length - 1] };
-	};
-
 	const result: GeoPoint[] = [];
 	const EPSILON = 1e-6;
+	let segmentIndex = 0;
+	let segmentStartDistance = 0;
 
 	for (let i = 0; i < pointCount; i++) {
 		const targetDistance = startOffset + i * interval;
@@ -139,7 +121,15 @@ export function generateEquidistantPoints(
 		}
 
 		const clampedDistance = Math.min(targetDistance, totalPathLength);
-		result.push(getPointAtDistance(clampedDistance));
+		if (clampedDistance <= 0) {
+			result.push({ ...points[0] });
+			continue;
+		}
+		while (segmentIndex < segmentLengths.length - 1 && clampedDistance - segmentStartDistance > segmentLengths[segmentIndex]) {
+			segmentStartDistance += segmentLengths[segmentIndex];
+			segmentIndex++;
+		}
+		result.push(calculateDestinationPoint(points[segmentIndex], clampedDistance - segmentStartDistance, segmentBearings[segmentIndex]));
 	}
 
 	if (result.length === 0) {

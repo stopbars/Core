@@ -146,6 +146,13 @@ type IntasOsmData = {
 	windsocks: GeoPoint[];
 };
 
+type GenerationInputs = {
+	configRecord: VatSysConfigRecord;
+	points: ParsedPoint[];
+	runways: RunwayRow[];
+	airportBounds: AirportBounds | undefined;
+};
+
 export class VatSysProfileGeneratorService {
 	private static readonly ICAO_REGEX = /^[A-Z0-9]{4}$/;
 	private static readonly MAX_STOPBARS_PER_SIDE = 16;
@@ -166,7 +173,7 @@ export class VatSysProfileGeneratorService {
 
 	private readonly axisProjectionCache = new WeakMap<ProfileAxis, AxisProjection>();
 
-	constructor(private db: D1Database) { }
+	constructor(private db: D1Database) {}
 
 	async generate(icao: string): Promise<VatSysProfileGenerationResult> {
 		const normalizedIcao = icao.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -176,19 +183,28 @@ export class VatSysProfileGeneratorService {
 
 		const session = new DatabaseSessionService(this.db);
 		try {
-			const configRecord = await this.getVatSysConfig(session, normalizedIcao);
+			const { configRecord, points, runways, airportBounds } = await this.getGenerationInputs(session, normalizedIcao);
 			const format = this.resolveFormat(configRecord.config, normalizedIcao);
 
-			const points = await this.getPoints(session, normalizedIcao);
-			const stopbars = points.filter((point) => point.type === 'stopbar');
-			const leadOns = points.filter((point) => point.type === 'lead_on');
+			const stopbars: ParsedPoint[] = [];
+			const leadOns: ParsedPoint[] = [];
+			for (const point of points) {
+				(point.type === 'stopbar' ? stopbars : leadOns).push(point);
+			}
 			if (stopbars.length === 0) {
 				throw new HttpError(422, `No stopbars found for ${normalizedIcao}`);
 			}
 
 			if (format === 'intas') {
-				const runways = await this.getRunways(session, normalizedIcao);
-				const profile = await this.generateIntasProfile(session, normalizedIcao, configRecord, stopbars, leadOns, runways);
+				const profile = await this.generateIntasProfile(
+					session,
+					normalizedIcao,
+					configRecord,
+					stopbars,
+					leadOns,
+					runways,
+					airportBounds,
+				);
 				return {
 					format,
 					icao: normalizedIcao,
@@ -197,7 +213,6 @@ export class VatSysProfileGeneratorService {
 				};
 			}
 
-			const runways = await this.getRunways(session, normalizedIcao);
 			if (runways.length === 0) {
 				throw new HttpError(422, `No runways found for ${normalizedIcao}`);
 			}
@@ -207,7 +222,16 @@ export class VatSysProfileGeneratorService {
 			const linkedLeadOns = this.buildLeadOnLookup(leadOns);
 			const bestRunwayMatches = this.buildBestRunwayMatchLookup(stopbars, runways, towerPosition, runwayAxes);
 			const profiles = runways.map((runway) =>
-				this.generateLegacyProfile(normalizedIcao, runway, runways, towerPosition, stopbars, linkedLeadOns, runwayAxes, bestRunwayMatches),
+				this.generateLegacyProfile(
+					normalizedIcao,
+					runway,
+					runways,
+					towerPosition,
+					stopbars,
+					linkedLeadOns,
+					runwayAxes,
+					bestRunwayMatches,
+				),
 			);
 			const warnings = profiles.flatMap((profile) => profile.warnings.map((warning) => `${profile.filename}: ${warning}`));
 
@@ -222,31 +246,75 @@ export class VatSysProfileGeneratorService {
 		}
 	}
 
-	private async getVatSysConfig(session: DatabaseSessionService, icao: string): Promise<VatSysConfigRecord> {
-		const result = await session.executeRead<{ id: number; vatsys: string }>(
-			`
-			SELECT id, vatsys
-			FROM division_airports
-			WHERE icao = ? AND status = 'approved'
-			ORDER BY updated_at DESC, id DESC
-			LIMIT 1
-			`,
-			[icao],
-		);
-		const row = result.results[0];
+	private async getGenerationInputs(session: DatabaseSessionService, icao: string): Promise<GenerationInputs> {
+		const [configResult, pointsResult, runwaysResult, boundsResult] = await session.executeReadBatch([
+			{
+				query: `
+					SELECT id, vatsys
+					FROM division_airports
+					WHERE icao = ? AND status = 'approved'
+					ORDER BY updated_at DESC, id DESC
+					LIMIT 1
+				`,
+				params: [icao],
+			},
+			{
+				query: `
+					SELECT id, type, name, coordinates, linked_to
+					FROM points
+					WHERE airport_id = ? AND type IN ('stopbar', 'lead_on')
+					ORDER BY name ASC, id ASC
+				`,
+				params: [icao],
+			},
+			{
+				query: `
+					SELECT id, length_ft, width_ft, le_ident, le_latitude_deg, le_longitude_deg, he_ident, he_latitude_deg, he_longitude_deg
+					FROM runways
+					WHERE airport_icao = ?
+					ORDER BY id ASC
+				`,
+				params: [icao],
+			},
+			{
+				query: `
+					SELECT bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon
+					FROM airports
+					WHERE icao = ?
+					LIMIT 1
+				`,
+				params: [icao],
+			},
+		]);
+
+		const row = configResult.results[0] as { id: number; vatsys: string } | undefined;
 		if (!row) {
 			throw new HttpError(404, `No approved division airport found for ${icao}`);
 		}
 
+		let config: VatSysConfig;
 		try {
-			const parsed = JSON.parse(row.vatsys) as VatSysConfig;
-			if (!parsed || typeof parsed !== 'object') {
+			config = JSON.parse(row.vatsys) as VatSysConfig;
+			if (!config || typeof config !== 'object') {
 				throw new Error('Invalid vatSys flags');
 			}
-			return { id: row.id, config: parsed };
 		} catch {
 			throw new HttpError(422, `Invalid vatSys configuration for ${icao}`);
 		}
+
+		const points: ParsedPoint[] = [];
+		for (const rawRow of pointsResult.results) {
+			const point = this.parsePoint(rawRow as PointRow);
+			if (point) points.push(point);
+		}
+		const runways = (runwaysResult.results as RunwayRow[]).filter((runway) => this.getRunwayAxis(runway) !== null);
+
+		return {
+			configRecord: { id: row.id, config },
+			points,
+			runways,
+			airportBounds: boundsResult.results[0] as AirportBounds | undefined,
+		};
 	}
 
 	private resolveFormat(config: VatSysConfig, icao: string): VatSysFormat {
@@ -257,35 +325,6 @@ export class VatSysProfileGeneratorService {
 			throw new HttpError(422, `${icao} does not have legacy or INTAS profile generation enabled`);
 		}
 		return config.is_intas === true ? 'intas' : 'legacy';
-	}
-
-	private async getRunways(session: DatabaseSessionService, icao: string): Promise<RunwayRow[]> {
-		const result = await session.executeRead<RunwayRow>(
-			`
-			SELECT id, length_ft, width_ft, le_ident, le_latitude_deg, le_longitude_deg, he_ident, he_latitude_deg, he_longitude_deg
-			FROM runways
-			WHERE airport_icao = ?
-			ORDER BY id ASC
-			`,
-			[icao],
-		);
-		return result.results.filter((runway) => this.getRunwayAxis(runway) !== null);
-	}
-
-	private async getPoints(session: DatabaseSessionService, icao: string): Promise<ParsedPoint[]> {
-		const result = await session.executeRead<PointRow>(
-			`
-			SELECT id, type, name, coordinates, linked_to
-			FROM points
-			WHERE airport_id = ? AND type IN ('stopbar', 'lead_on')
-			ORDER BY name ASC, id ASC
-			`,
-			[icao],
-		);
-
-		return result.results
-			.map((row) => this.parsePoint(row))
-			.filter((point): point is ParsedPoint => point !== null);
 	}
 
 	private generateLegacyProfile(
@@ -322,7 +361,9 @@ export class VatSysProfileGeneratorService {
 		}
 
 		const top = projectedStopbars.filter((stopbar) => stopbar.y >= 0).sort((a, b) => a.x - b.x || a.point.id.localeCompare(b.point.id));
-		const bottom = projectedStopbars.filter((stopbar) => stopbar.y < 0).sort((a, b) => a.x - b.x || a.point.id.localeCompare(b.point.id));
+		const bottom = projectedStopbars
+			.filter((stopbar) => stopbar.y < 0)
+			.sort((a, b) => a.x - b.x || a.point.id.localeCompare(b.point.id));
 
 		if (top.length > VatSysProfileGeneratorService.MAX_STOPBARS_PER_SIDE) {
 			throw new HttpError(422, `Runway ${rightEndName}-${leftEndName} has more than 16 stopbars on the top side`);
@@ -351,9 +392,19 @@ export class VatSysProfileGeneratorService {
 		stopbars: ParsedPoint[],
 		leadOns: ParsedPoint[],
 		runways: RunwayRow[],
+		airportBounds: AirportBounds | undefined,
 	): Promise<GeneratedVatSysProfile> {
 		const warnings: string[] = [];
-		const taxiwayCache = await this.getIntasTaxiwayCache(session, icao, configRecord, stopbars, leadOns, runways, warnings);
+		const taxiwayCache = await this.getIntasTaxiwayCache(
+			session,
+			icao,
+			configRecord,
+			stopbars,
+			leadOns,
+			runways,
+			airportBounds,
+			warnings,
+		);
 		const filename = `${icao}.xml`;
 
 		return {
@@ -370,9 +421,10 @@ export class VatSysProfileGeneratorService {
 		stopbars: ParsedPoint[],
 		leadOns: ParsedPoint[],
 		runways: RunwayRow[],
+		airportBounds: AirportBounds | undefined,
 		warnings: string[],
 	): Promise<VatSysTaxiwayCache> {
-		const bbox = await this.getAirportBounds(session, icao);
+		const bbox = this.validateAirportBounds(airportBounds, icao);
 		const sourceSignature = this.buildIntasTaxiwayCacheSignature(bbox, stopbars, leadOns, runways);
 		const cached = this.parseIntasTaxiwayCache(configRecord.config, sourceSignature);
 		if (cached) {
@@ -411,16 +463,12 @@ export class VatSysProfileGeneratorService {
 			return null;
 		}
 
-		const lines = cache.lines
-			.map((line) => this.normalizeTaxiwayLine(line))
-			.filter((line): line is GeoPoint[] => line !== null);
+		const lines = cache.lines.map((line) => this.normalizeTaxiwayLine(line)).filter((line): line is GeoPoint[] => line !== null);
 		if (lines.length === 0) {
 			return null;
 		}
 		const windsocks = Array.isArray(cache.windsocks)
-			? cache.windsocks
-				.map((point) => this.normalizeGeoPoint(point))
-				.filter((point): point is GeoPoint => point !== null)
+			? cache.windsocks.map((point) => this.normalizeGeoPoint(point)).filter((point): point is GeoPoint => point !== null)
 			: [];
 
 		return {
@@ -537,20 +585,10 @@ export class VatSysProfileGeneratorService {
 		);
 	}
 
-	private async getAirportBounds(
-		session: DatabaseSessionService,
+	private validateAirportBounds(
+		row: AirportBounds | undefined,
 		icao: string,
-	): Promise<{ south: number; west: number; north: number; east: number }> {
-		const result = await session.executeRead<AirportBounds>(
-			`
-			SELECT bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon
-			FROM airports
-			WHERE icao = ?
-			LIMIT 1
-			`,
-			[icao],
-		);
-		const row = result.results[0];
+	): { south: number; west: number; north: number; east: number } {
 		if (!row) {
 			throw new HttpError(422, `No airport metadata found for ${icao}`);
 		}
@@ -698,14 +736,17 @@ export class VatSysProfileGeneratorService {
 		const indent = ' '.repeat(baseIndent);
 		lines.push(`${indent}<Line>`);
 		for (const point of points) {
-			lines.push(
-				`${indent}  <Point lon="${this.formatCoordinate(point.lon)}" lat="${this.formatCoordinate(point.lat)}"/>`,
-			);
+			lines.push(`${indent}  <Point lon="${this.formatCoordinate(point.lon)}" lat="${this.formatCoordinate(point.lat)}"/>`);
 		}
 		lines.push(`${indent}</Line>`);
 	}
 
-	private filterAndSplitTaxiways(lines: GeoPoint[][], stopbars: ParsedPoint[], leadOns: ParsedPoint[], runways: RunwayRow[]): GeoPoint[][] {
+	private filterAndSplitTaxiways(
+		lines: GeoPoint[][],
+		stopbars: ParsedPoint[],
+		leadOns: ParsedPoint[],
+		runways: RunwayRow[],
+	): GeoPoint[][] {
 		const filtered: GeoPoint[][] = [];
 		const runwayExclusionAreas = this.getStopbarRunwayExclusionAreas(runways, stopbars, leadOns);
 
@@ -776,8 +817,7 @@ export class VatSysProfileGeneratorService {
 					this.isPointWithinBounds(endpoint, allBounds[candidateIndex]) &&
 					candidateLine.some(
 						(candidatePoint) =>
-							calculateDistance(endpoint, candidatePoint) <=
-							VatSysProfileGeneratorService.INTAS_TAXIWAY_CONNECTION_METERS,
+							calculateDistance(endpoint, candidatePoint) <= VatSysProfileGeneratorService.INTAS_TAXIWAY_CONNECTION_METERS,
 					),
 			),
 		);
@@ -916,9 +956,7 @@ export class VatSysProfileGeneratorService {
 		const midpointProjection = this.projectToAxis(stopbar.midpoint, axis);
 		const runwaySideY = midpointProjection.y >= 0 ? -halfWidthMeters - padding : halfWidthMeters + padding;
 		const stopbarBoundary = stopbar.coordinates.map((point) => this.projectToAxis(point, axis));
-		const runwaySideBoundary = stopbarBoundary
-			.map((point) => ({ x: point.x, y: runwaySideY }))
-			.reverse();
+		const runwaySideBoundary = stopbarBoundary.map((point) => ({ x: point.x, y: runwaySideY })).reverse();
 
 		return [...stopbarBoundary, ...runwaySideBoundary];
 	}
@@ -935,9 +973,7 @@ export class VatSysProfileGeneratorService {
 				continue;
 			}
 			const endExtensionMeters =
-				index === leadOn.coordinates.length - 2
-					? VatSysProfileGeneratorService.INTAS_LEAD_ON_END_EXCLUSION_METERS
-					: 0;
+				index === leadOn.coordinates.length - 2 ? VatSysProfileGeneratorService.INTAS_LEAD_ON_END_EXCLUSION_METERS : 0;
 
 			areas.push({
 				axis: {
@@ -984,8 +1020,7 @@ export class VatSysProfileGeneratorService {
 			const projectedStart = projected.start;
 			const projectedEnd = projected.end;
 			const intersections = this.getLinePolygonIntersectionTs(projectedStart, projectedEnd, runway.polygon);
-			const splitTs = [...new Set([0, 1, ...intersections].map((value) => Number(value.toFixed(6))))]
-				.sort((a, b) => a - b);
+			const splitTs = [...new Set([0, 1, ...intersections].map((value) => Number(value.toFixed(6))))].sort((a, b) => a - b);
 
 			for (let index = 0; index < splitTs.length - 1; index++) {
 				const rangeStart = splitTs[index];
@@ -1066,9 +1101,7 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private mergeRanges(ranges: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
-		const sorted = ranges
-			.filter((range) => range.end > range.start)
-			.sort((a, b) => a.start - b.start || a.end - b.end);
+		const sorted = ranges.filter((range) => range.end > range.start).sort((a, b) => a.start - b.start || a.end - b.end);
 		const merged: Array<{ start: number; end: number }> = [];
 
 		for (const range of sorted) {
@@ -1355,7 +1388,8 @@ export class VatSysProfileGeneratorService {
 
 		return stopbars
 			.map((stopbar) => {
-				const bestMatch = bestRunwayMatches?.get(stopbar.id) ?? this.getBestRunwayMatch(stopbar, allRunways, towerPosition, runwayAxes);
+				const bestMatch =
+					bestRunwayMatches?.get(stopbar.id) ?? this.getBestRunwayMatch(stopbar, allRunways, towerPosition, runwayAxes);
 				if (bestMatch?.runwayId === selectedRunway.id) {
 					return bestMatch;
 				}
@@ -1405,7 +1439,11 @@ export class VatSysProfileGeneratorService {
 				) {
 					continue;
 				}
-				if (!bestTouch || Math.abs(projected.y) < Math.abs(bestTouch.y) || (Math.abs(projected.y) === Math.abs(bestTouch.y) && projected.x < bestTouch.x)) {
+				if (
+					!bestTouch ||
+					Math.abs(projected.y) < Math.abs(bestTouch.y) ||
+					(Math.abs(projected.y) === Math.abs(bestTouch.y) && projected.x < bestTouch.x)
+				) {
 					bestTouch = projected;
 				}
 			}
@@ -1434,7 +1472,11 @@ export class VatSysProfileGeneratorService {
 			if (!axis) continue;
 			const projected = this.projectStopbar(stopbar, runway, axis);
 			if (!projected || !this.isStopbarRelevant(projected, axis, runway)) continue;
-			if (!bestMatch || projected.score < bestMatch.score || (projected.score === bestMatch.score && projected.runwayId < bestMatch.runwayId)) {
+			if (
+				!bestMatch ||
+				projected.score < bestMatch.score ||
+				(projected.score === bestMatch.score && projected.runwayId < bestMatch.runwayId)
+			) {
 				bestMatch = projected;
 			}
 		}
@@ -1765,9 +1807,12 @@ export class VatSysProfileGeneratorService {
 
 			const startProjection = this.projectToAxis(otherStart, axis);
 			const endProjection = this.projectToAxis(otherEnd, axis);
-			const crossesSide = startProjection.y === 0 || endProjection.y === 0 || Math.sign(startProjection.y) !== Math.sign(endProjection.y);
+			const crossesSide =
+				startProjection.y === 0 || endProjection.y === 0 || Math.sign(startProjection.y) !== Math.sign(endProjection.y);
 			const crossingX = this.interpolateCrossingX(startProjection, endProjection);
-			const withinRunway = crossingX >= -VatSysProfileGeneratorService.CROSSING_DISTANCE_METERS && crossingX <= axis.lengthMeters + VatSysProfileGeneratorService.CROSSING_DISTANCE_METERS;
+			const withinRunway =
+				crossingX >= -VatSysProfileGeneratorService.CROSSING_DISTANCE_METERS &&
+				crossingX <= axis.lengthMeters + VatSysProfileGeneratorService.CROSSING_DISTANCE_METERS;
 
 			if (!crossesSide || !withinRunway) continue;
 
@@ -1923,12 +1968,7 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private escapeXml(value: string): string {
-		return value
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;')
-			.replace(/'/g, '&apos;');
+		return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 	}
 
 	private sanitizeFilenamePart(value: string): string {
