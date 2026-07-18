@@ -31,6 +31,34 @@ interface AirportData {
 	}>;
 }
 
+type AirportRecord = {
+	icao: string;
+	latitude: number | null;
+	longitude: number | null;
+	name: string;
+	continent: string;
+	country_code: string | null;
+	country_name: string | null;
+	region_name: string | null;
+	elevation_ft: number | null;
+	elevation_m: number | null;
+	bbox_min_lat: number | null;
+	bbox_min_lon: number | null;
+	bbox_max_lat: number | null;
+	bbox_max_lon: number | null;
+};
+
+type RunwayRecord = {
+	length_ft: string;
+	width_ft: string;
+	le_ident: string;
+	le_latitude_deg: string;
+	le_longitude_deg: string;
+	he_ident: string;
+	he_latitude_deg: string;
+	he_longitude_deg: string;
+};
+
 export class AirportService {
 	constructor(
 		private db: D1Database,
@@ -57,42 +85,31 @@ export class AirportService {
 		}
 
 		return this.withDbSession(async (dbSession) => {
-			const airportResult = await dbSession.executeRead<{
-				icao: string;
-				latitude: number | null;
-				longitude: number | null;
-				name: string;
-				continent: string;
-				country_code: string | null;
-				country_name: string | null;
-				region_name: string | null;
-				elevation_ft: number | null;
-				elevation_m: number | null;
-				bbox_min_lat: number | null;
-				bbox_min_lon: number | null;
-				bbox_max_lat: number | null;
-				bbox_max_lon: number | null;
-			}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
-			const airportFromDb = airportResult.results[0];
+			const [airportResult, runwayResult] = await dbSession.executeReadBatch([
+				{
+					query: `SELECT icao, latitude, longitude, name, continent, country_code, country_name,
+						region_name, elevation_ft, elevation_m, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon
+						FROM airports WHERE icao = ? LIMIT 1`,
+					params: [uppercaseIcao],
+				},
+				{
+					query: `SELECT length_ft, width_ft, le_ident, le_latitude_deg, le_longitude_deg,
+							he_ident, he_latitude_deg, he_longitude_deg
+						FROM runways WHERE airport_icao = ?`,
+					params: [uppercaseIcao],
+				},
+			]);
+			const airportFromDb = (airportResult.results as AirportRecord[])[0];
+			const cachedRunways = runwayResult.results as RunwayRecord[];
 
 			if (airportFromDb) {
-				const fetchPromises: Promise<void>[] = [];
-				let needsReread = false;
-
-				if (airportFromDb.elevation_ft == null) {
-					needsReread = true;
+				const fetchPromises: Array<Promise<Partial<AirportRecord> | null>> = [];
+				const needsElevation = airportFromDb.elevation_ft == null;
+				const needsLocation =
+					airportFromDb.country_code == null || airportFromDb.country_name == null || airportFromDb.region_name == null;
+				if (needsElevation || needsLocation) {
 					fetchPromises.push(
-						this.fetchAndStoreElevation(uppercaseIcao, dbSession)
-							.then(() => {})
-							.catch(() => {}),
-					);
-				}
-				if (airportFromDb.country_code == null || airportFromDb.country_name == null || airportFromDb.region_name == null) {
-					needsReread = true;
-					fetchPromises.push(
-						this.fetchAndStoreLocationMeta(uppercaseIcao, dbSession)
-							.then(() => {})
-							.catch(() => {}),
+						this.fetchAndStoreMetadata(uppercaseIcao, dbSession, needsElevation, needsLocation).catch(() => null),
 					);
 				}
 				if (
@@ -101,70 +118,27 @@ export class AirportService {
 					airportFromDb.bbox_max_lat == null ||
 					airportFromDb.bbox_max_lon == null
 				) {
-					needsReread = true;
 					fetchPromises.push(
-						this.fetchAndStoreBoundingBox(uppercaseIcao, dbSession)
-							.then(() => {})
-							.catch((err) => {
-								try {
-									this.posthog?.track('Airport Bounding Box Unavailable', {
-										source: 'db-cache-miss',
-										icao: uppercaseIcao,
-										error: err instanceof Error ? err.message : String(err),
-									});
-								} catch {
-									/* ignore analytics errors */
-								}
-							}),
+						this.fetchAndStoreBoundingBox(uppercaseIcao, dbSession).catch((err) => {
+							try {
+								this.posthog?.track('Airport Bounding Box Unavailable', {
+									source: 'db-cache-miss',
+									icao: uppercaseIcao,
+									error: err instanceof Error ? err.message : String(err),
+								});
+							} catch {
+								/* ignore analytics errors */
+							}
+							return null;
+						}),
 					);
 				}
 
-				if (fetchPromises.length > 0) {
-					await Promise.all(fetchPromises);
+				const enrichments = await Promise.all(fetchPromises);
+				for (const enrichment of enrichments) {
+					if (enrichment) Object.assign(airportFromDb, enrichment);
 				}
-
-				if (needsReread) {
-					const reread = await dbSession.executeRead<{
-						icao: string;
-						latitude: number | null;
-						longitude: number | null;
-						name: string;
-						continent: string;
-						country_code: string | null;
-						country_name: string | null;
-						region_name: string | null;
-						elevation_ft: number | null;
-						elevation_m: number | null;
-						bbox_min_lat: number | null;
-						bbox_min_lon: number | null;
-						bbox_max_lat: number | null;
-						bbox_max_lon: number | null;
-					}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
-					if (reread.results[0]) Object.assign(airportFromDb, reread.results[0]);
-				}
-				const runwaysResult = await dbSession.executeRead<{
-					length_ft: string;
-					width_ft: string;
-					le_ident: string;
-					le_latitude_deg: string;
-					le_longitude_deg: string;
-					he_ident: string;
-					he_latitude_deg: string;
-					he_longitude_deg: string;
-				}>(
-					`SELECT 
-						length_ft,
-						width_ft,
-						le_ident,
-						le_latitude_deg,
-						le_longitude_deg,
-						he_ident,
-						he_latitude_deg,
-						he_longitude_deg
-					FROM runways WHERE airport_icao = ?`,
-					[uppercaseIcao],
-				);
-				return { ...airportFromDb, runways: runwaysResult.results };
+				return { ...airportFromDb, runways: cachedRunways };
 			}
 
 			try {
@@ -191,7 +165,8 @@ export class AirportService {
 				const elevation_ft = airportData.elevation_ft ? parseInt(airportData.elevation_ft, 10) : null;
 				const elevation_m =
 					elevation_ft != null && !Number.isNaN(elevation_ft) ? Math.round(elevation_ft * 0.3048 * 100) / 100 : null;
-				const country_code = airportData.iso_country?.trim().toUpperCase() || airportData.country?.code?.trim().toUpperCase() || null;
+				const country_code =
+					airportData.iso_country?.trim().toUpperCase() || airportData.country?.code?.trim().toUpperCase() || null;
 				const country_name = airportData.country?.name?.trim() || null;
 				const region_name = airportData.region?.name?.trim() || null;
 
@@ -224,8 +199,9 @@ export class AirportService {
 					],
 				);
 
+				let storedBoundingBox: Partial<AirportRecord> | null = null;
 				try {
-					await this.fetchAndStoreBoundingBox(uppercaseIcao, dbSession);
+					storedBoundingBox = await this.fetchAndStoreBoundingBox(uppercaseIcao, dbSession);
 				} catch (err) {
 					try {
 						this.posthog?.track('Airport Bounding Box Unavailable', {
@@ -238,26 +214,10 @@ export class AirportService {
 					}
 				}
 
-				const reread = await dbSession.executeRead<{
-					icao: string;
-					latitude: number | null;
-					longitude: number | null;
-					name: string;
-					continent: string;
-					country_code: string | null;
-					country_name: string | null;
-					region_name: string | null;
-					elevation_ft: number | null;
-					elevation_m: number | null;
-					bbox_min_lat: number | null;
-					bbox_min_lon: number | null;
-					bbox_max_lat: number | null;
-					bbox_max_lon: number | null;
-				}>('SELECT * FROM airports WHERE icao = ?', [uppercaseIcao]);
-				const mergedAirport = { ...airport, ...reread.results[0] };
+				const mergedAirport = { ...airport, ...storedBoundingBox };
 
 				if (airportData.runways && airportData.runways.length > 0) {
-					const openRunways = airportData.runways.filter((r) => r.closed !== '1');
+					const openRunways = airportData.runways.filter((runway) => runway.closed !== '1');
 					const runwayStatements = openRunways.map((runway) => ({
 						query: `
 							INSERT INTO runways (
@@ -281,29 +241,6 @@ export class AirportService {
 
 					await dbSession.executeBatch(runwayStatements);
 
-					const runwaysResult = await dbSession.executeRead<{
-						length_ft: string;
-						width_ft: string;
-						le_ident: string;
-						le_latitude_deg: string;
-						le_longitude_deg: string;
-						he_ident: string;
-						he_latitude_deg: string;
-						he_longitude_deg: string;
-					}>(
-						`SELECT 
-							length_ft,
-							width_ft,
-							le_ident,
-							le_latitude_deg,
-							le_longitude_deg,
-							he_ident,
-							he_latitude_deg,
-							he_longitude_deg
-						FROM runways WHERE airport_icao = ?`,
-						[uppercaseIcao],
-					);
-
 					try {
 						this.posthog?.track('Airport Fetched From External API', {
 							icao: uppercaseIcao,
@@ -313,7 +250,30 @@ export class AirportService {
 					} catch (e) {
 						console.warn('Posthog track failed (Airport Fetched From External API)', e);
 					}
-					return { ...mergedAirport, runways: runwaysResult.results };
+					return {
+						...mergedAirport,
+						runways: openRunways.map(
+							({
+								length_ft,
+								width_ft,
+								le_ident,
+								le_latitude_deg,
+								le_longitude_deg,
+								he_ident,
+								he_latitude_deg,
+								he_longitude_deg,
+							}) => ({
+								length_ft,
+								width_ft,
+								le_ident,
+								le_latitude_deg,
+								le_longitude_deg,
+								he_ident,
+								he_latitude_deg,
+								he_longitude_deg,
+							}),
+						),
+					};
 				}
 
 				try {
@@ -338,22 +298,88 @@ export class AirportService {
 	}
 
 	async getAirports(icaos: string[]) {
-		const results = new Map();
+		const normalized = icaos.map((icao) => icao.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+		const unique = [...new Set(normalized.filter((icao) => /^[A-Z0-9]{4}$/.test(icao)))];
+		if (unique.length === 0) return {};
 
-		const batchSize = 5;
-		for (let i = 0; i < icaos.length; i += batchSize) {
-			const batch = icaos.slice(i, i + batchSize);
-			const airportPromises = batch.map(async (icao) => {
-				const airport = await this.getAirport(icao);
-				if (airport) {
-					results.set(icao.toUpperCase(), airport);
+		const cachedAirports = new Map<string, AirportRecord>();
+		const cachedRunways = new Map<string, RunwayRecord[]>();
+		await this.withDbSession(async (dbSession) => {
+			const statements: Array<{ query: string; params: string[] }> = [];
+			const chunkSize = 64;
+			for (let offset = 0; offset < unique.length; offset += chunkSize) {
+				const chunk = unique.slice(offset, offset + chunkSize);
+				const placeholders = chunk.map(() => '?').join(', ');
+				statements.push(
+					{
+						query: `SELECT icao, latitude, longitude, name, continent, country_code, country_name,
+							region_name, elevation_ft, elevation_m, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon
+							FROM airports WHERE icao IN (${placeholders})`,
+						params: chunk,
+					},
+					{
+						query: `SELECT airport_icao, length_ft, width_ft, le_ident, le_latitude_deg, le_longitude_deg,
+								he_ident, he_latitude_deg, he_longitude_deg
+							FROM runways WHERE airport_icao IN (${placeholders})`,
+						params: chunk,
+					},
+				);
+			}
+
+			const batchResults = await dbSession.executeReadBatch(statements);
+			for (let index = 0; index < batchResults.length; index += 2) {
+				for (const airport of batchResults[index].results as AirportRecord[]) cachedAirports.set(airport.icao, airport);
+				for (const runway of batchResults[index + 1].results as Array<RunwayRecord & { airport_icao: string }>) {
+					const list = cachedRunways.get(runway.airport_icao) ?? [];
+					list.push({
+						length_ft: runway.length_ft,
+						width_ft: runway.width_ft,
+						le_ident: runway.le_ident,
+						le_latitude_deg: runway.le_latitude_deg,
+						le_longitude_deg: runway.le_longitude_deg,
+						he_ident: runway.he_ident,
+						he_latitude_deg: runway.he_latitude_deg,
+						he_longitude_deg: runway.he_longitude_deg,
+					});
+					cachedRunways.set(runway.airport_icao, list);
 				}
-			});
+			}
+		});
 
-			await Promise.all(airportPromises);
+		const results = new Map<string, object>();
+		const needsLookup: string[] = [];
+		for (const icao of unique) {
+			const airport = cachedAirports.get(icao);
+			const complete =
+				airport &&
+				airport.elevation_ft != null &&
+				airport.country_code != null &&
+				airport.country_name != null &&
+				airport.region_name != null &&
+				airport.bbox_min_lat != null &&
+				airport.bbox_min_lon != null &&
+				airport.bbox_max_lat != null &&
+				airport.bbox_max_lon != null;
+			if (complete) results.set(icao, { ...airport, runways: cachedRunways.get(icao) ?? [] });
+			else needsLookup.push(icao);
 		}
 
-		return Object.fromEntries(results);
+		const externalBatchSize = 5;
+		for (let offset = 0; offset < needsLookup.length; offset += externalBatchSize) {
+			await Promise.all(
+				needsLookup.slice(offset, offset + externalBatchSize).map(async (icao) => {
+					const airport = await this.getAirport(icao);
+					if (airport) results.set(icao, airport);
+				}),
+			);
+		}
+
+		const orderedResults = new Map<string, object>();
+		for (const [index, icao] of normalized.entries()) {
+			const airport = results.get(icao);
+			if (airport) orderedResults.set(icaos[index].toUpperCase(), airport);
+		}
+		return Object.fromEntries(orderedResults);
 	}
 
 	async getAirportsByContinent(continent: string) {
@@ -557,14 +583,13 @@ export class AirportService {
 		throw new HttpError(503, 'Bounding box unavailable');
 	}
 
-	/**
-	 * Fetch country and region info from AirportDB and store in database.
-	 * Returns the data if successful, null otherwise.
-	 */
-	private async fetchAndStoreLocationMeta(
+	/** Fetch missing AirportDB metadata once and persist it with one update. */
+	private async fetchAndStoreMetadata(
 		icao: string,
 		dbSession: DatabaseSessionService,
-	): Promise<{ country_code: string | null; country_name: string | null; region_name: string | null } | null> {
+		needsElevation: boolean,
+		needsLocation: boolean,
+	): Promise<Partial<AirportRecord> | null> {
 		try {
 			const response = await fetch(`https://airportdb.io/api/v1/airport/${icao}?apiToken=${this.apiToken}`, { method: 'GET' });
 			if (!response.ok) {
@@ -572,55 +597,35 @@ export class AirportService {
 				return null;
 			}
 			const data = (await response.json()) as AirportData;
+			const updates: Partial<AirportRecord> = {};
+			const setFragments: string[] = [];
+			const params: Array<string | number | null> = [];
 
-			const country_code = data.iso_country?.trim().toUpperCase() || data.country?.code?.trim().toUpperCase() || null;
-			const country_name = data.country?.name?.trim() || null;
-			const region_name = data.region?.name?.trim() || null;
-
-			if (!country_code && !country_name && !region_name) return null;
-
-			await dbSession.executeWrite('UPDATE airports SET country_code = ?, country_name = ?, region_name = ? WHERE icao = ?', [
-				country_code,
-				country_name,
-				region_name,
-				icao,
-			]);
-
-			return { country_code, country_name, region_name };
-		} catch {
-			return null;
-		}
-	}
-
-	/**
-	 * Fetch elevation from AirportDB and store in database.
-	 * Returns the elevation data if successful, null otherwise.
-	 */
-	private async fetchAndStoreElevation(
-		icao: string,
-		dbSession: DatabaseSessionService,
-	): Promise<{ elevation_ft: number; elevation_m: number } | null> {
-		try {
-			const response = await fetch(`https://airportdb.io/api/v1/airport/${icao}?apiToken=${this.apiToken}`, { method: 'GET' });
-			if (!response.ok) {
-				await cancelResponseBody(response);
-				return null;
+			if (needsLocation) {
+				const country_code = data.iso_country?.trim().toUpperCase() || data.country?.code?.trim().toUpperCase() || null;
+				const country_name = data.country?.name?.trim() || null;
+				const region_name = data.region?.name?.trim() || null;
+				if (country_code || country_name || region_name) {
+					Object.assign(updates, { country_code, country_name, region_name });
+					setFragments.push('country_code = ?', 'country_name = ?', 'region_name = ?');
+					params.push(country_code, country_name, region_name);
+				}
 			}
-			const data = (await response.json()) as AirportData;
-			if (!data.elevation_ft) return null;
 
-			const elevation_ft = parseInt(data.elevation_ft, 10);
-			if (Number.isNaN(elevation_ft)) return null;
+			if (needsElevation && data.elevation_ft) {
+				const elevation_ft = parseInt(data.elevation_ft, 10);
+				if (!Number.isNaN(elevation_ft)) {
+					const elevation_m = Math.round(elevation_ft * 0.3048 * 100) / 100;
+					Object.assign(updates, { elevation_ft, elevation_m });
+					setFragments.push('elevation_ft = ?', 'elevation_m = ?');
+					params.push(elevation_ft, elevation_m);
+				}
+			}
 
-			const elevation_m = Math.round(elevation_ft * 0.3048 * 100) / 100;
-
-			await dbSession.executeWrite('UPDATE airports SET elevation_ft = ?, elevation_m = ? WHERE icao = ?', [
-				elevation_ft,
-				elevation_m,
-				icao,
-			]);
-
-			return { elevation_ft, elevation_m };
+			if (setFragments.length === 0) return null;
+			params.push(icao);
+			await dbSession.executeWrite(`UPDATE airports SET ${setFragments.join(', ')} WHERE icao = ?`, params);
+			return updates;
 		} catch {
 			return null;
 		}

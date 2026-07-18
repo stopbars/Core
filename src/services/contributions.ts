@@ -1,4 +1,4 @@
-import { RoleService, StaffRole } from './roles';
+import { RoleService } from './roles';
 import { AirportService } from './airport';
 import { StorageService } from './storage';
 import { SupportService } from './support';
@@ -53,6 +53,11 @@ export interface ContributionListResult {
 	total: number;
 }
 
+export interface LatestApprovedMapDescriptor {
+	packageName: string;
+	simulator: Simulator;
+}
+
 import { DatabaseSessionService } from './database-session';
 
 export const MAX_CONTRIBUTION_NOTES_CHARS = 1000;
@@ -89,13 +94,13 @@ interface StoredContributionGenerationRow {
 
 export type ContributionGenerationLookupResult =
 	| {
-		status: 'ok';
-		token: string;
-		icao: string;
-		supportsXml: string;
-		barsXml: string;
-		expiresAt: string;
-	}
+			status: 'ok';
+			token: string;
+			icao: string;
+			supportsXml: string;
+			barsXml: string;
+			expiresAt: string;
+	  }
 	| { status: 'invalid-token' }
 	| { status: 'not-found' }
 	| { status: 'payload-not-found' };
@@ -110,7 +115,7 @@ export class ContributionService {
 
 	constructor(
 		private db: D1Database,
-		private roleService: RoleService,
+		_roleService: RoleService,
 		apiKey: string,
 		private storage: R2Bucket,
 		private posthog?: PostHogService,
@@ -121,6 +126,35 @@ export class ContributionService {
 		this.storageService = new StorageService(this.storage);
 		this.divisionService = new DivisionService(db, posthog);
 		this.dbSession = new DatabaseSessionService(db);
+	}
+
+	private async getContributionActionContext(
+		vatsimId: string,
+		contributionId: string,
+	): Promise<{ isProductManager: boolean; contribution: Contribution | null } | null> {
+		const result = await this.dbSession.executeLatest<Contribution & { actorIsProductManager: number }>(
+			`SELECT
+				c.id, c.user_id AS userId, submitter.display_name AS userDisplayName,
+				c.airport_icao AS airportIcao, c.package_name AS packageName,
+				c.submitted_xml AS submittedXml, c.notes, c.simulator,
+				c.submission_date AS submissionDate, c.status,
+				c.rejection_reason AS rejectionReason, c.decision_date AS decisionDate,
+				CASE WHEN staff.role IN ('LEAD_DEVELOPER', 'PRODUCT_MANAGER') THEN 1 ELSE 0 END AS actorIsProductManager
+			 FROM users actor
+			 LEFT JOIN staff ON staff.user_id = actor.id
+			 LEFT JOIN contributions c ON c.id = ?
+			 LEFT JOIN users submitter ON submitter.vatsim_id = c.user_id
+			 WHERE actor.vatsim_id = ?
+			 LIMIT 1`,
+			[contributionId, vatsimId],
+		);
+		const row = result.results[0];
+		if (!row) return null;
+		const { actorIsProductManager, ...contribution } = row;
+		return {
+			isProductManager: actorIsProductManager === 1,
+			contribution: contribution.id ? contribution : null,
+		};
 	}
 
 	private async insertContributionGenerationRow(
@@ -172,24 +206,30 @@ export class ContributionService {
 		try {
 			let expiredKeys: string[] = [];
 			try {
-				const expired = await session.executeLatest<Pick<StoredContributionGenerationRow, 'supports_key' | 'bars_key'>>(
-					"SELECT supports_key, bars_key FROM contribution_generations WHERE expires_at <= datetime('now')",
+				const [expired] = await session.executeBatch([
+					{ query: "SELECT supports_key, bars_key FROM contribution_generations WHERE expires_at <= datetime('now')" },
+					{ query: "DELETE FROM contribution_generations WHERE expires_at <= datetime('now')" },
+				]);
+				expiredKeys = (expired.results as Array<Pick<StoredContributionGenerationRow, 'supports_key' | 'bars_key'>>).flatMap(
+					(row) => [row.supports_key, row.bars_key].filter((key): key is string => Boolean(key)),
 				);
-				expiredKeys = expired.results.flatMap((row) => [row.supports_key, row.bars_key].filter((key): key is string => Boolean(key)));
 			} catch (error) {
 				const message = error instanceof Error ? error.message.toLowerCase() : '';
 				if (!message.includes('no such column')) {
 					throw error;
 				}
 
-				const expired = await session.executeLatest<Pick<StoredContributionGenerationRow, 'supports_xml' | 'bars_xml'>>(
-					"SELECT supports_xml, bars_xml FROM contribution_generations WHERE expires_at <= datetime('now')",
+				const [expired] = await session.executeBatch([
+					{ query: "SELECT supports_xml, bars_xml FROM contribution_generations WHERE expires_at <= datetime('now')" },
+					{ query: "DELETE FROM contribution_generations WHERE expires_at <= datetime('now')" },
+				]);
+				expiredKeys = (expired.results as Array<Pick<StoredContributionGenerationRow, 'supports_xml' | 'bars_xml'>>).flatMap(
+					(row) => [row.supports_xml, row.bars_xml].filter((key): key is string => Boolean(key)),
 				);
-				expiredKeys = expired.results.flatMap((row) => [row.supports_xml, row.bars_xml].filter((key): key is string => Boolean(key)));
 			}
-
-			await session.executeWrite("DELETE FROM contribution_generations WHERE expires_at <= datetime('now')");
-			await Promise.all(expiredKeys.filter((key) => key.startsWith('contribution-generations/')).map((key) => this.storage.delete(key)));
+			await Promise.all(
+				expiredKeys.filter((key) => key.startsWith('contribution-generations/')).map((key) => this.storage.delete(key)),
+			);
 		} catch (error) {
 			try {
 				console.warn('[Cron] Failed to clean up contribution_generations:', error instanceof Error ? error.message : error);
@@ -207,17 +247,19 @@ export class ContributionService {
 
 		const session = DatabaseContextFactory.createSessionService(this.db);
 		try {
-			await session.executeWrite("DELETE FROM contribution_generations WHERE token = ? AND expires_at <= datetime('now')", [token]);
-
-			const existing = await session.executeLatest<{ one: number }>(
-				`
-			SELECT 1 AS one FROM contribution_generations
-			WHERE token = ? AND expires_at > datetime('now')
-			LIMIT 1
-		`,
-				[token],
-			);
-			if (existing.results[0]) {
+			const [, existing] = await session.executeBatch([
+				{
+					query: "DELETE FROM contribution_generations WHERE token = ? AND expires_at <= datetime('now')",
+					params: [token],
+				},
+				{
+					query: `SELECT 1 AS one FROM contribution_generations
+						WHERE token = ? AND expires_at > datetime('now')
+						LIMIT 1`,
+					params: [token],
+				},
+			]);
+			if ((existing.results as Array<{ one: number }> | undefined)?.[0]) {
 				return token;
 			}
 
@@ -477,29 +519,23 @@ export class ContributionService {
 	 * @param packageName Package name (case-insensitive)
 	 * @param simulator Optional simulator filter - if not provided, returns latest across all simulators
 	 */
-	async getLatestApprovedContributionForAirportPackage(
+	async getLatestApprovedMapDescriptor(
 		airportIcao: string,
 		packageName: string,
 		simulator?: Simulator,
-	): Promise<Contribution | null> {
+	): Promise<LatestApprovedMapDescriptor | null> {
 		const params: string[] = [airportIcao, packageName];
 		let simulatorClause = '';
 		if (simulator) {
 			simulatorClause = ' AND c.simulator = ?';
 			params.push(simulator);
 		}
-		const result = await this.dbSession.executeRead<Contribution>(
+		const result = await this.dbSession.executeRead<LatestApprovedMapDescriptor>(
 			`
-			SELECT 
-				c.id, c.user_id as userId, u.display_name as userDisplayName,
-				c.airport_icao as airportIcao, c.package_name as packageName,
-				c.submitted_xml as submittedXml, c.notes, c.simulator,
-				c.submission_date as submissionDate, c.status,
-				c.rejection_reason as rejectionReason, c.decision_date as decisionDate
+			SELECT c.package_name AS packageName, c.simulator
 			FROM contributions c
-			LEFT JOIN users u ON u.vatsim_id = c.user_id
 			WHERE c.airport_icao = ? AND lower(c.package_name) = lower(?) AND c.status = 'approved'${simulatorClause}
-			ORDER BY datetime(c.decision_date) DESC
+			ORDER BY c.decision_date DESC
 			LIMIT 1
 			`,
 			params,
@@ -603,21 +639,18 @@ export class ContributionService {
 	}
 
 	async processDecision(id: string, userId: string, decision: ContributionDecision): Promise<Contribution> {
-		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [userId]);
-		const userInfo = userInfoResult.results[0];
+		const context = await this.getContributionActionContext(userId, id);
 
-		if (!userInfo) {
+		if (!context) {
 			throw new Error('User not found');
 		}
 
-		const hasPermission = await this.roleService.hasPermission(userInfo.id, StaffRole.PRODUCT_MANAGER);
-
-		if (!hasPermission) {
+		if (!context.isProductManager) {
 			throw new Error('Not authorized to make decisions on contributions');
 		}
 
 		// Get the contribution to make sure it exists and is pending
-		const contribution = await this.getContribution(id);
+		const contribution = context.contribution;
 
 		if (!contribution) {
 			throw new Error('Contribution not found');
@@ -635,20 +668,30 @@ export class ContributionService {
 
 		// Update contribution with decision
 		const now = new Date().toISOString();
-		const status = decision.approved ? 'approved' : 'rejected'; // If approving, mark any existing approved contributions for the same airport, package, and simulator as outdated
+		const status = decision.approved ? 'approved' : 'rejected';
+		const rejectionReason = decision.approved ? null : decision.rejectionReason || 'No reason provided';
+		const updateCurrent = {
+			query: `UPDATE contributions
+				SET status = ?, rejection_reason = ?, decision_date = ?, package_name = ?
+				WHERE id = ?`,
+			params: [status, rejectionReason, now, packageName, id],
+		};
+
+		// If approving, atomically outdate older approvals and publish this one.
 		if (decision.approved) {
-			await this.dbSession.executeWrite(
-				`
-		UPDATE contributions
-		SET status = 'outdated', decision_date = ?
-		WHERE airport_icao = ? 
-		AND package_name = ? 
-		AND simulator = ?
-		AND status = 'approved' 
-		AND id != ?
-	  `,
-				[now, contribution.airportIcao, packageName, contribution.simulator, id],
-			);
+			await this.dbSession.executeBatch([
+				{
+					query: `UPDATE contributions
+						SET status = 'outdated', decision_date = ?
+						WHERE airport_icao = ?
+							AND package_name = ?
+							AND simulator = ?
+							AND status = 'approved'
+							AND id != ?`,
+					params: [now, contribution.airportIcao, packageName, contribution.simulator, id],
+				},
+				updateCurrent,
+			]);
 
 			// Generate and upload the XML files to CDN
 			try {
@@ -690,21 +733,15 @@ export class ContributionService {
 			} catch {
 				// Don't throw the error, as we still want to update the contribution status
 			}
+		} else {
+			await this.dbSession.executeWrite(updateCurrent.query, updateCurrent.params);
 		}
-		await this.dbSession.executeWrite(
-			`
-	  UPDATE contributions
-	  SET status = ?, rejection_reason = ?, decision_date = ?, package_name = ?
-	  WHERE id = ?
-	`,
-			[status, decision.approved ? null : decision.rejectionReason || 'No reason provided', now, packageName, id],
-		);
 
 		const updated: Contribution = {
 			...contribution,
 			packageName,
 			status,
-			rejectionReason: decision.approved ? null : decision.rejectionReason || 'No reason provided',
+			rejectionReason,
 			decisionDate: now,
 		};
 		try {
@@ -766,17 +803,16 @@ export class ContributionService {
 		};
 	}
 	async deleteContribution(id: string, userId: string): Promise<boolean> {
-		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [userId]);
-		const userInfo = userInfoResult.results[0];
-		if (!userInfo) {
+		const context = await this.getContributionActionContext(userId, id);
+		if (!context) {
 			throw new Error('User not found');
 		}
 		// Fetch contribution to validate existence/ownership
-		const existing = await this.getContribution(id);
+		const existing = context.contribution;
 		if (!existing) {
 			return false; // not found
 		}
-		const isStaff = await this.roleService.hasPermission(userInfo.id, StaffRole.PRODUCT_MANAGER);
+		const isStaff = context.isProductManager;
 		const isOwner = existing.userId === userId;
 		const isDeletableStatus = existing.status === 'pending' || existing.status === 'rejected';
 		const canDelete = isDeletableStatus && (isStaff || isOwner);
@@ -804,24 +840,22 @@ export class ContributionService {
 		id: string,
 		requestedByVatsimId: string,
 	): Promise<{
+		airportIcao: string;
+		packageName: string;
 		maps: { key: string; etag: string };
 		supports: { key: string; etag: string };
 	}> {
 		// Resolve local user and permissions
-		const userInfoResult = await this.dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [
-			requestedByVatsimId,
-		]);
-		const userInfo = userInfoResult.results[0];
-		if (!userInfo) {
+		const context = await this.getContributionActionContext(requestedByVatsimId, id);
+		if (!context) {
 			throw new Error('User not found');
 		}
-		const allowed = await this.roleService.hasPermission(userInfo.id, StaffRole.PRODUCT_MANAGER);
-		if (!allowed) {
+		if (!context.isProductManager) {
 			throw new Error('Not authorized to regenerate contributions');
 		}
 
 		// Load contribution
-		const contribution = await this.getContribution(id);
+		const contribution = context.contribution;
 		if (!contribution) {
 			throw new Error('Contribution not found');
 		}
@@ -872,6 +906,8 @@ export class ContributionService {
 			}
 
 			return {
+				airportIcao: contribution.airportIcao,
+				packageName: contribution.packageName,
 				maps: { key: barsRes.key, etag: barsRes.etag },
 				supports: { key: supportsRes.key, etag: supportsRes.etag },
 			};

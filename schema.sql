@@ -301,10 +301,6 @@ CREATE TABLE IF NOT EXISTS bans (
   
 );
 
-CREATE INDEX IF NOT EXISTS idx_airports_continent ON airports (
-  continent
-);
-
 CREATE INDEX IF NOT EXISTS idx_airports_continent_icao ON airports (
   continent,
   icao
@@ -324,16 +320,8 @@ CREATE INDEX IF NOT EXISTS idx_runways_idents ON runways (
   he_ident
 );
 
-CREATE INDEX IF NOT EXISTS idx_vatsim_id ON users (
-  vatsim_id
-);
-
 CREATE INDEX IF NOT EXISTS idx_api_key ON users (
   api_key
-);
-
-CREATE INDEX IF NOT EXISTS idx_staff_user_id ON staff (
-  user_id
 );
 
 CREATE INDEX IF NOT EXISTS idx_staff_role ON staff (
@@ -344,14 +332,6 @@ CREATE INDEX IF NOT EXISTS idx_staff_created_at ON staff (
   created_at DESC
 );
 
-CREATE INDEX IF NOT EXISTS idx_points_airport_id ON points (
-  airport_id
-);
-
-CREATE INDEX IF NOT EXISTS idx_points_type ON points (
-  type
-);
-
 CREATE INDEX IF NOT EXISTS idx_active_objects_name ON active_objects (
   name
 );
@@ -360,29 +340,13 @@ CREATE INDEX IF NOT EXISTS idx_active_objects_last_updated ON active_objects (
   last_updated
 );
 
-CREATE INDEX IF NOT EXISTS idx_contributions_status ON contributions (
-  status
-);
-
-CREATE INDEX IF NOT EXISTS idx_contributions_user ON contributions (
-  user_id
-);
-
 CREATE INDEX IF NOT EXISTS idx_contributions_user_submission_date ON contributions (
   user_id,
   submission_date DESC
 );
 
-CREATE INDEX IF NOT EXISTS idx_contributions_airport ON contributions (
-  airport_icao
-);
-
 CREATE INDEX IF NOT EXISTS idx_contributions_submission_date ON contributions (
   submission_date
-);
-
-CREATE INDEX IF NOT EXISTS idx_contributions_decision_date ON contributions (
-  decision_date
 );
 
 CREATE INDEX IF NOT EXISTS idx_contributions_status_submission_date ON contributions (
@@ -398,6 +362,17 @@ CREATE INDEX IF NOT EXISTS idx_contributions_airport_submission_date ON contribu
 CREATE INDEX IF NOT EXISTS idx_contributions_status_package ON contributions (
   status,
   package_name
+);
+
+CREATE INDEX IF NOT EXISTS idx_contributions_package_simulator_status ON contributions (
+  package_name COLLATE NOCASE,
+  simulator,
+  status
+);
+
+CREATE INDEX IF NOT EXISTS idx_contributions_status_user ON contributions (
+  status,
+  user_id
 );
 
 CREATE INDEX IF NOT EXISTS idx_contributions_airport_lowerpkg_status_decision ON contributions (
@@ -420,22 +395,18 @@ CREATE INDEX IF NOT EXISTS idx_users_created_at ON users (
   created_at DESC
 );
 
-CREATE INDEX IF NOT EXISTS idx_division_members_composite ON division_members (
-  division_id,
-  vatsim_id
-);
-
 CREATE INDEX IF NOT EXISTS idx_division_members_vatsim ON division_members (
   vatsim_id
 );
 
-CREATE INDEX IF NOT EXISTS idx_division_airports_composite ON division_airports (
-  division_id,
+CREATE INDEX IF NOT EXISTS idx_division_airports_icao ON division_airports (
   icao
 );
 
-CREATE INDEX IF NOT EXISTS idx_division_airports_icao ON division_airports (
-  icao
+CREATE INDEX IF NOT EXISTS idx_division_airports_icao_status_division ON division_airports (
+  icao,
+  status,
+  division_id
 );
 
 CREATE INDEX IF NOT EXISTS idx_points_airport_type ON points (
@@ -447,12 +418,14 @@ CREATE INDEX IF NOT EXISTS idx_points_linked_to ON points (
   linked_to
 );
 
-CREATE INDEX IF NOT EXISTS idx_faqs_order ON faqs (
-  order_position ASC
+CREATE INDEX IF NOT EXISTS idx_points_type_linked_to ON points (
+  type,
+  linked_to
 );
 
-CREATE INDEX IF NOT EXISTS idx_installer_releases_product ON installer_releases (
-  product
+CREATE INDEX IF NOT EXISTS idx_faqs_order_created ON faqs (
+  order_position ASC,
+  created_at ASC
 );
 
 CREATE INDEX IF NOT EXISTS idx_installer_releases_created_at ON installer_releases (
@@ -481,37 +454,13 @@ CREATE INDEX IF NOT EXISTS idx_contribution_generations_expires_at ON contributi
   expires_at
 );
 
-CREATE INDEX IF NOT EXISTS idx_downloads_product ON downloads (
-  product
-);
-
-CREATE INDEX IF NOT EXISTS idx_downloads_product_version ON downloads (
-  product,
-  version
-);
-
 CREATE INDEX IF NOT EXISTS idx_downloads_product_created_at ON downloads (
   product,
   created_at DESC
 );
 
-CREATE INDEX IF NOT EXISTS idx_download_ip_hits_product_version ON download_ip_hits (
-  product,
-  version
-);
-
 CREATE INDEX IF NOT EXISTS idx_download_ip_hits_last_seen ON download_ip_hits (
   last_seen
-);
-
-CREATE INDEX IF NOT EXISTS idx_download_ip_hits_cleanup ON download_ip_hits (
-  last_seen,
-  product,
-  version
-);
-
-CREATE INDEX IF NOT EXISTS idx_bans_vatsim_id ON bans (
-  vatsim_id
 );
 
 CREATE INDEX IF NOT EXISTS idx_bans_expires_at ON bans (
@@ -521,3 +470,25 @@ CREATE INDEX IF NOT EXISTS idx_bans_expires_at ON bans (
 CREATE INDEX IF NOT EXISTS idx_bans_created_at ON bans (
   created_at DESC
 );
+
+-- Retire indexes now covered by UNIQUE constraints or better composite indexes.
+DROP INDEX IF EXISTS idx_airports_continent;
+DROP INDEX IF EXISTS idx_vatsim_id;
+DROP INDEX IF EXISTS idx_staff_user_id;
+DROP INDEX IF EXISTS idx_points_airport_id;
+DROP INDEX IF EXISTS idx_points_type;
+DROP INDEX IF EXISTS idx_contributions_status;
+DROP INDEX IF EXISTS idx_contributions_user;
+DROP INDEX IF EXISTS idx_contributions_airport;
+DROP INDEX IF EXISTS idx_contributions_decision_date;
+DROP INDEX IF EXISTS idx_division_members_composite;
+DROP INDEX IF EXISTS idx_division_airports_composite;
+DROP INDEX IF EXISTS idx_faqs_order;
+DROP INDEX IF EXISTS idx_installer_releases_product;
+DROP INDEX IF EXISTS idx_downloads_product;
+DROP INDEX IF EXISTS idx_downloads_product_version;
+DROP INDEX IF EXISTS idx_download_ip_hits_product_version;
+DROP INDEX IF EXISTS idx_download_ip_hits_cleanup;
+DROP INDEX IF EXISTS idx_bans_vatsim_id;
+
+PRAGMA optimize;

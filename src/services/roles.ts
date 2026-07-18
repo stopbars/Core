@@ -31,7 +31,10 @@ export class RoleService {
 	}
 
 	private async fetchStaffRecord(userId: number): Promise<StaffRecord | null> {
-		const staffResult = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
+		const staffResult = await this.dbSession.executeRead<StaffRecord>(
+			'SELECT id, user_id, role, created_at FROM staff WHERE user_id = ? LIMIT 1',
+			[userId],
+		);
 		return staffResult.results[0] ?? null;
 	}
 
@@ -80,56 +83,59 @@ export class RoleService {
 		`,
 			[userId],
 		);
-		return rolesResult.results.reduce(
-			(acc, { role }) => ({
-				...acc,
-				[role]: 1,
-			}),
-			{} as DivisionRoles,
-		);
+		const roles: DivisionRoles = {};
+		for (const { role } of rolesResult.results) {
+			if (role === 'nav_head' || role === 'nav_member') roles[role] = 1;
+		}
+		return roles;
 	}
 
 	// --- Staff management helpers (write) ---
-	private async getRoleCount(role: StaffRole): Promise<number> {
-		const res = await this.dbSession.executeRead<{ cnt: number }>('SELECT COUNT(*) as cnt FROM staff WHERE role = ?', [role]);
-		return res.results[0]?.cnt || 0;
+	private async getRoleChangeState(userId: number): Promise<(StaffRecord & { lead_count: number }) | null> {
+		const result = await this.dbSession.executeLatest<StaffRecord & { lead_count: number }>(
+			`SELECT id, user_id, role, created_at,
+				(SELECT COUNT(*) FROM staff WHERE role = ?) AS lead_count
+			 FROM staff
+			 WHERE user_id = ?
+			 LIMIT 1`,
+			[StaffRole.LEAD_DEVELOPER, userId],
+		);
+		return result.results[0] ?? null;
 	}
 
-	private async ensureNotLastLeadDeveloper(userId: number, changingToRole?: StaffRole | null) {
-		const existing = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
-		const current = existing.results[0];
-		if (!current) return; // not staff
+	private ensureNotLastLeadDeveloper(current: (StaffRecord & { lead_count: number }) | null, changingToRole?: StaffRole | null) {
+		if (!current) return;
 		if (
 			(current.role as StaffRole) === StaffRole.LEAD_DEVELOPER &&
 			(changingToRole == null || changingToRole !== StaffRole.LEAD_DEVELOPER)
 		) {
-			const count = await this.getRoleCount(StaffRole.LEAD_DEVELOPER);
-			if (count <= 1) throw new Error('Cannot modify or remove the last remaining lead developer');
+			if (current.lead_count <= 1) throw new Error('Cannot modify or remove the last remaining lead developer');
 		}
 	}
 
 	async addStaff(userId: number, role: StaffRole): Promise<{ user_id: number; role: StaffRole; created_at: string }> {
-		const existing = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
-		if (existing.results[0]) {
-			await this.ensureNotLastLeadDeveloper(userId, role);
-			await this.dbSession.executeWrite('UPDATE staff SET role = ? WHERE user_id = ?', [role, userId]);
-			const updated = await this.dbSession.executeRead<StaffRecord>('SELECT * FROM staff WHERE user_id = ?', [userId]);
-			const row = updated.results[0]!;
-			return { user_id: row.user_id, role: row.role as StaffRole, created_at: row.created_at };
-		}
+		const existing = await this.getRoleChangeState(userId);
+		this.ensureNotLastLeadDeveloper(existing, role);
 		const createdAt = new Date().toISOString();
-		await this.dbSession.executeWrite('INSERT INTO staff (user_id, role, created_at) VALUES (?, ?, ?)', [userId, role, createdAt]);
-		return { user_id: userId, role, created_at: createdAt };
+		const result = await this.dbSession.executeWrite(
+			`INSERT INTO staff (user_id, role, created_at) VALUES (?, ?, ?)
+			 ON CONFLICT(user_id) DO UPDATE SET role = excluded.role
+			 RETURNING user_id, role, created_at`,
+			[userId, role, createdAt],
+		);
+		const row = (result.results as unknown as StaffRecord[] | null)?.[0];
+		if (!row) throw new Error('Failed to add staff member');
+		return { user_id: row.user_id, role: row.role as StaffRole, created_at: row.created_at };
 	}
 
 	async updateStaffRole(userId: number, role: StaffRole): Promise<boolean> {
-		await this.ensureNotLastLeadDeveloper(userId, role);
+		this.ensureNotLastLeadDeveloper(await this.getRoleChangeState(userId), role);
 		const result = await this.dbSession.executeWrite('UPDATE staff SET role = ? WHERE user_id = ?', [role, userId]);
 		return !!result.success;
 	}
 
 	async removeStaff(userId: number): Promise<boolean> {
-		await this.ensureNotLastLeadDeveloper(userId, null);
+		this.ensureNotLastLeadDeveloper(await this.getRoleChangeState(userId), null);
 		const result = await this.dbSession.executeWrite('DELETE FROM staff WHERE user_id = ?', [userId]);
 		return !!result.success;
 	}
