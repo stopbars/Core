@@ -1,12 +1,13 @@
 import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { DurableObject } from 'cloudflare:workers';
 import { Connection } from './network/connection';
 import { AuthService } from './services/auth';
 import { CacheKeys, withCache } from './services/cache';
 import { DatabaseContextFactory } from './services/database-context';
 import { HttpError } from './services/errors';
-import { cancelResponseBody } from './services/http';
+import { cancelResponseBody, getClientIp } from './services/http';
 import { getLightsByObject, type RadarLight } from './services/lights-cache';
 import { rateLimit } from './services/rate-limit';
 import { InstallerProduct } from './services/releases';
@@ -19,6 +20,37 @@ import { MAX_CONTRIBUTION_XML_BYTES, sanitizeContributionXml } from './services/
 import { AirportObject, PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
+const ICAO_REGEX = /^[A-Z0-9]{4}$/;
+const FAVICON_BYTES = Uint8Array.from(
+	atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axhLZ4AAAAASUVORK5CYII='),
+	(character) => character.charCodeAt(0),
+);
+const INSTALLER_PRODUCTS: readonly InstallerProduct[] = [
+	'Pilot-Client',
+	'vatSys-Plugin',
+	'EuroScope-Plugin',
+	'Installer',
+	'SimConnect.NET',
+];
+const CACHE_NAMESPACES = ['airports', 'points', 'divisions', 'auth', 'state', 'health', 'installer', 'github', 'faq'] as const;
+const STATE_ID_INFO = [
+	{ type: 'Uni-Directional', code: 0, direction2: 'OFF', direction1: 'OFF' },
+	{ type: 'Uni-Directional', code: 1, direction2: 'OFF', direction1: 'Red' },
+	{ type: 'Uni-Directional', code: 2, direction2: 'OFF', direction1: 'Green' },
+	{ type: 'Uni-Directional', code: 3, direction2: 'OFF', direction1: 'Yellow' },
+	{ type: 'Uni-Directional', code: 4, direction2: 'OFF', direction1: 'Blue' },
+	{ type: 'Uni-Directional', code: 5, direction2: 'OFF', direction1: 'Orange' },
+	{ type: 'Uni-Directional', code: 6, direction2: 'OFF', direction1: 'Red' },
+	{ type: 'Uni-Directional', code: 7, direction2: 'OFF', direction1: 'OFF' },
+	{ type: 'Bi-Directional', code: 20, direction2: 'Red', direction1: 'Red' },
+	{ type: 'Bi-Directional', code: 21, direction2: 'Green', direction1: 'Green' },
+	{ type: 'Bi-Directional', code: 22, direction2: 'Yellow', direction1: 'Yellow' },
+	{ type: 'Bi-Directional', code: 23, direction2: 'Blue', direction1: 'Blue' },
+	{ type: 'Bi-Directional', code: 24, direction2: 'Orange', direction1: 'Orange' },
+	{ type: 'Bi-Directional', code: 25, direction2: 'Green', direction1: 'Yellow' },
+	{ type: 'Bi-Directional', code: 26, direction2: 'Green', direction1: 'Blue' },
+	{ type: 'Bi-Directional', code: 27, direction2: 'Green', direction1: 'Orange' },
+] as const;
 
 const getHighResTime =
 	typeof performance !== 'undefined' && typeof performance.now === 'function' ? () => performance.now() : () => Date.now();
@@ -91,7 +123,7 @@ const buildOfflineTemplate = async (env: Env, airport: string): Promise<OfflineT
 
 const getOfflineStateSnapshot = async (env: Env, airport: string): Promise<AirportObject[] | null> => {
 	const normalizedAirport = airport.toUpperCase();
-	if (!/^[A-Z0-9]{4}$/.test(normalizedAirport)) {
+	if (!ICAO_REGEX.test(normalizedAirport)) {
 		return null;
 	}
 	const cacheService = ServicePool.getCache(env);
@@ -201,10 +233,11 @@ type VatsimConnectionStatus = {
 	secondary_positions: Array<{ latitude: number; longitude: number }>;
 };
 
-export class BARS {
+export class BARS extends DurableObject<Env> {
 	private connection: Connection;
 
 	constructor(state: DurableObjectState, env: Env) {
+		super(state, env);
 		const vatsim = new VatsimService(env.VATSIM_CLIENT_ID, env.VATSIM_CLIENT_SECRET);
 		const auth = new AuthService(env.DB, vatsim);
 		this.connection = new Connection(env, auth, vatsim, state);
@@ -212,6 +245,10 @@ export class BARS {
 
 	async fetch(request: Request) {
 		return this.connection.fetch(request);
+	}
+
+	async getState(airport: string, forceOffline = false) {
+		return this.connection.getState(airport, forceOffline);
 	}
 }
 
@@ -323,8 +360,7 @@ app.use('*', async (c, next) => {
 	const start = Date.now();
 	await next();
 	try {
-		const url = new URL(c.req.url);
-		const path = url.pathname;
+		const path = c.req.path;
 		if (c.req.method === 'OPTIONS') return;
 		if (path === '/favicon.ico') return;
 		if (path.includes('/health')) return;
@@ -370,33 +406,12 @@ app.use(
 );
 
 app.get('/favicon.ico', () => {
-	const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axhLZ4AAAAASUVORK5CYII='; // 1x1 transparent PNG
-	const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-	return new Response(bytes, {
+	return new Response(FAVICON_BYTES, {
 		headers: {
 			'Content-Type': 'image/png',
 			'Cache-Control': 'public, max-age=604800, immutable',
 		},
 	});
-});
-
-// Extract client IP (best-effort) and attach to context
-app.use('*', async (c, next) => {
-	const cf = c.req.header('CF-Connecting-IP');
-	const real = c.req.header('X-Real-IP');
-	const fwdFor = c.req.header('X-Forwarded-For');
-	const forwarded = c.req.header('Forwarded');
-	let ip: string | undefined = cf || real;
-	if (!ip && fwdFor) {
-		ip = fwdFor.split(',')[0].trim();
-	}
-	if (!ip && forwarded) {
-		// Forwarded: for=1.2.3.4; proto=http; by=...
-		const match = forwarded.match(/for=([^;]+)/i);
-		if (match) ip = match[1].replace(/"/g, '');
-	}
-	c.set('clientIp', ip || '0.0.0.0');
-	await next();
 });
 
 async function resolveUserFromVatsimOrApi(
@@ -476,7 +491,7 @@ app.post('/contact', async (c) => {
 		const email = typeof b.email === 'string' ? b.email.trim() : '';
 		const topic = typeof b.topic === 'string' ? b.topic.trim() : '';
 		const message = typeof b.message === 'string' ? b.message.trim() : '';
-		const ip = c.get('clientIp') || '0.0.0.0';
+		const ip = getClientIp(c.req.raw);
 
 		const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 		if (!email || !emailRegex.test(email)) {
@@ -614,9 +629,8 @@ app.patch('/contact/:id/status', async (c) => {
 		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
 		const contact = ServicePool.getContact(c.env);
-		const existing = await contact.getMessage(id);
-		if (!existing) return dbContext.textResponse('Not found', { status: 404 });
 		const updated = await contact.updateStatus(id, status, user.vatsim_id);
+		if (!updated) return dbContext.textResponse('Not found', { status: 404 });
 		return dbContext.jsonResponse({ message: updated });
 	} finally {
 		dbContext.close();
@@ -666,9 +680,7 @@ app.delete('/contact/:id', async (c) => {
 		const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 		if (!allowed) return dbContext.textResponse('Forbidden', { status: 403 });
 		const contact = ServicePool.getContact(c.env);
-		const existing = await contact.getMessage(id);
-		if (!existing) return dbContext.textResponse('Not found', { status: 404 });
-		await contact.deleteMessage(id);
+		if (!(await contact.deleteMessage(id))) return dbContext.textResponse('Not found', { status: 404 });
 		return dbContext.textResponse('', { status: 204 });
 	} finally {
 		dbContext.close();
@@ -688,7 +700,7 @@ app.delete('/contact/:id', async (c) => {
  *       - `airport` (ICAO, 4 chars) and an API key via either:
  *         - `key` query parameter, or
  *         - `Authorization: Bearer <API key>` header
- *       The API key is forwarded as a Bearer token to the airport's Durable Object for auth.
+ *       The Durable Object validates the API key from the query parameter or Bearer header.
  *     x-mint:
  *       content: |
  *         ## Establish a session
@@ -873,22 +885,11 @@ app.get('/connect', rateLimit({ maxRequests: 30 }), async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	if (airportId === 'ZZZZ' || !/^[A-Z0-9]{4}$/.test(airportId)) {
+	if (airportId === 'ZZZZ' || !ICAO_REGEX.test(airportId)) {
 		return c.text('Unauthorized', 401);
 	}
 
-	const newHeaders = new Headers(c.req.raw.headers);
-	newHeaders.set('Authorization', `Bearer ${apiKey}`);
-
-	const modifiedRequest = new Request(c.req.raw.url, {
-		method: c.req.raw.method,
-		headers: newHeaders,
-		body: c.req.raw.body,
-	});
-
-	const id = c.env.BARS.idFromName(airportId);
-	const obj = c.env.BARS.get(id);
-	return obj.fetch(modifiedRequest);
+	return c.env.BARS.getByName(airportId).fetch(c.req.raw);
 });
 
 // State endpoint
@@ -959,7 +960,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 					const metadata = parseActiveObjectName(obj.name);
 					const airportIcaoRaw = metadata?.airport ?? obj.name.split('/')[0] ?? '';
 					const airportIcao = airportIcaoRaw.toUpperCase();
-					if (!/^[A-Z0-9]{4}$/.test(airportIcao)) {
+					if (!ICAO_REGEX.test(airportIcao)) {
 						return null as null;
 					}
 
@@ -987,18 +988,9 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 						}
 					}
 
-					const id = c.env.BARS.idFromString(obj.id);
-					const durableObj = c.env.BARS.get(id);
-
-					const stateRequest = new Request(`https://internal/state?airport=${airportIcao}`, {
-						method: 'GET',
-						headers: new Headers({
-							'X-Request-Type': 'get_state',
-						}),
-					});
+					const durableObj = c.env.BARS.get(c.env.BARS.idFromString(obj.id));
 
 					try {
-						const response = await durableObj.fetch(stateRequest);
 						type DOState = {
 							airport: string;
 							controllers: string[];
@@ -1006,7 +998,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 							objects: DOObject[];
 							offline?: boolean;
 						};
-						const state = (await response.json()) as DOState;
+						const state = (await durableObj.getState(airportIcao)) as DOState;
 
 						// Determine online/offline status consistently
 						const controllerCount = Array.isArray(state.controllers) ? state.controllers.length : 0;
@@ -1021,13 +1013,13 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 							const objects = Array.isArray(state.objects)
 								? state.objects
-									.filter((o: DOObject) => allowedIds.has(o.id))
-									.map((o: DOObject) => ({
-										id: o.id,
-										state: o.state,
-										timestamp: o.timestamp,
-										lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-									}))
+										.filter((o: DOObject) => allowedIds.has(o.id))
+										.map((o: DOObject) => ({
+											id: o.id,
+											state: o.state,
+											timestamp: o.timestamp,
+											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+										}))
 								: [];
 
 							return {
@@ -1083,9 +1075,6 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		}
 	}
 
-	const id = c.env.BARS.idFromName(airport);
-	const obj = c.env.BARS.get(id);
-
 	if (airport.length !== 4) {
 		return c.json(
 			{
@@ -1095,62 +1084,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		);
 	}
 
-	const stateUrl = new URL('https://internal/state');
-	stateUrl.searchParams.set('airport', airport);
-	if (offlineRequested) {
-		stateUrl.searchParams.set('offline', 'true');
-	}
-	const stateRequest = new Request(stateUrl.toString(), {
-		method: 'GET',
-		headers: new Headers({
-			'X-Request-Type': 'get_state',
-		}),
-	});
-
-	if (!isVatsimRadar) {
-		return obj.fetch(stateRequest);
-	}
-
-	// Transform response for VATSIM Radar variant (filter to XML objects and attach lights)
-	try {
-		const resp = await obj.fetch(stateRequest);
-		type DOObject = { id: string; state: unknown; timestamp: number };
-		const state = (await resp.json()) as {
-			airport: string;
-			controllers: string[];
-			pilots: string[];
-			objects: DOObject[];
-			offline?: boolean;
-		};
-		const lightsByObject = await getLightsByObject(c.env, state.airport);
-		const allowedIds = new Set(Object.keys(lightsByObject));
-		const objects = Array.isArray(state.objects)
-			? state.objects
-				.filter((o: DOObject) => allowedIds.has(o.id))
-				.map((o: DOObject) => ({
-					id: o.id,
-					state: o.state,
-					timestamp: o.timestamp,
-					lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
-				}))
-			: [];
-		return c.json({
-			states: [
-				{
-					airport: state.airport,
-					controllers: state.controllers,
-					pilots: state.pilots,
-					objects,
-					connections: {
-						controllers: Array.isArray(state.controllers) ? state.controllers.length : 0,
-						pilots: Array.isArray(state.pilots) ? state.pilots.length : 0,
-					},
-				},
-			],
-		});
-	} catch {
-		return c.json({ error: 'Failed to fetch state' }, 500);
-	}
+	return c.json(await c.env.BARS.getByName(airport).getState(airport, offlineRequested));
 });
 
 // VATSIM auth callback
@@ -1763,14 +1697,14 @@ app.get(
 						.split(',')
 						.map((code) => sanitizeIcao(code.trim()))
 						.filter(Boolean);
-					if (icaos.length === 0 || icaos.some((code) => !/^[A-Z0-9]{4}$/.test(code))) {
+					if (icaos.length === 0 || icaos.some((code) => !ICAO_REGEX.test(code))) {
 						return c.text('Invalid ICAO format', 400);
 					}
 					data = await airports.getAirports(icaos);
 				} else {
 					// Single airport request
 					const cleanIcao = sanitizeIcao(icao);
-					if (!/^[A-Z0-9]{4}$/.test(cleanIcao)) {
+					if (!ICAO_REGEX.test(cleanIcao)) {
 						return c.text('Invalid ICAO format', 400);
 					}
 					data = await airports.getAirport(cleanIcao);
@@ -1811,7 +1745,7 @@ app.get(
  */
 app.get('/airports/:icao/contribution-policy', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
-	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(icao)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
@@ -2075,10 +2009,7 @@ divisionsApp.delete('/:id', async (c) => {
 	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 	if (!allowed) return c.text('Forbidden', 403);
 
-	const existing = await divisions.getDivision(id);
-	if (!existing) return c.text('Division not found', 404);
-
-	await divisions.deleteDivision(id);
+	if (!(await divisions.deleteDivision(id))) return c.text('Division not found', 404);
 	return c.body(null, 204);
 });
 
@@ -2229,11 +2160,10 @@ divisionsApp.post('/:id/members', async (c) => {
 
 	// Product managers and lead developers can manage any division.
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
-	const isLeadDev = user ? await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER) : false;
-	const isPM = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
+	const isStaffManager = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
 
 	const userRole = await divisions.getMemberRole(divisionId, vatsimUser.id);
-	if (userRole !== 'nav_head' && !isLeadDev && !isPM) {
+	if (userRole !== 'nav_head' && !isStaffManager) {
 		return c.text('Forbidden', 403);
 	}
 
@@ -2287,21 +2217,20 @@ divisionsApp.delete('/:id/members/:vatsimId', async (c) => {
 
 	// Product managers and lead developers can manage any division.
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
-	const isLeadDev = user ? await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER) : false;
-	const isPM = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
+	const isStaffManager = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
 
 	const userRole = await divisions.getMemberRole(divisionId, vatsimUser.id);
-	if (userRole !== 'nav_head' && !isLeadDev && !isPM) {
+	if (userRole !== 'nav_head' && !isStaffManager) {
 		return c.text('Forbidden', 403);
 	}
 
 	// Prevent removing yourself (unless you're a lead dev removing yourself from a division you're not heading)
-	if (targetVatsimId === vatsimUser.id.toString() && !isLeadDev && !isPM) {
+	if (targetVatsimId === vatsimUser.id.toString() && !isStaffManager) {
 		return c.text('Cannot remove yourself from the division', 400);
 	}
 
 	const targetRole = await divisions.getMemberRole(divisionId, targetVatsimId);
-	if (targetRole === 'nav_head' && !isLeadDev && !isPM) {
+	if (targetRole === 'nav_head' && !isStaffManager) {
 		return c.text('Cannot remove another nav head', 403);
 	}
 
@@ -2613,7 +2542,7 @@ app.get('/airports/:icao/points', async (c) => {
 	const airportId = c.req.param('icao');
 
 	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
@@ -2655,7 +2584,7 @@ app.post('/airports/:icao/points', async (c) => {
 	const airportId = c.req.param('icao');
 
 	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
@@ -2706,7 +2635,7 @@ app.post('/airports/:icao/points/batch', async (c) => {
 	const airportId = c.req.param('icao');
 
 	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
@@ -2757,12 +2686,12 @@ app.put('/airports/:icao/points/:id', async (c) => {
 	const pointId = c.req.param('id');
 
 	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
 	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(POINT_ID_REGEX)) {
+	if (!POINT_ID_REGEX.test(pointId)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -2807,12 +2736,12 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	const pointId = c.req.param('id');
 
 	// Validate ICAO format (exactly 4 uppercase letters/numbers)
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
 	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(POINT_ID_REGEX)) {
+	if (!POINT_ID_REGEX.test(pointId)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -2881,11 +2810,11 @@ app.post('/airports/:icao/points/:stopbarId/link', async (c) => {
 	const airportId = c.req.param('icao');
 	const stopbarId = c.req.param('stopbarId');
 
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
-	if (!stopbarId.match(POINT_ID_REGEX)) {
+	if (!POINT_ID_REGEX.test(stopbarId)) {
 		return c.text('Invalid stopbar ID format', 400);
 	}
 
@@ -2895,7 +2824,7 @@ app.post('/airports/:icao/points/:stopbarId/link', async (c) => {
 	}
 
 	const body = await c.req.json<{ leadOnId: string }>();
-	if (!body.leadOnId || !body.leadOnId.match(POINT_ID_REGEX)) {
+	if (!body.leadOnId || !POINT_ID_REGEX.test(body.leadOnId)) {
 		return c.text('Invalid or missing leadOnId', 400);
 	}
 
@@ -2951,11 +2880,11 @@ app.delete('/airports/:icao/points/:stopbarId/link/:leadOnId', async (c) => {
 	const stopbarId = c.req.param('stopbarId');
 	const leadOnId = c.req.param('leadOnId');
 
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
-	if (!stopbarId.match(POINT_ID_REGEX) || !leadOnId.match(POINT_ID_REGEX)) {
+	if (!POINT_ID_REGEX.test(stopbarId) || !POINT_ID_REGEX.test(leadOnId)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -3002,11 +2931,11 @@ app.get('/airports/:icao/points/:stopbarId/links', async (c) => {
 	const airportId = c.req.param('icao');
 	const stopbarId = c.req.param('stopbarId');
 
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
-	if (!stopbarId.match(POINT_ID_REGEX)) {
+	if (!POINT_ID_REGEX.test(stopbarId)) {
 		return c.text('Invalid stopbar ID format', 400);
 	}
 
@@ -3035,7 +2964,7 @@ app.get('/airports/:icao/points/:stopbarId/links', async (c) => {
 app.get('/airports/:icao/links', async (c) => {
 	const airportId = c.req.param('icao');
 
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
@@ -3120,7 +3049,7 @@ app.get('/airports/:icao/links', async (c) => {
 app.post('/airports/:icao/links/bulk', async (c) => {
 	const airportId = c.req.param('icao');
 
-	if (!airportId.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(airportId)) {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
@@ -3144,7 +3073,7 @@ app.post('/airports/:icao/links/bulk', async (c) => {
 		if (!entry.leadOnId || !entry.stopbarId) {
 			return c.json({ error: 'Each link entry must have leadOnId and stopbarId' }, 400);
 		}
-		if (!entry.leadOnId.match(POINT_ID_REGEX) || !entry.stopbarId.match(POINT_ID_REGEX)) {
+		if (!POINT_ID_REGEX.test(entry.leadOnId) || !POINT_ID_REGEX.test(entry.stopbarId)) {
 			return c.json({ error: 'Invalid point ID format in link entry' }, 400);
 		}
 	}
@@ -3154,7 +3083,7 @@ app.post('/airports/:icao/links/bulk', async (c) => {
 		if (!entry.leadOnId || !entry.stopbarId) {
 			return c.json({ error: 'Each unlink entry must have leadOnId and stopbarId' }, 400);
 		}
-		if (!entry.leadOnId.match(POINT_ID_REGEX) || !entry.stopbarId.match(POINT_ID_REGEX)) {
+		if (!POINT_ID_REGEX.test(entry.leadOnId) || !POINT_ID_REGEX.test(entry.stopbarId)) {
 			return c.json({ error: 'Invalid point ID format in unlink entry' }, 400);
 		}
 	}
@@ -3195,7 +3124,7 @@ app.get('/points/:id', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) =
 	const pointId = c.req.param('id');
 
 	// Validate point ID format (alphanumeric, dash, underscore)
-	if (!pointId.match(POINT_ID_REGEX)) {
+	if (!POINT_ID_REGEX.test(pointId)) {
 		return c.text('Invalid point ID format', 400);
 	}
 
@@ -3267,7 +3196,7 @@ app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
 		);
 	}
 
-	const invalidIds = pointIds.filter((id) => !id.match(POINT_ID_REGEX));
+	const invalidIds = pointIds.filter((id) => !POINT_ID_REGEX.test(id));
 	if (invalidIds.length > 0) {
 		return c.json(
 			{
@@ -3280,14 +3209,13 @@ app.get('/points', withCache(CacheKeys.fromUrl, 3600, 'points'), async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
-	// Fetch all points in parallel
-	const pointPromises = pointIds.map((id) => points.getPoint(id));
-	const pointResults = await Promise.all(pointPromises);
+	// Preserve input order and missing entries while collapsing up to 100 D1 reads into one query.
+	const pointResults = await points.getPoints(pointIds);
 
 	// Filter out null results and create response
 	const foundPoints = pointResults.filter((point) => point !== null);
-	const foundIds = foundPoints.map((point) => point!.id);
-	const notFoundIds = pointIds.filter((id) => !foundIds.includes(id));
+	const foundIds = new Set(foundPoints.map((point) => point!.id));
+	const notFoundIds = pointIds.filter((id) => !foundIds.has(id));
 
 	return c.json({
 		points: foundPoints,
@@ -3320,7 +3248,8 @@ const getStoredContributionGenerationResponse = async (c: Context): Promise<Resp
 
 const getContributionGenerationCacheKey = (token: string): string => `supports-gen:${token}`;
 
-const getContributionGenerationExpiresAt = (): string => new Date(Date.now() + CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS * 1000).toISOString();
+const getContributionGenerationExpiresAt = (): string =>
+	new Date(Date.now() + CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS * 1000).toISOString();
 
 const getContributionGenerationTtlSeconds = (expiresAt?: string): number => {
 	if (!expiresAt) {
@@ -3599,26 +3528,7 @@ app.get(
  *         description: Mapping returned
  */
 app.get('/stateid/info.json', withCache(CacheKeys.fromUrl, 31536000, 'data'), (c) => {
-	const states = [
-		{ type: 'Uni-Directional', code: 0, direction2: 'OFF', direction1: 'OFF' },
-		{ type: 'Uni-Directional', code: 1, direction2: 'OFF', direction1: 'Red' },
-		{ type: 'Uni-Directional', code: 2, direction2: 'OFF', direction1: 'Green' },
-		{ type: 'Uni-Directional', code: 3, direction2: 'OFF', direction1: 'Yellow' },
-		{ type: 'Uni-Directional', code: 4, direction2: 'OFF', direction1: 'Blue' },
-		{ type: 'Uni-Directional', code: 5, direction2: 'OFF', direction1: 'Orange' },
-		{ type: 'Uni-Directional', code: 6, direction2: 'OFF', direction1: 'Red' },
-		{ type: 'Uni-Directional', code: 7, direction2: 'OFF', direction1: 'OFF' },
-		{ type: 'Bi-Directional', code: 20, direction2: 'Red', direction1: 'Red' },
-		{ type: 'Bi-Directional', code: 21, direction2: 'Green', direction1: 'Green' },
-		{ type: 'Bi-Directional', code: 22, direction2: 'Yellow', direction1: 'Yellow' },
-		{ type: 'Bi-Directional', code: 23, direction2: 'Blue', direction1: 'Blue' },
-		{ type: 'Bi-Directional', code: 24, direction2: 'Orange', direction1: 'Orange' },
-		{ type: 'Bi-Directional', code: 25, direction2: 'Green', direction1: 'Yellow' },
-		{ type: 'Bi-Directional', code: 26, direction2: 'Green', direction1: 'Blue' },
-		{ type: 'Bi-Directional', code: 27, direction2: 'Green', direction1: 'Orange' },
-	];
-
-	return c.json({ states });
+	return c.json({ states: STATE_ID_INFO });
 });
 
 /**
@@ -4470,19 +4380,13 @@ contributionsApp.post('/:id/regenerate', async (c) => {
 
 	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
-	const roles = ServicePool.getRoles(c.env);
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	if (!user) return c.text('User not found', 404);
 
-	const isPM = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
-	if (!isPM) return c.text('Forbidden', 403);
-
 	const id = c.req.param('id');
 	const contributions = ServicePool.getContributions(c.env);
-	const existing = await contributions.getContribution(id);
-	if (!existing) return c.text('Not found', 404);
 
 	try {
 		const res = await contributions.regenerateContribution(id, user.vatsim_id);
@@ -4493,15 +4397,16 @@ contributionsApp.post('/:id/regenerate', async (c) => {
 		return c.json({
 			success: true,
 			id,
-			airport: existing.airportIcao,
-			packageName: existing.packageName,
+			airport: res.airportIcao,
+			packageName: res.packageName,
 			maps: { key: res.maps.key, etag: res.maps.etag, url: fileUrl(res.maps.key) },
 			supports: { key: res.supports.key, etag: res.supports.etag, url: fileUrl(res.supports.key) },
 		});
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : 'Failed to regenerate';
-		const status = msg.includes('authorized') ? 403 : msg.includes('not found') ? 404 : 400;
-		return c.json({ error: msg }, status);
+		if (msg.includes('authorized')) return c.text('Forbidden', 403);
+		if (msg.includes('not found')) return c.text('Not found', 404);
+		return c.json({ error: msg }, 400);
 	}
 });
 
@@ -4545,11 +4450,6 @@ contributionsApp.delete('/:id', rateLimit({ maxRequests: 1 }), async (c) => {
 	}
 
 	const id = c.req.param('id');
-	const existing = await contributions.getContribution(id);
-	if (!existing) {
-		return c.text('Not found', 404);
-	}
-
 	try {
 		const success = await contributions.deleteContribution(id, user.vatsim_id);
 		if (!success) return c.text('Not found', 404);
@@ -4601,7 +4501,7 @@ app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900
 	const contributions = ServicePool.getContributions(c.env);
 	const storage = ServicePool.getStorage(c.env);
 
-	const latest = await contributions.getLatestApprovedContributionForAirportPackage(icao, pkg, simulatorParam);
+	const latest = await contributions.getLatestApprovedMapDescriptor(icao, pkg, simulatorParam);
 	if (!latest) {
 		return c.text('No approved map found', 404);
 	}
@@ -4637,9 +4537,9 @@ app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900
  *       404:
  *         description: Not found
  */
-cdnApp.get('/files/*', async (c) => {
+cdnApp.get('/files/:fileKey{.+}', async (c) => {
 	// Extract the file key from the URL - everything after /cdn/files/
-	const fileKey = c.req.param('*');
+	const fileKey = c.req.param('fileKey');
 
 	if (!fileKey) {
 		return c.text('File not found', 404);
@@ -4648,7 +4548,7 @@ cdnApp.get('/files/*', async (c) => {
 	const storage = ServicePool.getStorage(c.env);
 
 	// Bypass rate limiting for file downloads to ensure fast CDN performance
-	const fileResponse = await storage.getFile(fileKey);
+	const fileResponse = await storage.getFile(fileKey, c.req.raw.headers);
 
 	if (!fileResponse) {
 		return c.text('File not found', 404);
@@ -4731,12 +4631,9 @@ cdnApp.post('/upload', async (c) => {
 		const fileName = customKey || file.name;
 		const fileKey = path ? `${path}/${fileName}` : fileName;
 
-		// Extract file data
-		const fileData = await file.arrayBuffer();
-
-		// Upload file to storage
+		// Stream directly to R2 instead of duplicating the entire upload in memory.
 		const storage = ServicePool.getStorage(c.env);
-		const result = await storage.uploadFile(fileKey, fileData, file.type, {
+		const result = await storage.uploadFile(fileKey, file.stream(), file.type, {
 			uploadedBy: user.vatsim_id,
 			fileName: file.name,
 			size: file.size.toString(),
@@ -4858,7 +4755,7 @@ cdnApp.get('/files', async (c) => {
  *       200:
  *         description: Deletion result
  */
-cdnApp.delete('/files/*', async (c) => {
+cdnApp.delete('/files/:fileKey{.+}', async (c) => {
 	// Require authentication for file deletion
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) {
@@ -4883,7 +4780,7 @@ cdnApp.delete('/files/*', async (c) => {
 	}
 
 	try {
-		const fileKey = c.req.param('*');
+		const fileKey = c.req.param('fileKey');
 
 		if (!fileKey) {
 			return c.json(
@@ -4945,7 +4842,7 @@ app.get('/euroscope/files/:icao', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 
 	// Validate ICAO format
-	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(icao)) {
 		return c.json(
 			{
 				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
@@ -5054,7 +4951,7 @@ euroscopeApp.post('/upload', async (c) => {
 		}
 
 		// Validate ICAO format (exactly 4 uppercase letters/numbers)
-		if (!icao.match(/^[A-Z0-9]{4}$/)) {
+		if (!ICAO_REGEX.test(icao)) {
 			return c.json(
 				{
 					error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
@@ -5106,11 +5003,8 @@ euroscopeApp.post('/upload', async (c) => {
 			);
 		}
 
-		// Extract file data
-		const fileData = await file.arrayBuffer();
-
-		// Upload file to storage with metadata
-		const result = await storage.uploadFile(fileKey, fileData, file.type, {
+		// Stream directly to R2 instead of duplicating the entire upload in memory.
+		const result = await storage.uploadFile(fileKey, file.stream(), file.type, {
 			uploadedBy: vatsimUser.id.toString(),
 			icao: icao,
 			fileName: file.name,
@@ -5172,7 +5066,7 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	const vatsimUser = c.get('vatsimUser')!;
 
 	// Validate ICAO format
-	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(icao)) {
 		return c.json(
 			{
 				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
@@ -5251,7 +5145,7 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 	const vatsimUser = c.get('vatsimUser')!;
 
 	// Validate ICAO format
-	if (!icao.match(/^[A-Z0-9]{4}$/)) {
+	if (!ICAO_REGEX.test(icao)) {
 		return c.json(
 			{
 				error: 'Invalid ICAO format. Must be exactly 4 uppercase letters/numbers.',
@@ -5263,12 +5157,11 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 	try {
 		// Check if user has access to edit files for this ICAO
 		const divisions = ServicePool.getDivisions(c.env);
-		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
 		const userRole = await divisions.getUserRoleForAirport(vatsimUser.id.toString(), icao);
 
 		return c.json({
 			icao: icao,
-			editable: hasAccess,
+			editable: userRole !== null,
 			role: userRole,
 		});
 	} catch (error) {
@@ -5748,10 +5641,8 @@ app.put('/releases/:id/changelog', async (c) => {
 		const vatsimUser = await vatsim.getUser(vatsimToken);
 		const user = await auth.getUserByVatsimId(vatsimUser.id);
 		if (!user) return c.text('User not found', 404);
-		// Allow Lead Developer or Product Manager
-		const canEdit =
-			(await roles.hasPermission(user.id, StaffRole.LEAD_DEVELOPER)) ||
-			(await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER));
+		// Product Manager permission also includes Lead Developers via the role hierarchy.
+		const canEdit = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 		if (!canEdit) return c.text('Forbidden', 403);
 
 		let body: unknown;
@@ -5764,17 +5655,6 @@ app.put('/releases/:id/changelog', async (c) => {
 		const changelog = typeof b.changelog === 'string' ? b.changelog.trim() : '';
 		if (!changelog) return c.json({ error: 'changelog required' }, 400);
 		if (changelog.length > 20000) return c.json({ error: 'changelog too long (max 20000 chars)' }, 400);
-
-		// Ensure release exists first (so we differentiate 404 vs silent update)
-		// Reusing listReleases would be inefficient; perform direct lookup.
-		const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
-		try {
-			const existing = await dbContext.db.executeRead<{ id: number }>('SELECT id FROM installer_releases WHERE id = ?', [id]);
-			if (!existing.results[0]) return dbContext.textResponse('Release not found', { status: 404 });
-		} finally {
-			// close early; release update uses its own session service
-			// (ReleaseService internally manages its session.)
-		}
 
 		const updated = await releasesService.updateChangelog(id, changelog);
 		if (!updated) return c.text('Release not found', 404);
@@ -5813,17 +5693,15 @@ app.put('/releases/:id/changelog', async (c) => {
 app.post('/download', async (c) => {
 	const product = c.req.query('product') as InstallerProduct | undefined;
 	if (!product) return c.json({ error: 'product required' }, 400);
-	const VALID: InstallerProduct[] = ['Pilot-Client', 'vatSys-Plugin', 'EuroScope-Plugin', 'Installer', 'SimConnect.NET'];
-	if (!VALID.includes(product)) return c.json({ error: 'invalid product' }, 400);
+	if (!INSTALLER_PRODUCTS.includes(product)) return c.json({ error: 'invalid product' }, 400);
 	const releases = ServicePool.getReleases(c.env);
 	const latest = await releases.getLatest(product);
 	if (!latest) return c.json({ error: 'No release found for product' }, 404);
 	const version = latest.version;
-	const ip = c.get('clientIp') || '0.0.0.0';
+	const ip = getClientIp(c.req.raw);
 	const downloads = ServicePool.getDownloads(c.env);
-	const { versionCount, productTotal } = await downloads.recordDownload(product, version, ip);
-	const stats = await downloads.getStats(product);
-	return c.json({ product, version, versionCount, productTotal, versions: stats.versions });
+	const { versionCount, productTotal, versions } = await downloads.recordDownload(product, version, ip);
+	return c.json({ product, version, versionCount, productTotal, versions });
 });
 
 /**
@@ -6031,8 +5909,7 @@ app.get('/downloads/stats', withCache(CacheKeys.fromUrl, 300, 'installer'), asyn
 		const combinedTotal = all.reduce((sum, item) => sum + item.total, 0);
 		return c.json({ products: all, combinedTotal });
 	}
-	const VALID: InstallerProduct[] = ['Pilot-Client', 'vatSys-Plugin', 'EuroScope-Plugin', 'Installer', 'SimConnect.NET'];
-	if (!VALID.includes(product)) return c.json({ error: 'invalid product' }, 400);
+	if (!INSTALLER_PRODUCTS.includes(product)) return c.json({ error: 'invalid product' }, 400);
 	const stats = await downloads.getStats(product);
 	return c.json(stats);
 });
@@ -6166,12 +6043,9 @@ app.post('/purge-cache-all', async (c) => {
 			const maybe = body as Record<string, unknown>;
 			if (typeof maybe.namespace === 'string') namespace = maybe.namespace;
 		}
-		const allNamespaces = ['airports', 'points', 'divisions', 'auth', 'state', 'health', 'installer', 'github', 'faq'];
-		const toPurge = namespace ? [namespace] : allNamespaces;
-		const results: Record<string, number> = {};
-		for (const ns of toPurge) {
-			results[ns] = await cache.bumpNamespaceVersion(ns);
-		}
+		const toPurge: readonly string[] = namespace ? [namespace] : CACHE_NAMESPACES;
+		const versions = await Promise.all(toPurge.map((cacheNamespace) => cache.bumpNamespaceVersion(cacheNamespace)));
+		const results = Object.fromEntries(toPurge.map((cacheNamespace, index) => [cacheNamespace, versions[index]]));
 		return c.json({ success: true, bumped: results });
 	} catch (e) {
 		return c.json({ error: e instanceof Error ? e.message : 'Failed to purge namespaces' }, 500);
@@ -6572,7 +6446,9 @@ export default {
 	},
 	async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		ctx.waitUntil(
-			Promise.all([cleanupStaleActiveObjects(env), ServicePool.getContributions(env).cleanupExpiredGenerations()]).then(() => undefined),
+			Promise.all([cleanupStaleActiveObjects(env), ServicePool.getContributions(env).cleanupExpiredGenerations()]).then(
+				() => undefined,
+			),
 		);
 	},
 };

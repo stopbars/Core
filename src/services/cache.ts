@@ -1,4 +1,13 @@
-const namespaceVersionHints = new Map<string, number>();
+interface NamespaceVersionHint {
+	version: number;
+	checkedAt: number;
+}
+
+// Revalidate periodically so a namespace bump from another isolate cannot leave
+// a hot cached entry on an old version indefinitely.
+const NAMESPACE_VERSION_FRESH_MS = 5_000;
+const namespaceVersionHints = new Map<string, NamespaceVersionHint>();
+const pendingNamespaceVersionReads = new Map<string, Promise<number>>();
 
 interface CacheOptions {
 	ttl?: number; // Time to live in seconds
@@ -10,29 +19,24 @@ interface CacheOptions {
  * More efficient than KV for short-lived cached data
  */
 export class CacheService {
-	private namespaceVersionCache = new Map<string, number>();
-
-	constructor(private env: Env) {}
+	constructor(env: Env) {
+		void env;
+	}
 
 	private versionMetaKey(namespace: string): Request {
 		return new Request(`https://cache.stopbars/__version/${namespace}`);
 	}
 
 	private getCachedNamespaceVersion(namespace: string): number | undefined {
-		const local = this.namespaceVersionCache.get(namespace);
-		if (local !== undefined) {
-			return local;
-		}
 		const hinted = namespaceVersionHints.get(namespace);
-		if (hinted !== undefined) {
-			this.namespaceVersionCache.set(namespace, hinted);
+		if (hinted && Date.now() - hinted.checkedAt < NAMESPACE_VERSION_FRESH_MS) {
+			return hinted.version;
 		}
-		return hinted;
+		return undefined;
 	}
 
 	private rememberNamespaceVersion(namespace: string, version: number): number {
-		this.namespaceVersionCache.set(namespace, version);
-		namespaceVersionHints.set(namespace, version);
+		namespaceVersionHints.set(namespace, { version, checkedAt: Date.now() });
 		return version;
 	}
 
@@ -56,8 +60,21 @@ export class CacheService {
 				return cached;
 			}
 		}
-		const fresh = await this.fetchNamespaceVersion(namespace);
-		return this.rememberNamespaceVersion(namespace, fresh);
+
+		const pending = pendingNamespaceVersionReads.get(namespace);
+		if (pending) {
+			return pending;
+		}
+
+		const request = this.fetchNamespaceVersion(namespace).then((fresh) => this.rememberNamespaceVersion(namespace, fresh));
+		pendingNamespaceVersionReads.set(namespace, request);
+		try {
+			return await request;
+		} finally {
+			if (pendingNamespaceVersionReads.get(namespace) === request) {
+				pendingNamespaceVersionReads.delete(namespace);
+			}
+		}
 	}
 
 	private async setNamespaceVersion(namespace: string, version: number): Promise<void> {
@@ -74,6 +91,14 @@ export class CacheService {
 		this.rememberNamespaceVersion(namespace, version);
 	}
 
+	private dataKey(key: string, namespace: string, version: number): Request {
+		return new Request(`https://cache.stopbars/${namespace}/v${version}/${key}`);
+	}
+
+	private async matchResponse(key: string, namespace: string, version: number): Promise<Response | null> {
+		return (await caches.default.match(this.dataKey(key, namespace, version))) ?? null;
+	}
+
 	/** Bump and return the new version for a namespace. */
 	async bumpNamespaceVersion(namespace: string): Promise<number> {
 		const current = await this.resolveNamespaceVersion(namespace, true);
@@ -87,40 +112,19 @@ export class CacheService {
 	 * @param key - Cache key
 	 * @returns Cached data or null if not found
 	 */
+	async getResponse(key: string, namespace = 'default'): Promise<Response | null> {
+		const version = await this.resolveNamespaceVersion(namespace);
+		return this.matchResponse(key, namespace, version);
+	}
+
 	async get<T>(key: string, namespace = 'default'): Promise<T | null> {
-		const cache = caches.default;
-		const matchWithVersion = async (version: number): Promise<T | null> => {
-			const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${version}/${key}`);
-			const cachedResponse = await cache.match(cacheKey);
-
-			if (!cachedResponse) {
-				return null;
-			}
-
-			try {
-				return await cachedResponse.json();
-			} catch {
-				return null;
-			}
-		};
-
-		const hintedVersion = this.getCachedNamespaceVersion(namespace);
-		if (hintedVersion !== undefined) {
-			const hintedHit = await matchWithVersion(hintedVersion);
-			if (hintedHit !== null) {
-				return hintedHit;
-			}
-
-			const refreshedVersion = await this.resolveNamespaceVersion(namespace, true);
-			if (refreshedVersion !== hintedVersion) {
-				return await matchWithVersion(refreshedVersion);
-			}
-
+		const cachedResponse = await this.getResponse(key, namespace);
+		if (!cachedResponse) return null;
+		try {
+			return await cachedResponse.json<T>();
+		} catch {
 			return null;
 		}
-
-		const ver = await this.resolveNamespaceVersion(namespace);
-		return await matchWithVersion(ver);
 	}
 
 	/**
@@ -134,7 +138,7 @@ export class CacheService {
 
 		// Versioned cache key with namespace
 		const ver = await this.resolveNamespaceVersion(namespace);
-		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
+		const cacheKey = this.dataKey(key, namespace, ver);
 
 		// Create response with the data
 		const response = new Response(JSON.stringify(data), {
@@ -149,6 +153,24 @@ export class CacheService {
 		await cache.put(cacheKey, response);
 	}
 
+	/** Store an existing response without parsing and serializing its body. */
+	async setResponse(key: string, response: Response, options: CacheOptions = {}): Promise<void> {
+		const { ttl = 60, namespace = 'default' } = options;
+		const ver = await this.resolveNamespaceVersion(namespace);
+		const headers = new Headers(response.headers);
+		headers.set('Cache-Control', `max-age=${ttl}`);
+		headers.delete('Set-Cookie');
+		headers.delete('X-Cache');
+		await caches.default.put(
+			this.dataKey(key, namespace, ver),
+			new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			}),
+		);
+	}
+
 	/**
 	 * Delete data from cache
 	 * @param key - Cache key
@@ -156,7 +178,7 @@ export class CacheService {
 	 */
 	async delete(key: string, namespace = 'default'): Promise<void> {
 		const ver = await this.resolveNamespaceVersion(namespace);
-		const cacheKey = new Request(`https://cache.stopbars/${namespace}/v${ver}/${key}`);
+		const cacheKey = this.dataKey(key, namespace, ver);
 		const cache = caches.default;
 		await cache.delete(cacheKey);
 	}
@@ -175,6 +197,7 @@ export function withCache(
 	namespace: string = 'default',
 	shouldBypass?: (req: Request) => boolean,
 ) {
+	let cacheService: CacheService | undefined;
 	return async (c: import('hono').Context<{ Bindings: Env }>, next: () => Promise<void>) => {
 		// Skip caching for non-GET requests
 		if (c.req.method !== 'GET') {
@@ -185,15 +208,18 @@ export function withCache(
 			return next();
 		}
 
-		const cacheService = new CacheService(c.env);
+		cacheService ??= new CacheService(c.env);
 		const cacheKey = cacheKeyFn(c.req.raw);
 
 		// Try to get from cache
-		const cachedData = await cacheService.get(cacheKey, namespace);
-		if (cachedData) {
-			// Set header to indicate cache hit
-			c.header('X-Cache', 'HIT');
-			return c.json(cachedData);
+		const cachedResponse = await cacheService.getResponse(cacheKey, namespace);
+		if (cachedResponse) {
+			const response = new Response(cachedResponse.body, cachedResponse);
+			// Cache-Control governs the internal Cache API entry. Do not expose it to
+			// browser caches, which cannot vary user-scoped entries by our private key.
+			response.headers.delete('Cache-Control');
+			response.headers.set('X-Cache', 'HIT');
+			return response;
 		}
 
 		// Cache miss, proceed to handler
@@ -204,15 +230,18 @@ export function withCache(
 		// Don't cache error responses (4xx, 5xx) including 404 Not Found
 		if (c.res && c.res.status >= 200 && c.res.status < 300) {
 			try {
-				// Clone the response to read it without consuming the original
-				const clonedRes = c.res.clone();
-				const contentType = clonedRes.headers.get('content-type');
-
-				// Only cache JSON responses
-				if (contentType && contentType.includes('application/json')) {
-					const data = await clonedRes.json();
-					// Cache the data
-					await cacheService.set(cacheKey, data, { ttl, namespace });
+				const contentType = c.res.headers.get('content-type');
+				if (
+					contentType?.includes('application/json') ||
+					contentType?.includes('application/xml') ||
+					contentType?.includes('text/xml')
+				) {
+					const cacheWrite = cacheService.setResponse(cacheKey, c.res.clone(), { ttl, namespace });
+					try {
+						c.executionCtx.waitUntil(cacheWrite);
+					} catch {
+						await cacheWrite;
+					}
 				}
 			} catch {
 				// Silently fail if we can't cache
@@ -233,11 +262,16 @@ export const CacheKeys = {
 		const url = new URL(req.url);
 		// Normalize path and sort params to avoid cache key ambiguity/poisoning
 		const path = url.pathname.replace(/[^A-Za-z0-9/_-]/g, '');
-		const params = Array.from(url.searchParams.entries())
-			.filter(([k]) => !/^auth(orization)?$/i.test(k))
-			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-			.join('&');
+		const entries: Array<[string, string]> = [];
+		for (const [key, value] of url.searchParams) {
+			if (!/^auth(orization)?$/i.test(key)) entries.push([key, value]);
+		}
+		entries.sort(([left], [right]) => left.localeCompare(right));
+		let params = '';
+		for (const [key, value] of entries) {
+			if (params) params += '&';
+			params += `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+		}
 		return params ? `${path}?${params}` : path;
 	},
 

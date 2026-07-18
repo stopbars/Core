@@ -1,7 +1,11 @@
-import { CacheService } from './cache';
 import { ServicePool } from './service-pool';
 
 export type RadarLight = { stateId: number | null; offStateId: number | null; position: [number, number]; heading: number };
+
+const LIGHT_STATE_ID_PATTERN = /stateId\s*=\s*"(\d+)"/i;
+const LIGHT_OFF_STATE_ID_PATTERN = /offStateId\s*=\s*"(\d+)"/i;
+const LIGHT_POSITION_PATTERN = /<Position>\s*([^<]+)\s*<\/Position>/i;
+const LIGHT_HEADING_PATTERN = /<Heading>\s*([^<]+)\s*<\/Heading>/i;
 
 // Parse BARS Lights XML into objectId -> lights[] mapping
 export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
@@ -19,14 +23,15 @@ export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
 		while ((lightMatch = lightRegex.exec(body)) !== null) {
 			const attrs = lightMatch[1] || '';
 			const inner = lightMatch[2] || '';
-			const stateIdMatch = attrs.match(/stateId\s*=\s*"(\d+)"/i);
-			const offStateIdMatch = attrs.match(/offStateId\s*=\s*"(\d+)"/i);
-			const posMatch = inner.match(/<Position>\s*([^<]+)\s*<\/Position>/i);
-			const headingMatch = inner.match(/<Heading>\s*([^<]+)\s*<\/Heading>/i);
+			const stateIdMatch = LIGHT_STATE_ID_PATTERN.exec(attrs);
+			const offStateIdMatch = LIGHT_OFF_STATE_ID_PATTERN.exec(attrs);
+			const posMatch = LIGHT_POSITION_PATTERN.exec(inner);
+			const headingMatch = LIGHT_HEADING_PATTERN.exec(inner);
 			if (!posMatch || !headingMatch) continue;
-			const [latStr, lonStr] = posMatch[1].split(',').map((s) => s.trim());
-			const lat = parseFloat(latStr);
-			const lon = parseFloat(lonStr);
+			const commaIndex = posMatch[1].indexOf(',');
+			if (commaIndex < 0) continue;
+			const lat = parseFloat(posMatch[1].slice(0, commaIndex));
+			const lon = parseFloat(posMatch[1].slice(commaIndex + 1));
 			const heading = parseFloat(headingMatch[1]);
 			if (Number.isNaN(lat) || Number.isNaN(lon) || Number.isNaN(heading)) continue;
 			const stateId = stateIdMatch ? parseInt(stateIdMatch[1], 10) : null;
@@ -42,27 +47,25 @@ export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
 
 // Fetch and cache latest lights mapping for an airport (15 minutes TTL)
 export async function getLightsByObject(env: Env, icao: string): Promise<Record<string, RadarLight[]>> {
-	const cache = new CacheService(env);
-	const cacheKey = `lights-map-${icao.toUpperCase()}`;
+	const normalizedIcao = icao.toUpperCase();
+	const cache = ServicePool.getCache(env);
+	const cacheKey = `lights-map-${normalizedIcao}`;
 	const cached = await cache.get<Record<string, RadarLight[]>>(cacheKey, 'airports');
 	if (cached) return cached;
 
 	const storage = ServicePool.getStorage(env);
 	try {
-		const list = await storage.listFiles(`Maps/${icao}_`, 50);
+		const list = await storage.listFiles(`Maps/${normalizedIcao}_`, 50);
 		if (!list.objects || list.objects.length === 0) {
 			await cache.set(cacheKey, {}, { ttl: 300, namespace: 'airports' });
 			return {};
 		}
 		let latest = list.objects[0];
-		for (const obj of list.objects) {
-			const objUploaded = (obj as unknown as { uploaded?: number }).uploaded;
-			const latestUploaded = (latest as unknown as { uploaded?: number }).uploaded;
-			if (objUploaded && latestUploaded && objUploaded > latestUploaded) {
-				latest = obj as typeof latest;
-			}
+		for (let index = 1; index < list.objects.length; index++) {
+			const object = list.objects[index];
+			if (object.uploaded > latest.uploaded) latest = object;
 		}
-		const fileResp = await storage.getFile((latest as unknown as { key: string }).key);
+		const fileResp = await storage.getFile(latest.key);
 		if (!fileResp) {
 			await cache.set(cacheKey, {}, { ttl: 300, namespace: 'airports' });
 			return {};
