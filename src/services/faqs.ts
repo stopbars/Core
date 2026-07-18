@@ -17,7 +17,7 @@ export class FAQService {
 
 	async list(): Promise<{ faqs: FAQRecord[]; total: number }> {
 		const result = await this.dbSession.executeRead<FAQRecord>(
-			`SELECT id, question, answer, order_position, created_at, updated_at FROM faqs ORDER BY order_position ASC, datetime(created_at) ASC`,
+			`SELECT id, question, answer, order_position, created_at, updated_at FROM faqs ORDER BY order_position ASC, created_at ASC`,
 			[],
 		);
 		return { faqs: result.results, total: result.results.length };
@@ -33,26 +33,37 @@ export class FAQService {
 
 	async create(data: { question: string; answer: string; order_position: number }): Promise<FAQRecord> {
 		const id = crypto.randomUUID();
-		await this.dbSession.executeWrite(
-			`INSERT INTO faqs (id, question, answer, order_position, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		const result = await this.dbSession.executeWrite(
+			`INSERT INTO faqs (id, question, answer, order_position, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+			 RETURNING id, question, answer, order_position, created_at, updated_at`,
 			[id, data.question, data.answer, data.order_position],
 		);
-		const created = await this.get(id);
+		const created = (result.results as unknown as FAQRecord[] | null)?.[0];
 		if (!created) throw new Error('Failed to create FAQ');
 		return created;
 	}
 
 	async update(id: string, data: Partial<{ question: string; answer: string; order_position: number }>): Promise<FAQRecord | null> {
-		const existing = await this.get(id);
-		if (!existing) return null;
-		const question = data.question ?? existing.question;
-		const answer = data.answer ?? existing.answer;
-		const order_position = data.order_position ?? existing.order_position;
-		await this.dbSession.executeWrite(
-			`UPDATE faqs SET question = ?, answer = ?, order_position = ?, updated_at = datetime('now') WHERE id = ?`,
-			[question, answer, order_position, id],
+		const result = await this.dbSession.executeWrite(
+			`UPDATE faqs
+			 SET question = CASE WHEN ? THEN ? ELSE question END,
+				 answer = CASE WHEN ? THEN ? ELSE answer END,
+				 order_position = CASE WHEN ? THEN ? ELSE order_position END,
+				 updated_at = datetime('now')
+			 WHERE id = ?
+			 RETURNING id, question, answer, order_position, created_at, updated_at`,
+			[
+				data.question != null ? 1 : 0,
+				data.question ?? null,
+				data.answer != null ? 1 : 0,
+				data.answer ?? null,
+				data.order_position != null ? 1 : 0,
+				data.order_position ?? null,
+				id,
+			],
 		);
-		return this.get(id);
+		return (result.results as unknown as FAQRecord[] | null)?.[0] ?? null;
 	}
 
 	async delete(id: string): Promise<boolean> {
@@ -61,12 +72,11 @@ export class FAQService {
 	}
 
 	async reorder(updates: { id: string; order_position: number }[]): Promise<void> {
-		// Simple transactional reorder
-		for (const u of updates) {
-			await this.dbSession.executeWrite(`UPDATE faqs SET order_position = ?, updated_at = datetime('now') WHERE id = ?`, [
-				u.order_position,
-				u.id,
-			]);
-		}
+		await this.dbSession.executeBatch(
+			updates.map((update) => ({
+				query: `UPDATE faqs SET order_position = ?, updated_at = datetime('now') WHERE id = ?`,
+				params: [update.order_position, update.id],
+			})),
+		);
 	}
 }

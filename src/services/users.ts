@@ -44,41 +44,41 @@ export class UserService {
 		const offset = (page - 1) * limit;
 
 		try {
-			const [usersResult, countResult] = await Promise.all([
-				this.dbSession.executeRead<{
-					id: number;
-					vatsim_id: string;
-					email: string;
-					full_name: string | null;
-					display_mode: number | null;
-					display_name: string | null;
-					region_id: string | null;
-					region_name: string | null;
-					division_id: string | null;
-					division_name: string | null;
-					subdivision_id: string | null;
-					subdivision_name: string | null;
-					created_at: string;
-					last_login: string;
-					is_staff: number;
-				}>(
-					`
-				SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.display_name, u.region_id, u.region_name, u.division_id, u.division_name, u.subdivision_id, u.subdivision_name, u.created_at, u.last_login,
-				CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff
-				FROM users u
-				LEFT JOIN staff s ON u.id = s.user_id
-				ORDER BY u.created_at DESC
-				LIMIT ? OFFSET ?
-			  `,
-					[limit, offset],
-				),
-				this.dbSession.executeRead<{ count: number }>('SELECT COUNT(*) as count FROM users'),
+			const [usersResult, countResult] = await this.dbSession.executeReadBatch([
+				{
+					query: `
+						SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.display_name,
+							u.region_id, u.region_name, u.division_id, u.division_name,
+							u.subdivision_id, u.subdivision_name, u.created_at, u.last_login,
+							CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END AS is_staff
+						FROM users u
+						LEFT JOIN staff s ON s.user_id = u.id
+						ORDER BY u.created_at DESC
+						LIMIT ? OFFSET ?`,
+					params: [limit, offset],
+				},
+				{ query: 'SELECT COUNT(*) AS count FROM users' },
 			]);
-			if (!usersResult || !countResult) {
-				throw new Error('Failed to fetch users');
-			}
+			const users = usersResult.results as Array<{
+				id: number;
+				vatsim_id: string;
+				email: string;
+				full_name: string | null;
+				display_mode: number | null;
+				display_name: string | null;
+				region_id: string | null;
+				region_name: string | null;
+				division_id: string | null;
+				division_name: string | null;
+				subdivision_id: string | null;
+				subdivision_name: string | null;
+				created_at: string;
+				last_login: string;
+				is_staff: number;
+			}>;
+			const count = countResult.results as Array<{ count: number }>;
 			return {
-				users: usersResult.results.map((u) => ({
+				users: users.map((u) => ({
 					id: u.id,
 					vatsim_id: u.vatsim_id,
 					email: u.email,
@@ -92,7 +92,7 @@ export class UserService {
 					last_login: u.last_login,
 					is_staff: u.is_staff === 1,
 				})),
-				total: countResult.results[0]?.count || 0,
+				total: count[0]?.count || 0,
 			};
 		} catch {
 			throw new HttpError(500, 'Failed to fetch users');

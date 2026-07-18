@@ -105,17 +105,11 @@ export class DivisionService {
 				da.status,
 				da.requested_by,
 				da.approved_by,
-				CASE
-					WHEN po.airport_id IS NOT NULL THEN 1
-					ELSE 0
-				END AS has_objects,
+				EXISTS(SELECT 1 FROM points p WHERE p.airport_id = da.icao LIMIT 1) AS has_objects,
 				da.contributions_enabled,
 				da.created_at,
 				da.updated_at
 			FROM division_airports da
-			LEFT JOIN (
-				SELECT DISTINCT airport_id FROM points
-			) po ON po.airport_id = da.icao
 			WHERE da.division_id = ? AND da.id = ?
 			LIMIT 1`,
 			[divisionId, airportId],
@@ -209,11 +203,6 @@ export class DivisionService {
 	}
 
 	async addMember(divisionId: number, vatsimId: string, role: 'nav_head' | 'nav_member'): Promise<DivisionMember> {
-		const existingRole = await this.getMemberRole(divisionId, vatsimId);
-		if (existingRole) {
-			throw new HttpError(409, 'User is already a member of this division');
-		}
-
 		try {
 			const result = await this.dbSession.executeWrite(
 				'INSERT INTO division_members (division_id, vatsim_id, role) VALUES (?, ?, ?) RETURNING *',
@@ -456,18 +445,12 @@ export class DivisionService {
 				da.status,
 				da.requested_by,
 				da.approved_by,
-				CASE
-					WHEN po.airport_id IS NOT NULL THEN 1
-					ELSE 0
-				END AS has_objects,
+				EXISTS(SELECT 1 FROM points p WHERE p.airport_id = da.icao LIMIT 1) AS has_objects,
 				da.contributions_enabled,
 				da.created_at,
 				da.updated_at
 			FROM divisions d
 			LEFT JOIN division_airports da ON da.division_id = d.id
-			LEFT JOIN (
-				SELECT DISTINCT airport_id FROM points
-			) po ON po.airport_id = da.icao
 			WHERE d.id = ?
 			ORDER BY da.created_at DESC`,
 			[divisionId],
@@ -477,9 +460,7 @@ export class DivisionService {
 			return null;
 		}
 
-		return result.results
-			.map((row) => this.mapDivisionAirportRow(row))
-			.filter((row): row is DivisionAirport => row !== null);
+		return result.results.map((row) => this.mapDivisionAirportRow(row)).filter((row): row is DivisionAirport => row !== null);
 	}
 
 	async getAllDivisionAirports(): Promise<DivisionAirportWithDivision[]> {
@@ -496,18 +477,12 @@ export class DivisionService {
 				da.status,
 				da.requested_by,
 				da.approved_by,
-				CASE
-					WHEN po.airport_id IS NOT NULL THEN 1
-					ELSE 0
-				END AS has_objects,
+				EXISTS(SELECT 1 FROM points p WHERE p.airport_id = da.icao LIMIT 1) AS has_objects,
 				da.contributions_enabled,
 				da.created_at,
 				da.updated_at
 			FROM division_airports da
 			JOIN divisions d ON d.id = da.division_id
-			LEFT JOIN (
-				SELECT DISTINCT airport_id FROM points
-			) po ON po.airport_id = da.icao
 			ORDER BY d.name ASC, da.created_at DESC`,
 		);
 
@@ -638,7 +613,8 @@ export class DivisionService {
           SELECT da.id 
           FROM division_airports da
           JOIN division_members dm ON da.division_id = dm.division_id
-          WHERE dm.vatsim_id = ? AND da.icao = ? AND da.status = 'approved'
+		  WHERE dm.vatsim_id = ? AND da.icao = ? AND da.status = 'approved'
+		  LIMIT 1
         `,
 			[userId, airportIcao],
 		);

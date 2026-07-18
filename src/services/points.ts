@@ -74,9 +74,6 @@ export class PointsService {
 	private stmtCheckPointId: PreparedStatement<{
 		id: string;
 	}>;
-	private stmtGetLinkedLeadOns: PreparedStatement<{
-		stopbarId: string;
-	}>;
 
 	constructor(
 		private db: D1Database,
@@ -94,7 +91,6 @@ export class PointsService {
 			['id', 'airportId'],
 		);
 		this.stmtCheckPointId = this.dbSession.prepare('SELECT id FROM points WHERE id = ? LIMIT 1;', ['id']);
-		this.stmtGetLinkedLeadOns = this.dbSession.prepare('SELECT id FROM points WHERE linked_to = ? AND type = ?', ['stopbarId']);
 	}
 
 	async createPoint(airportId: string, userId: string, point: PointData): Promise<Point> {
@@ -196,16 +192,20 @@ export class PointsService {
 			.map((field) => `${fieldMappings[field]} = ?`)
 			.join(', ');
 
-		await this.dbSession.executeWrite(
+		const result = await this.dbSession.executeWrite(
 			`
 			UPDATE points
 			SET ${updateFields}, updated_at = ?
 			WHERE id = ?
+			RETURNING id, airport_id, type, name, coordinates, directionality, orientation,
+				color, elevated, ihp, linked_to, created_at, updated_at, created_by
 			`,
 			[...Object.values(processedUpdates), new Date().toISOString(), pointId],
 		);
 
-		const finalPoint = (await this.getPoint(pointId)) as Point;
+		const updatedRow = (result.results as unknown as PointRow[] | null)?.[0];
+		if (!updatedRow) throw new HttpError(404, 'Point not found');
+		const finalPoint = this.mapPointFromDb(updatedRow);
 		try {
 			this.posthog?.track('Point Updated', {
 				pointId,
@@ -417,6 +417,26 @@ export class PointsService {
 		return this.mapPointFromDb(row);
 	}
 
+	/**
+	 * Fetch points in one D1 query while preserving the caller's order, duplicate
+	 * IDs, and null entries for missing rows.
+	 */
+	async getPoints(pointIds: string[]): Promise<Array<Point | null>> {
+		if (pointIds.length === 0) return [];
+
+		const uniqueIds = [...new Set(pointIds)];
+		const placeholders = uniqueIds.map(() => '?').join(', ');
+		const result = await this.dbSession.executeRead<PointRow>(
+			`SELECT id, airport_id, type, name, coordinates, directionality, orientation,
+				color, elevated, ihp, linked_to, created_at, updated_at, created_by
+			 FROM points
+			 WHERE id IN (${placeholders})`,
+			uniqueIds,
+		);
+		const pointsById = new Map(result.results.map((row) => [row.id, this.mapPointFromDb(row)]));
+		return pointIds.map((id) => pointsById.get(id) ?? null);
+	}
+
 	async getAirportPoints(airportId: string): Promise<Point[]> {
 		const results = await this.dbSession.executeRead<PointRow>('SELECT * FROM points WHERE airport_id = ?', [airportId]);
 		return results.results.map((r) => this.mapPointFromDb(r));
@@ -589,9 +609,7 @@ export class PointsService {
 	 * A lead-on can be linked to multiple stopbars.
 	 */
 	async linkLeadOnToStopbar(leadOnId: string, stopbarId: string, userId: string): Promise<void> {
-		// Get both points
-		const leadOn = await this.getPoint(leadOnId);
-		const stopbar = await this.getPoint(stopbarId);
+		const [leadOn, stopbar] = await this.getPoints([leadOnId, stopbarId]);
 
 		if (!leadOn) {
 			throw new HttpError(404, 'Lead-on point not found');
@@ -704,27 +722,22 @@ export class PointsService {
 	 * Get all lead-ons linked to a specific stopbar
 	 */
 	async getLinkedLeadOns(stopbarId: string): Promise<string[]> {
-		// Need to check if stopbarId is in the JSON array or equals the legacy single value
-		const results = await this.dbSession.executeRead<{ id: string; linked_to: string }>(
-			"SELECT id, linked_to FROM points WHERE type = 'lead_on' AND linked_to IS NOT NULL",
-			[],
+		const results = await this.dbSession.executeRead<{ id: string }>(
+			`SELECT id
+			 FROM points
+			 WHERE type = 'lead_on'
+				AND linked_to IS NOT NULL
+				AND (
+					linked_to = ?
+					OR EXISTS (
+						SELECT 1
+						FROM json_each(CASE WHEN json_valid(linked_to) THEN linked_to ELSE json_array(linked_to) END)
+						WHERE value = ?
+					)
+				)`,
+			[stopbarId, stopbarId],
 		);
-
-		const linkedIds: string[] = [];
-		for (const row of results.results) {
-			try {
-				const parsed = JSON.parse(row.linked_to);
-				if (Array.isArray(parsed) && parsed.includes(stopbarId)) {
-					linkedIds.push(row.id);
-				}
-			} catch {
-				// Legacy single ID format
-				if (row.linked_to === stopbarId) {
-					linkedIds.push(row.id);
-				}
-			}
-		}
-		return linkedIds;
+		return results.results.map(({ id }) => id);
 	}
 
 	/**

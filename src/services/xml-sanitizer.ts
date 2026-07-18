@@ -1,4 +1,7 @@
 export const MAX_CONTRIBUTION_XML_BYTES = 5 * 1024 * 1024; // 5 MB
+// XML 1.0 explicitly forbids these C0 controls; a single regex avoids a full-size character array.
+// eslint-disable-next-line no-control-regex
+const DISALLOWED_XML_CONTROL_CHARS = new RegExp('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]', 'g');
 
 export function sanitizeContributionXml(raw: string, opts?: { maxBytes?: number }): string {
 	if (!raw) throw new Error('Empty XML');
@@ -36,12 +39,7 @@ export function sanitizeContributionXml(raw: string, opts?: { maxBytes?: number 
 	let sanitized = trimmed.replace(/(<\?)(?!xml)([\s\S]*?\?>)/gi, '');
 
 	// Strip disallowed control chars (anything below 0x20 except TAB (0x09), LF (0x0A), CR (0x0D))
-	sanitized = Array.from(sanitized)
-		.filter((ch) => {
-			const c = ch.charCodeAt(0);
-			return !((c >= 0x00 && c <= 0x08) || c === 0x0b || c === 0x0c || (c >= 0x0e && c <= 0x1f));
-		})
-		.join('');
+	sanitized = sanitized.replace(DISALLOWED_XML_CONTROL_CHARS, '');
 
 	// Optional: collapse repeated spaces between tags to keep storage predictable (small normalization)
 	sanitized = sanitized.replace(/>\s+</g, '><');

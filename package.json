@@ -10,6 +10,15 @@
 		"update-db": "wrangler d1 execute bars-db --remote --file schema.sql",
 		"prettify": "prettier --write .",
 		"build": "wrangler build",
+		"benchmark": "bun run benchmark:routes && bun run benchmark:database && bun run benchmark:compute && bun run benchmark:realtime && bun run benchmark:backend",
+		"benchmark:routes": "bun benchmarks/routes.ts",
+		"benchmark:database": "bun benchmarks/database.ts",
+		"benchmark:compute": "bun benchmarks/compute.ts",
+		"benchmark:realtime": "bun benchmarks/realtime.ts",
+		"benchmark:backend": "bun benchmarks/backend.ts",
+		"test:realtime": "bun benchmarks/realtime-behavior.ts",
+		"test:backend": "bun benchmarks/backend-behavior.ts",
+		"benchmark:smoke": "bun benchmarks/smoke.ts",
 		"openapi": "node scripts/generate-openapi.mjs && prettier --write data/openapi.json",
 		"lint": "eslint . --fix"
 	},
@@ -24,7 +33,7 @@
 		"ts-node": "^10.9.2",
 		"typescript": "^5.9.3",
 		"typescript-eslint": "^8.53.0",
-		"wrangler": "^4.59.2"
+		"wrangler": "^4.112.0"
 	},
 	"dependencies": {
 		"geolib": "^3.3.4",

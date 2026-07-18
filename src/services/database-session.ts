@@ -18,11 +18,16 @@ export interface SessionOptions {
 export interface DatabaseMeta {
 	served_by_region?: string;
 	served_by_primary?: boolean;
+	served_by_colo?: string;
 	duration?: number;
+	rows_read?: number;
+	rows_written?: number;
 	changes?: number;
 	last_row_id?: number;
 	changed_db?: boolean;
 	size_after?: number;
+	timings?: { sql_duration_ms: number };
+	total_attempts?: number;
 }
 
 export interface DatabaseResult<T = unknown> {
@@ -256,6 +261,38 @@ export class DatabaseSessionService {
 	}
 
 	/**
+	 * Execute independent read statements in one D1 round trip. Unlike the
+	 * write-oriented executeBatch(), a new session may start on the nearest
+	 * unconstrained replica unless a bookmark is supplied.
+	 */
+	public async executeReadBatch(
+		statements: Array<{ query: string; params?: DatabaseSerializable[] }>,
+		bookmark?: string,
+	): Promise<DatabaseResult<unknown>[]> {
+		if (statements.length === 0) return [];
+		if (!this.session) {
+			this.startSession(bookmark ? { bookmark } : { mode: 'first-unconstrained' });
+		}
+
+		try {
+			const preparedStatements = statements.map(({ query, params = [] }) => {
+				const stmt = this.session!.prepare(query);
+				return params.length > 0 ? stmt.bind(...params) : stmt;
+			});
+			const results = await this.session!.batch(preparedStatements);
+			this.getBookmark();
+			return results.map((result) => ({
+				results: result.results ?? [],
+				success: result.success,
+				meta: result.meta ?? {},
+			}));
+		} catch (error) {
+			console.error('Database read batch error:', error);
+			throw error;
+		}
+	}
+
+	/**
 	 * Execute a read-only query optimized for performance
 	 * Uses unconstrained mode for best performance
 	 */
@@ -275,7 +312,11 @@ export class DatabaseSessionService {
 	 * Uses primary mode to ensure fresh data
 	 */
 	public async executeLatest<T = unknown>(query: string, params: DatabaseSerializable[] = []): Promise<DatabaseResult<T>> {
-		return this.executeAll<T>(query, params, { mode: 'first-primary' });
+		// A prior unconstrained read may already have opened this service's session.
+		// Start a fresh primary-anchored session so this method keeps its freshness
+		// guarantee regardless of which operation ran first.
+		this.startSession({ mode: 'first-primary' });
+		return this.executeAll<T>(query, params);
 	}
 
 	/**

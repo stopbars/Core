@@ -61,11 +61,13 @@ export class StorageService {
 	 * @param key The object key
 	 * @returns The file as a Response or null if not found
 	 */
-	async getFile(key: string): Promise<Response | null> {
+	async getFile(key: string, requestHeaders?: Headers): Promise<Response | null> {
 		const normalizedKey = this.normalizeKey(key);
 
-		// Get the object from R2
-		const object = await this.bucket.get(normalizedKey);
+		// Let R2 read only the requested byte range instead of fetching the full
+		// object and slicing it inside the Worker.
+		const rangeHeaders = requestHeaders?.has('range') ? requestHeaders : undefined;
+		const object = await this.bucket.get(normalizedKey, rangeHeaders ? { range: rangeHeaders } : undefined);
 
 		if (!object) {
 			return null;
@@ -74,8 +76,23 @@ export class StorageService {
 		// Create headers
 		const headers = new Headers();
 		object.writeHttpMetadata(headers);
-		headers.set('etag', object.etag);
+		headers.set('etag', object.httpEtag);
 		headers.set('Accept-Ranges', 'bytes');
+
+		let status = 200;
+		if (object.range) {
+			// Miniflare may expose all union members with undefined values, so narrow
+			// by value rather than using the `in` operator.
+			const suffix = 'suffix' in object.range && typeof object.range.suffix === 'number' ? object.range.suffix : undefined;
+			const rangeOffset = 'offset' in object.range && typeof object.range.offset === 'number' ? object.range.offset : 0;
+			const offset = suffix === undefined ? rangeOffset : Math.max(0, object.size - suffix);
+			const rangeLength = 'length' in object.range && typeof object.range.length === 'number' ? object.range.length : undefined;
+			const length =
+				suffix === undefined ? (rangeLength ?? Math.max(0, object.size - offset)) : Math.min(object.size, suffix);
+			headers.set('Content-Range', `bytes ${offset}-${offset + length - 1}/${object.size}`);
+			headers.set('Content-Length', String(length));
+			status = 206;
+		}
 
 		// Add CORS headers
 		Object.entries(this.CORS_HEADERS).forEach(([key, value]) => {
@@ -83,6 +100,7 @@ export class StorageService {
 		});
 
 		return new Response(object.body, {
+			status,
 			headers,
 		});
 	}
