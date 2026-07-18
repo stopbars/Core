@@ -157,6 +157,35 @@ export class ContributionService {
 		};
 	}
 
+	private async getContributionDeleteContext(
+		vatsimId: string,
+		contributionId: string,
+	): Promise<{
+		isProductManager: boolean;
+		contribution: Pick<Contribution, 'id' | 'userId' | 'status' | 'simulator'> | null;
+	} | null> {
+		const result = await this.dbSession.executeLatest<
+			Pick<Contribution, 'id' | 'userId' | 'status' | 'simulator'> & { actorIsProductManager: number }
+		>(
+			`SELECT
+				c.id, c.user_id AS userId, c.status, c.simulator,
+				CASE WHEN staff.role IN ('LEAD_DEVELOPER', 'PRODUCT_MANAGER') THEN 1 ELSE 0 END AS actorIsProductManager
+			 FROM users actor
+			 LEFT JOIN staff ON staff.user_id = actor.id
+			 LEFT JOIN contributions c ON c.id = ?
+			 WHERE actor.vatsim_id = ?
+			 LIMIT 1`,
+			[contributionId, vatsimId],
+		);
+		const row = result.results[0];
+		if (!row) return null;
+		const { actorIsProductManager, ...contribution } = row;
+		return {
+			isProductManager: actorIsProductManager === 1,
+			contribution: contribution.id ? contribution : null,
+		};
+	}
+
 	private async insertContributionGenerationRow(
 		session: ReturnType<typeof DatabaseContextFactory.createSessionService>,
 		token: string,
@@ -803,7 +832,7 @@ export class ContributionService {
 		};
 	}
 	async deleteContribution(id: string, userId: string): Promise<boolean> {
-		const context = await this.getContributionActionContext(userId, id);
+		const context = await this.getContributionDeleteContext(userId, id);
 		if (!context) {
 			throw new Error('User not found');
 		}

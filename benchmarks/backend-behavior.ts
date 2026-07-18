@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mock } from 'bun:test';
+import { AuthService } from '../src/services/auth';
 import { CacheService, withCache } from '../src/services/cache';
 import { ContactService } from '../src/services/contact';
 import { ContributionService, type Contribution } from '../src/services/contributions';
@@ -233,6 +234,33 @@ queuedResults.push([]);
 assert.equal(
 	await (contributions as unknown as ContributionInternals).getContributionActionContext('missing-user', 'contribution-id'),
 	null,
+);
+
+const deleteQueryStart = queries.length;
+queuedResults.push([
+	{
+		id: 'delete-id',
+		userId: '1234567',
+		status: 'pending',
+		simulator: 'msfs2024',
+		actorIsProductManager: 0,
+	},
+]);
+queuedResults.push([]);
+assert.equal(await contributions.deleteContribution('delete-id', '1234567'), true);
+const deleteQueries = queries.slice(deleteQueryStart);
+assert.equal(deleteQueries.length, 2, 'delete authorization and mutation should use two D1 statements');
+assert(!deleteQueries[0].query.includes('submitted_xml'), 'delete authorization must not transfer contribution XML');
+
+type AuthInternals = {
+	fetchLoginState(vatsimId: string): Promise<unknown>;
+};
+const auth = new AuthService(fakeDb, new VatsimService('client', 'secret'));
+queuedResults.push([]);
+await assert.rejects(
+	() => (auth as unknown as AuthInternals).fetchLoginState('1234567'),
+	/Failed to load login state/,
+	'an impossible empty anchor result should fail with an explicit invariant error',
 );
 
 const contact = new ContactService(fakeDb);

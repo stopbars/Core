@@ -520,6 +520,7 @@ export class AuthService {
 					[vatsimId, vatsimId],
 				);
 				const row = result.results[0];
+				if (!row) throw new Error('Failed to load login state');
 				const { ban_vatsim_id, ban_expires_at, ...userFields } = row;
 				const bookmark = dbSession.getSessionInfo().bookmark;
 				return {
