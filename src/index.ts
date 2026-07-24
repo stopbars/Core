@@ -1656,7 +1656,7 @@ app.delete('/bans/:vatsimId', async (c) => {
  *     summary: Get airport data
  *     tags:
  *       - Airports
- *     description: Fetch airport(s) by ICAO(s) or by continent.
+ *     description: Fetch airport(s) by ICAO(s) or by continent. ICAO lookups include the approved division airport's numeric ID as `id`, or null when unmanaged.
  *     parameters:
  *       - in: query
  *         name: icao
@@ -1681,7 +1681,7 @@ app.delete('/bans/:vatsimId', async (c) => {
  */
 app.get(
 	'/airports',
-	withCache(CacheKeys.fromUrl, 31536000, 'airports'), // Cache for 1 year because airports data doesn't change ever :P
+	withCache((request) => `metadata-v2-${CacheKeys.fromUrl(request)}`, 31536000, 'airports'),
 	async (c) => {
 		const airports = ServicePool.getAirport(c.env);
 		const icao = c.req.query('icao');

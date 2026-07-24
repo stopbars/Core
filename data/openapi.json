@@ -619,7 +619,7 @@
 			"get": {
 				"summary": "Get airport data",
 				"tags": ["Airports"],
-				"description": "Fetch airport(s) by ICAO(s) or by continent.",
+				"description": "Fetch airport(s) by ICAO(s) or by continent. ICAO lookups include the approved division airport's numeric ID as `id`, or null when unmanaged.",
 				"parameters": [
 					{
 						"in": "query",

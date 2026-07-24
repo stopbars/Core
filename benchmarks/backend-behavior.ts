@@ -94,6 +94,15 @@ const airportRow: AirportRecord = {
 	bbox_max_lat: null,
 	bbox_max_lon: null,
 };
+const airportReadRow: AirportRecord = {
+	...airportRow,
+	country_name: 'Australia',
+	region_name: 'Western Australia',
+	bbox_min_lat: -31.3,
+	bbox_min_lon: 115.6,
+	bbox_max_lat: -31.2,
+	bbox_max_lon: 115.9,
+};
 const fakeAirportDb = {
 	withSession: () => ({
 		prepare: (query: string) => {
@@ -112,11 +121,19 @@ const fakeAirportDb = {
 		},
 		batch: async (statements: FakeAirportStatement[]) => {
 			airportBatches.push(statements.map((statement) => ({ query: statement.query, params: statement.params })));
-			return statements.map((statement, index) => ({
-				success: true,
-				results: index === 0 ? [airportRow] : statement.query.includes('SELECT length_ft') ? parsedAirport.runways : [],
-				meta: {},
-			}));
+			return statements.map((statement, index) => {
+				let results: unknown[] = [];
+				if (statement.query.includes('SELECT id') && statement.query.includes('FROM division_airports')) {
+					results = [{ id: 42 }];
+				} else if (index === 0) {
+					results = statement.query.trimStart().startsWith('SELECT')
+						? [{ ...airportReadRow, ...(statement.query.includes(') AS id') ? { id: 42 } : {}) }]
+						: [airportRow];
+				} else if (statement.query.includes('SELECT length_ft')) {
+					results = parsedAirport.runways;
+				}
+				return { success: true, results, meta: {} };
+			});
 		},
 		getBookmark: () => null,
 	}),
@@ -134,6 +151,13 @@ assert.equal(airportBatches.length, 2, 'airport patch and runway replacement sho
 assert(airportBatches[1][0].query.includes('UPDATE airports SET name = ?, elevation_ft = ?, elevation_m = ?'));
 assert(airportBatches[1].some((statement) => statement.query.includes('DELETE FROM runways')));
 assert(airportBatches[1].some((statement) => statement.query.includes('SELECT length_ft')));
+
+const fetchedAirport = await airportService.getAirport('YXYZ');
+assert.equal(fetchedAirport?.id, 42, 'ICAO airport lookup should expose the approved division airport ID');
+assert.equal(airportBatches.length, 3);
+assert(airportBatches[2].some((statement) => statement.query.includes("status = 'approved'")));
+const fetchedAirports = await airportService.getAirports(['YXYZ']);
+assert.equal((fetchedAirports.YXYZ as { id: number }).id, 42, 'batch ICAO lookups should expose the same numeric ID');
 
 class FakeCache {
 	readonly entries = new Map<string, Response>();

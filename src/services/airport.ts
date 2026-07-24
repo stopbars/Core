@@ -48,6 +48,10 @@ export type AirportRecord = {
 	bbox_max_lon: number | null;
 };
 
+type AirportReadRecord = AirportRecord & {
+	id: number | null;
+};
+
 export type RunwayRecord = {
 	length_ft: string;
 	width_ft: string;
@@ -421,7 +425,7 @@ export class AirportService {
 		}
 
 		return this.withDbSession(async (dbSession) => {
-			const [airportResult, runwayResult] = await dbSession.executeReadBatch([
+			const [airportResult, runwayResult, divisionAirportResult] = await dbSession.executeReadBatch([
 				{
 					query: `SELECT icao, latitude, longitude, name, continent, country_code, country_name,
 						region_name, elevation_ft, elevation_m, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon
@@ -434,9 +438,18 @@ export class AirportService {
 						FROM runways WHERE airport_icao = ?`,
 					params: [uppercaseIcao],
 				},
+				{
+					query: `SELECT id
+						FROM division_airports
+						WHERE icao = ? AND status = 'approved'
+						ORDER BY id DESC
+						LIMIT 1`,
+					params: [uppercaseIcao],
+				},
 			]);
 			const airportFromDb = (airportResult.results as AirportRecord[])[0];
 			const cachedRunways = runwayResult.results as RunwayRecord[];
+			const divisionAirportId = (divisionAirportResult.results as Array<{ id: number }>)[0]?.id ?? null;
 
 			if (airportFromDb) {
 				const fetchPromises: Array<Promise<Partial<AirportRecord> | null>> = [];
@@ -474,7 +487,7 @@ export class AirportService {
 				for (const enrichment of enrichments) {
 					if (enrichment) Object.assign(airportFromDb, enrichment);
 				}
-				return { ...airportFromDb, runways: cachedRunways };
+				return { ...airportFromDb, id: divisionAirportId, runways: cachedRunways };
 			}
 
 			try {
@@ -588,6 +601,7 @@ export class AirportService {
 					}
 					return {
 						...mergedAirport,
+						id: divisionAirportId,
 						runways: openRunways.map(
 							({
 								length_ft,
@@ -620,7 +634,7 @@ export class AirportService {
 				} catch (e) {
 					console.warn('Posthog track failed (Airport Fetched From External API)', e);
 				}
-				return mergedAirport;
+				return { ...mergedAirport, id: divisionAirportId };
 			} catch (e) {
 				try {
 					this.posthog?.track('Airport External Fetch Failed', { icao: uppercaseIcao, error: (e as Error).message });
@@ -638,7 +652,7 @@ export class AirportService {
 		const unique = [...new Set(normalized.filter((icao) => /^[A-Z0-9]{4}$/.test(icao)))];
 		if (unique.length === 0) return {};
 
-		const cachedAirports = new Map<string, AirportRecord>();
+		const cachedAirports = new Map<string, AirportReadRecord>();
 		const cachedRunways = new Map<string, RunwayRecord[]>();
 		await this.withDbSession(async (dbSession) => {
 			const statements: Array<{ query: string; params: string[] }> = [];
@@ -648,9 +662,17 @@ export class AirportService {
 				const placeholders = chunk.map(() => '?').join(', ');
 				statements.push(
 					{
-						query: `SELECT icao, latitude, longitude, name, continent, country_code, country_name,
-							region_name, elevation_ft, elevation_m, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon
-							FROM airports WHERE icao IN (${placeholders})`,
+						query: `SELECT (
+								SELECT da.id
+								FROM division_airports da
+								WHERE da.icao = a.icao AND da.status = 'approved'
+								ORDER BY da.id DESC
+								LIMIT 1
+							) AS id, a.icao, a.latitude, a.longitude, a.name, a.continent,
+								a.country_code, a.country_name, a.region_name, a.elevation_ft, a.elevation_m,
+								a.bbox_min_lat, a.bbox_min_lon, a.bbox_max_lat, a.bbox_max_lon
+							FROM airports a
+							WHERE a.icao IN (${placeholders})`,
 						params: chunk,
 					},
 					{
@@ -664,7 +686,7 @@ export class AirportService {
 
 			const batchResults = await dbSession.executeReadBatch(statements);
 			for (let index = 0; index < batchResults.length; index += 2) {
-				for (const airport of batchResults[index].results as AirportRecord[]) cachedAirports.set(airport.icao, airport);
+				for (const airport of batchResults[index].results as AirportReadRecord[]) cachedAirports.set(airport.icao, airport);
 				for (const runway of batchResults[index + 1].results as Array<RunwayRecord & { airport_icao: string }>) {
 					const list = cachedRunways.get(runway.airport_icao) ?? [];
 					list.push({
