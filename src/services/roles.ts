@@ -49,6 +49,20 @@ export class RoleService {
 		return { isStaff: !!role, role };
 	}
 
+	async getStaffStatusByVatsimId(vatsimId: string): Promise<{ userId: number; role: StaffRole | null } | null> {
+		const result = await this.dbSession.executeRead<{ user_id: number; role: string | null }>(
+			`SELECT u.id AS user_id, s.role
+			 FROM users u
+			 LEFT JOIN staff s ON s.user_id = u.id
+			 WHERE u.vatsim_id = ?
+			 LIMIT 1`,
+			[vatsimId],
+		);
+		const row = result.results[0];
+		if (!row) return null;
+		return { userId: row.user_id, role: this.normalizeStaffRole(row.role as StaffRecord['role'] | null) };
+	}
+
 	async isStaff(userId: number): Promise<boolean> {
 		const { isStaff } = await this.getStaffStatus(userId);
 		return isStaff;

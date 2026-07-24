@@ -16,6 +16,7 @@ import { ServicePool } from './services/service-pool';
 import { UserService } from './services/users';
 import { VatsimService } from './services/vatsim';
 import { deriveContributionGenerationTokenFromMsfsXml } from './services/contributions';
+import { parseAirportCreateInput, parseAirportUpdateInput } from './services/airport';
 import { MAX_CONTRIBUTION_XML_BYTES, sanitizeContributionXml } from './services/xml-sanitizer';
 import { AirportObject, PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
@@ -1724,6 +1725,129 @@ app.get(
 		}
 	},
 );
+
+const airportMutationApp = new Hono<{ Bindings: Env }>();
+
+airportMutationApp.use('*', async (c, next) => {
+	if (c.req.method !== 'POST' && c.req.method !== 'PATCH') {
+		await next();
+		return;
+	}
+	const vatsimToken = c.req.header('X-Vatsim-Token');
+	if (!vatsimToken) return c.text('Unauthorized', 401);
+
+	let vatsimUser: VatsimUser;
+	try {
+		vatsimUser = await ServicePool.getVatsim(c.env).getUser(vatsimToken);
+	} catch {
+		return c.text('Unauthorized', 401);
+	}
+
+	const staff = await ServicePool.getRoles(c.env).getStaffStatusByVatsimId(vatsimUser.id);
+	if (!staff) return c.text('Unauthorized', 401);
+	if (staff.role !== StaffRole.LEAD_DEVELOPER) return c.text('Forbidden', 403);
+	await next();
+});
+
+/**
+ * @openapi
+ * /airports:
+ *   post:
+ *     x-hidden: true
+ *     summary: Manually create an airport (lead developer only)
+ *     tags: [Airports, Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [icao, latitude, longitude, name, continent]
+ *             properties:
+ *               icao: { type: string, minLength: 4, maxLength: 4 }
+ *               latitude: { type: number, minimum: -90, maximum: 90 }
+ *               longitude: { type: number, minimum: -180, maximum: 180 }
+ *               name: { type: string }
+ *               continent: { type: string, enum: [AF, AN, AS, EU, NA, OC, SA] }
+ *               country_code: { type: string, nullable: true }
+ *               country_name: { type: string, nullable: true }
+ *               region_name: { type: string, nullable: true }
+ *               elevation_ft: { type: integer, nullable: true }
+ *               bbox_min_lat: { type: number, nullable: true }
+ *               bbox_min_lon: { type: number, nullable: true }
+ *               bbox_max_lat: { type: number, nullable: true }
+ *               bbox_max_lon: { type: number, nullable: true }
+ *               runways:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [length_ft, width_ft, le_ident, le_latitude_deg, le_longitude_deg, he_ident, he_latitude_deg, he_longitude_deg]
+ *     responses:
+ *       201: { description: Airport created }
+ *       400: { description: Invalid airport data }
+ *       401: { description: Unauthorized }
+ *       403: { description: Lead developer role required }
+ *       409: { description: Airport already exists }
+ */
+airportMutationApp.post('/', async (c) => {
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
+	const input = parseAirportCreateInput(body);
+	const airport = await ServicePool.getAirport(c.env).createAirport(input);
+	await ServicePool.getCache(c.env).bumpNamespaceVersion('airports');
+	return c.json(airport, 201);
+});
+
+/**
+ * @openapi
+ * /airports/{icao}:
+ *   patch:
+ *     x-hidden: true
+ *     summary: Manually update an airport (lead developer only)
+ *     description: Updates supplied fields only. Supplying runways atomically replaces the full runway list.
+ *     tags: [Airports, Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: icao
+ *         required: true
+ *         schema: { type: string, minLength: 4, maxLength: 4 }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200: { description: Airport updated }
+ *       400: { description: Invalid airport data }
+ *       401: { description: Unauthorized }
+ *       403: { description: Lead developer role required }
+ *       404: { description: Airport not found }
+ */
+airportMutationApp.patch('/:icao', async (c) => {
+	const icao = c.req.param('icao').trim().toUpperCase();
+	if (!ICAO_REGEX.test(icao)) return c.json({ error: 'Invalid airport ICAO format' }, 400);
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
+	const input = parseAirportUpdateInput(body);
+	const airport = await ServicePool.getAirport(c.env).updateAirport(icao, input);
+	await ServicePool.getCache(c.env).bumpNamespaceVersion('airports');
+	return c.json(airport);
+});
+
+app.route('/airports', airportMutationApp);
 
 /**
  * @openapi

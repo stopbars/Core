@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mock } from 'bun:test';
+import { AirportService, parseAirportCreateInput, parseAirportUpdateInput, type AirportRecord } from '../src/services/airport';
 import { AuthService } from '../src/services/auth';
 import { CacheService, withCache } from '../src/services/cache';
 import { ContactService } from '../src/services/contact';
@@ -11,6 +12,128 @@ mock.module('cloudflare:workers', () => ({
 	DurableObject: class {},
 	waitUntil: () => undefined,
 }));
+
+const parsedAirport = parseAirportCreateInput({
+	icao: ' yxyz ',
+	latitude: -31.25,
+	longitude: 115.75,
+	name: 'New Test Airport',
+	continent: 'oc',
+	country_code: 'au',
+	elevation_ft: 100,
+	runways: [
+		{
+			length_ft: 5000,
+			width_ft: '150',
+			le_ident: '09',
+			le_latitude_deg: -31.26,
+			le_longitude_deg: 115.7,
+			he_ident: '27',
+			he_latitude_deg: -31.24,
+			he_longitude_deg: 115.8,
+		},
+	],
+});
+assert.equal(parsedAirport.icao, 'YXYZ');
+assert.equal(parsedAirport.continent, 'OC');
+assert.equal(parsedAirport.country_code, 'AU');
+assert.equal(parsedAirport.elevation_m, 30.48);
+assert.equal(parsedAirport.runways[0].length_ft, '5000');
+assert.throws(() => parseAirportUpdateInput({ bbox_min_lat: -31 }), /All four bounding-box fields must be supplied together/);
+assert.throws(() => parseAirportUpdateInput({ icao: 'YSSY' }), /Unknown or immutable field: icao/);
+assert.throws(
+	() =>
+		parseAirportUpdateInput({
+			runways: [
+				{
+					length_ft: 5000,
+					width_ft: 150,
+					le_ident: '09',
+					le_latitude_deg: -31,
+					le_longitude_deg: 115,
+					he_ident: '27',
+					he_latitude_deg: -31.1,
+					he_longitude_deg: 115.1,
+					typo: true,
+				},
+			],
+		}),
+	/Unknown field: runways\[0\]\.typo/,
+);
+assert.throws(
+	() =>
+		parseAirportCreateInput({
+			icao: 'YXYZ',
+			latitude: 91,
+			longitude: 115.75,
+			name: 'Invalid Airport',
+			continent: 'OC',
+		}),
+	/latitude must be a number between -90 and 90/,
+);
+
+interface FakeAirportStatement {
+	query: string;
+	params: unknown[];
+}
+
+const airportBatches: FakeAirportStatement[][] = [];
+const airportRow: AirportRecord = {
+	icao: 'YXYZ',
+	latitude: -31.25,
+	longitude: 115.75,
+	name: 'New Test Airport',
+	continent: 'OC',
+	country_code: 'AU',
+	country_name: null,
+	region_name: null,
+	elevation_ft: 100,
+	elevation_m: 30.48,
+	bbox_min_lat: null,
+	bbox_min_lon: null,
+	bbox_max_lat: null,
+	bbox_max_lon: null,
+};
+const fakeAirportDb = {
+	withSession: () => ({
+		prepare: (query: string) => {
+			let params: unknown[] = [];
+			const statement = {
+				query,
+				get params() {
+					return params;
+				},
+				bind: (...values: unknown[]) => {
+					params = values;
+					return statement;
+				},
+			};
+			return statement;
+		},
+		batch: async (statements: FakeAirportStatement[]) => {
+			airportBatches.push(statements.map((statement) => ({ query: statement.query, params: statement.params })));
+			return statements.map((statement, index) => ({
+				success: true,
+				results: index === 0 ? [airportRow] : statement.query.includes('SELECT length_ft') ? parsedAirport.runways : [],
+				meta: {},
+			}));
+		},
+		getBookmark: () => null,
+	}),
+} as unknown as D1Database;
+const airportService = new AirportService(fakeAirportDb, '');
+assert.deepEqual(await airportService.createAirport(parsedAirport), { ...airportRow, runways: parsedAirport.runways });
+assert.equal(airportBatches.length, 1, 'airport and runways should be created in one D1 batch');
+assert.equal(airportBatches[0].length, 2);
+assert(airportBatches[0][1].query.includes('WHERE EXISTS'));
+
+const parsedUpdate = parseAirportUpdateInput({ name: 'Renamed Airport', elevation_ft: 200, runways: [] });
+const updatedAirport = await airportService.updateAirport('YXYZ', parsedUpdate);
+assert.equal(updatedAirport.name, airportRow.name);
+assert.equal(airportBatches.length, 2, 'airport patch and runway replacement should use one D1 batch');
+assert(airportBatches[1][0].query.includes('UPDATE airports SET name = ?, elevation_ft = ?, elevation_m = ?'));
+assert(airportBatches[1].some((statement) => statement.query.includes('DELETE FROM runways')));
+assert(airportBatches[1].some((statement) => statement.query.includes('SELECT length_ft')));
 
 class FakeCache {
 	readonly entries = new Map<string, Response>();

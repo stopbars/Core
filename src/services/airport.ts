@@ -31,7 +31,7 @@ interface AirportData {
 	}>;
 }
 
-type AirportRecord = {
+export type AirportRecord = {
 	icao: string;
 	latitude: number | null;
 	longitude: number | null;
@@ -48,7 +48,7 @@ type AirportRecord = {
 	bbox_max_lon: number | null;
 };
 
-type RunwayRecord = {
+export type RunwayRecord = {
 	length_ft: string;
 	width_ft: string;
 	le_ident: string;
@@ -57,6 +57,227 @@ type RunwayRecord = {
 	he_ident: string;
 	he_latitude_deg: string;
 	he_longitude_deg: string;
+};
+
+export interface AirportCreateInput {
+	icao: string;
+	latitude: number;
+	longitude: number;
+	name: string;
+	continent: string;
+	country_code: string | null;
+	country_name: string | null;
+	region_name: string | null;
+	elevation_ft: number | null;
+	elevation_m: number | null;
+	bbox_min_lat: number | null;
+	bbox_min_lon: number | null;
+	bbox_max_lat: number | null;
+	bbox_max_lon: number | null;
+	runways: RunwayRecord[];
+}
+
+export type AirportUpdateInput = Partial<Omit<AirportCreateInput, 'icao' | 'runways'>> & {
+	runways?: RunwayRecord[];
+};
+
+const AIRPORT_FIELDS = new Set([
+	'icao',
+	'latitude',
+	'longitude',
+	'name',
+	'continent',
+	'country_code',
+	'country_name',
+	'region_name',
+	'elevation_ft',
+	'bbox_min_lat',
+	'bbox_min_lon',
+	'bbox_max_lat',
+	'bbox_max_lon',
+	'runways',
+]);
+const BBOX_FIELDS = ['bbox_min_lat', 'bbox_min_lon', 'bbox_max_lat', 'bbox_max_lon'] as const;
+const CONTINENTS = new Set(['AF', 'AN', 'AS', 'EU', 'NA', 'OC', 'SA']);
+const RUNWAY_FIELDS = new Set([
+	'length_ft',
+	'width_ft',
+	'le_ident',
+	'le_latitude_deg',
+	'le_longitude_deg',
+	'he_ident',
+	'he_latitude_deg',
+	'he_longitude_deg',
+]);
+
+const requireObject = (value: unknown): Record<string, unknown> => {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		throw new HttpError(400, 'Request body must be a JSON object');
+	}
+	return value as Record<string, unknown>;
+};
+
+const requireNumber = (value: unknown, field: string, min: number, max: number): number => {
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+		throw new HttpError(400, `${field} must be a number between ${min} and ${max}`);
+	}
+	return value;
+};
+
+const requireString = (value: unknown, field: string, maxLength: number): string => {
+	if (typeof value !== 'string') throw new HttpError(400, `${field} must be a string`);
+	const normalized = value.trim();
+	if (!normalized || normalized.length > maxLength) {
+		throw new HttpError(400, `${field} must contain 1-${maxLength} characters`);
+	}
+	return normalized;
+};
+
+const optionalString = (value: unknown, field: string, maxLength: number): string | null => {
+	if (value === null) return null;
+	return requireString(value, field, maxLength);
+};
+
+const numericString = (value: unknown, field: string, min: number, max: number): string => {
+	const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
+	if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+		throw new HttpError(400, `${field} must be a number between ${min} and ${max}`);
+	}
+	return String(parsed);
+};
+
+const parseRunways = (value: unknown): RunwayRecord[] => {
+	if (!Array.isArray(value)) throw new HttpError(400, 'runways must be an array');
+	if (value.length > 100) throw new HttpError(400, 'runways cannot contain more than 100 entries');
+
+	return value.map((raw, index) => {
+		const runway = requireObject(raw);
+		const prefix = `runways[${index}]`;
+		for (const field of Object.keys(runway)) {
+			if (!RUNWAY_FIELDS.has(field)) throw new HttpError(400, `Unknown field: ${prefix}.${field}`);
+		}
+		const leIdent = requireString(runway.le_ident, `${prefix}.le_ident`, 8).toUpperCase();
+		const heIdent = requireString(runway.he_ident, `${prefix}.he_ident`, 8).toUpperCase();
+		if (!/^[A-Z0-9]+$/.test(leIdent) || !/^[A-Z0-9]+$/.test(heIdent)) {
+			throw new HttpError(400, `${prefix} runway identifiers must be alphanumeric`);
+		}
+		return {
+			length_ft: numericString(runway.length_ft, `${prefix}.length_ft`, 1, 100_000),
+			width_ft: numericString(runway.width_ft, `${prefix}.width_ft`, 1, 10_000),
+			le_ident: leIdent,
+			le_latitude_deg: numericString(runway.le_latitude_deg, `${prefix}.le_latitude_deg`, -90, 90),
+			le_longitude_deg: numericString(runway.le_longitude_deg, `${prefix}.le_longitude_deg`, -180, 180),
+			he_ident: heIdent,
+			he_latitude_deg: numericString(runway.he_latitude_deg, `${prefix}.he_latitude_deg`, -90, 90),
+			he_longitude_deg: numericString(runway.he_longitude_deg, `${prefix}.he_longitude_deg`, -180, 180),
+		};
+	});
+};
+
+const validateKnownFields = (body: Record<string, unknown>, allowIcao: boolean) => {
+	for (const field of Object.keys(body)) {
+		if (!AIRPORT_FIELDS.has(field) || (!allowIcao && field === 'icao')) {
+			throw new HttpError(400, `Unknown or immutable field: ${field}`);
+		}
+	}
+};
+
+const parseOptionalFields = (body: Record<string, unknown>, target: AirportUpdateInput) => {
+	if ('latitude' in body) target.latitude = requireNumber(body.latitude, 'latitude', -90, 90);
+	if ('longitude' in body) target.longitude = requireNumber(body.longitude, 'longitude', -180, 180);
+	if ('name' in body) target.name = requireString(body.name, 'name', 200);
+	if ('continent' in body) {
+		const continent = requireString(body.continent, 'continent', 2).toUpperCase();
+		if (!CONTINENTS.has(continent)) throw new HttpError(400, 'continent must be a valid two-letter continent code');
+		target.continent = continent;
+	}
+	if ('country_code' in body) {
+		const countryCode = optionalString(body.country_code, 'country_code', 2)?.toUpperCase() ?? null;
+		if (countryCode !== null && !/^[A-Z]{2}$/.test(countryCode)) {
+			throw new HttpError(400, 'country_code must be a two-letter ISO code or null');
+		}
+		target.country_code = countryCode;
+	}
+	if ('country_name' in body) target.country_name = optionalString(body.country_name, 'country_name', 120);
+	if ('region_name' in body) target.region_name = optionalString(body.region_name, 'region_name', 120);
+	if ('elevation_ft' in body) {
+		if (body.elevation_ft === null) {
+			target.elevation_ft = null;
+			target.elevation_m = null;
+		} else {
+			const elevationFt = requireNumber(body.elevation_ft, 'elevation_ft', -2_000, 60_000);
+			if (!Number.isInteger(elevationFt)) throw new HttpError(400, 'elevation_ft must be an integer');
+			target.elevation_ft = elevationFt;
+			target.elevation_m = Math.round(elevationFt * 0.3048 * 100) / 100;
+		}
+	}
+
+	const suppliedBboxFields = BBOX_FIELDS.filter((field) => field in body);
+	if (suppliedBboxFields.length > 0) {
+		if (suppliedBboxFields.length !== BBOX_FIELDS.length) {
+			throw new HttpError(400, 'All four bounding-box fields must be supplied together');
+		}
+		const values = BBOX_FIELDS.map((field) => body[field]);
+		const allNull = values.every((value) => value === null);
+		if (!allNull && values.some((value) => value === null)) {
+			throw new HttpError(400, 'Bounding-box fields must either all be numbers or all be null');
+		}
+		if (allNull) {
+			for (const field of BBOX_FIELDS) target[field] = null;
+		} else {
+			const minLat = requireNumber(body.bbox_min_lat, 'bbox_min_lat', -90, 90);
+			const minLon = requireNumber(body.bbox_min_lon, 'bbox_min_lon', -180, 180);
+			const maxLat = requireNumber(body.bbox_max_lat, 'bbox_max_lat', -90, 90);
+			const maxLon = requireNumber(body.bbox_max_lon, 'bbox_max_lon', -180, 180);
+			if (minLat > maxLat || minLon > maxLon) throw new HttpError(400, 'Bounding-box minimums cannot exceed maximums');
+			Object.assign(target, {
+				bbox_min_lat: minLat,
+				bbox_min_lon: minLon,
+				bbox_max_lat: maxLat,
+				bbox_max_lon: maxLon,
+			});
+		}
+	}
+	if ('runways' in body) target.runways = parseRunways(body.runways);
+};
+
+export const parseAirportCreateInput = (value: unknown): AirportCreateInput => {
+	const body = requireObject(value);
+	validateKnownFields(body, true);
+	const icao = requireString(body.icao, 'icao', 4).toUpperCase();
+	if (!/^[A-Z0-9]{4}$/.test(icao)) throw new HttpError(400, 'icao must be a valid four-character ICAO code');
+
+	const parsed: AirportUpdateInput = {};
+	parseOptionalFields(body, parsed);
+	for (const required of ['latitude', 'longitude', 'name', 'continent'] as const) {
+		if (!(required in parsed)) throw new HttpError(400, `${required} is required`);
+	}
+	return {
+		icao,
+		latitude: parsed.latitude!,
+		longitude: parsed.longitude!,
+		name: parsed.name!,
+		continent: parsed.continent!,
+		country_code: parsed.country_code ?? null,
+		country_name: parsed.country_name ?? null,
+		region_name: parsed.region_name ?? null,
+		elevation_ft: parsed.elevation_ft ?? null,
+		elevation_m: parsed.elevation_m ?? null,
+		bbox_min_lat: parsed.bbox_min_lat ?? null,
+		bbox_min_lon: parsed.bbox_min_lon ?? null,
+		bbox_max_lat: parsed.bbox_max_lat ?? null,
+		bbox_max_lon: parsed.bbox_max_lon ?? null,
+		runways: parsed.runways ?? [],
+	};
+};
+
+export const parseAirportUpdateInput = (value: unknown): AirportUpdateInput => {
+	const body = requireObject(value);
+	validateKnownFields(body, false);
+	const parsed: AirportUpdateInput = {};
+	parseOptionalFields(body, parsed);
+	if (Object.keys(parsed).length === 0) throw new HttpError(400, 'At least one editable airport field is required');
+	return parsed;
 };
 
 export class AirportService {
@@ -76,6 +297,121 @@ export class AirportService {
 		} finally {
 			dbSession.closeSession();
 		}
+	}
+
+	private runwayInsertStatement(icao: string, runway: RunwayRecord) {
+		return {
+			query: `INSERT INTO runways (
+					airport_icao, length_ft, width_ft, le_ident, le_latitude_deg, le_longitude_deg,
+					he_ident, he_latitude_deg, he_longitude_deg
+				)
+				SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+				WHERE EXISTS (SELECT 1 FROM airports WHERE icao = ?)`,
+			params: [
+				icao,
+				runway.length_ft,
+				runway.width_ft,
+				runway.le_ident,
+				runway.le_latitude_deg,
+				runway.le_longitude_deg,
+				runway.he_ident,
+				runway.he_latitude_deg,
+				runway.he_longitude_deg,
+				icao,
+			],
+		};
+	}
+
+	async createAirport(input: AirportCreateInput): Promise<AirportRecord & { runways: RunwayRecord[] }> {
+		return this.withDbSession(async (dbSession) => {
+			const statements = [
+				{
+					query: `INSERT INTO airports (
+							icao, latitude, longitude, name, continent, country_code, country_name, region_name,
+							elevation_ft, elevation_m, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+						RETURNING *`,
+					params: [
+						input.icao,
+						input.latitude,
+						input.longitude,
+						input.name,
+						input.continent,
+						input.country_code,
+						input.country_name,
+						input.region_name,
+						input.elevation_ft,
+						input.elevation_m,
+						input.bbox_min_lat,
+						input.bbox_min_lon,
+						input.bbox_max_lat,
+						input.bbox_max_lon,
+					],
+				},
+				...input.runways.map((runway) => this.runwayInsertStatement(input.icao, runway)),
+			];
+			try {
+				const results = await dbSession.executeBatch(statements);
+				const airport = (results[0]?.results as AirportRecord[] | undefined)?.[0];
+				if (!airport) throw new Error('Airport insert returned no record');
+				try {
+					this.posthog?.track('Airport Manually Created', { icao: input.icao, runwayCount: input.runways.length });
+				} catch {
+					/* ignore analytics errors */
+				}
+				return { ...airport, runways: input.runways };
+			} catch (error) {
+				if (error instanceof HttpError) throw error;
+				if (error instanceof Error && /UNIQUE constraint failed: airports\.icao/i.test(error.message)) {
+					throw new HttpError(409, `Airport ${input.icao} already exists`);
+				}
+				throw error;
+			}
+		});
+	}
+
+	async updateAirport(icao: string, input: AirportUpdateInput): Promise<AirportRecord & { runways: RunwayRecord[] }> {
+		const normalizedIcao = icao.toUpperCase();
+		return this.withDbSession(async (dbSession) => {
+			const assignments: string[] = [];
+			const params: Array<string | number | null> = [];
+			for (const [field, value] of Object.entries(input)) {
+				if (field === 'runways') continue;
+				assignments.push(`${field} = ?`);
+				params.push(value as string | number | null);
+			}
+
+			const updateQuery =
+				assignments.length > 0
+					? `UPDATE airports SET ${assignments.join(', ')} WHERE icao = ? RETURNING *`
+					: 'UPDATE airports SET icao = icao WHERE icao = ? RETURNING *';
+			const statements = [{ query: updateQuery, params: [...params, normalizedIcao] }];
+			if (input.runways) {
+				statements.push({ query: 'DELETE FROM runways WHERE airport_icao = ?', params: [normalizedIcao] });
+				statements.push(...input.runways.map((runway) => this.runwayInsertStatement(normalizedIcao, runway)));
+			}
+			statements.push({
+				query: `SELECT length_ft, width_ft, le_ident, le_latitude_deg, le_longitude_deg,
+						he_ident, he_latitude_deg, he_longitude_deg
+					FROM runways WHERE airport_icao = ? ORDER BY id`,
+				params: [normalizedIcao],
+			});
+
+			const results = await dbSession.executeBatch(statements);
+			const airport = (results[0]?.results as AirportRecord[] | undefined)?.[0];
+			if (!airport) throw new HttpError(404, `Airport ${normalizedIcao} not found`);
+			const runways = (results[results.length - 1]?.results as RunwayRecord[] | undefined) ?? [];
+			try {
+				this.posthog?.track('Airport Manually Updated', {
+					icao: normalizedIcao,
+					fields: Object.keys(input).filter((field) => field !== 'runways'),
+					runwaysReplaced: input.runways !== undefined,
+				});
+			} catch {
+				/* ignore analytics errors */
+			}
+			return { ...airport, runways };
+		});
 	}
 
 	async getAirport(icao: string) {
