@@ -1681,7 +1681,7 @@ app.delete('/bans/:vatsimId', async (c) => {
  */
 app.get(
 	'/airports',
-	withCache((request) => `metadata-v2-${CacheKeys.fromUrl(request)}`, 31536000, 'airports'),
+	withCache((request) => `metadata-v3-${CacheKeys.fromUrl(request)}`, 31536000, 'airports'),
 	async (c) => {
 		const airports = ServicePool.getAirport(c.env);
 		const icao = c.req.query('icao');
@@ -2578,6 +2578,9 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 
 	const { approved } = (await c.req.json()) as ApproveAirportPayload;
 	const airport = await divisions.approveAirport(airportId, vatsimUser.id, approved);
+	// Airport GET responses include the approved division_airports ID. Invalidate
+	// metadata cached before this decision so the next read reflects the DB row.
+	await ServicePool.getCache(c.env).bumpNamespaceVersion('airports');
 	return c.json(airport);
 });
 
