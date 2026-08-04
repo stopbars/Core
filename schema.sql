@@ -180,7 +180,8 @@ CREATE TABLE IF NOT EXISTS contributions (
   simulator TEXT CHECK (
     simulator IN (
       'msfs2020',
-      'msfs2024'
+      'msfs2024',
+      'xplane'
     )
   ) NOT NULL DEFAULT 'msfs2024',
   submission_date DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -193,7 +194,13 @@ CREATE TABLE IF NOT EXISTS contributions (
     )
   ) NOT NULL DEFAULT 'pending',
   rejection_reason TEXT,
-  decision_date DATETIME
+  decision_date DATETIME,
+  generation_token TEXT,
+  generation_hash TEXT,
+  artifact_identity TEXT,
+  artifact_generation_id TEXT,
+  removal_artifact_key TEXT,
+  bars_artifact_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS notams (
@@ -260,6 +267,8 @@ CREATE TABLE IF NOT EXISTS contribution_generations (
   icao TEXT NOT NULL,
   supports_key TEXT NOT NULL,
   bars_key TEXT NOT NULL,
+  simulator TEXT,
+  generation_hash TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   expires_at DATETIME NOT NULL DEFAULT (datetime('now', '+1 day'))
 );
@@ -380,6 +389,13 @@ CREATE INDEX IF NOT EXISTS idx_contributions_airport_lowerpkg_status_decision ON
   lower(package_name),
   status,
   decision_date DESC
+);
+
+CREATE INDEX IF NOT EXISTS idx_contributions_artifact_identity ON contributions (
+  airport_icao,
+  artifact_identity,
+  simulator,
+  status
 );
 
 CREATE INDEX IF NOT EXISTS idx_points_timestamps ON points (

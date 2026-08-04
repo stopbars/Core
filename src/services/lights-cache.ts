@@ -55,6 +55,21 @@ export async function getLightsByObject(env: Env, icao: string): Promise<Record<
 
 	const storage = ServicePool.getStorage(env);
 	try {
+		const approved = await ServicePool.getContributions(env).listContributionMetadata({
+			status: 'approved',
+			airportIcao: normalizedIcao,
+		});
+		for (const contribution of approved.contributions) {
+			if (!contribution.barsArtifactKey) continue;
+			const published = await storage.getFile(contribution.barsArtifactKey);
+			if (!published) continue;
+			const mapping = parseBarsLightsXml(await published.text());
+			await cache.set(cacheKey, mapping, { ttl: 900, namespace: 'airports' });
+			return mapping;
+		}
+
+		// Backward compatibility for approved YSCB/YSSY rows published before
+		// immutable artifact keys were recorded on contributions.
 		const list = await storage.listFiles(`Maps/${normalizedIcao}_`, 50);
 		if (!list.objects || list.objects.length === 0) {
 			await cache.set(cacheKey, {}, { ttl: 300, namespace: 'airports' });
