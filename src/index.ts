@@ -1,4 +1,4 @@
-import type { Context } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { DurableObject } from 'cloudflare:workers';
@@ -15,9 +15,11 @@ import { StaffRole } from './services/roles';
 import { ServicePool } from './services/service-pool';
 import { UserService } from './services/users';
 import { VatsimService } from './services/vatsim';
-import { deriveContributionGenerationTokenFromMsfsXml } from './services/contributions';
+import { deriveContributionGenerationHash, deriveContributionGenerationToken, type Simulator } from './services/contributions';
 import { parseAirportCreateInput, parseAirportUpdateInput } from './services/airport';
 import { MAX_CONTRIBUTION_XML_BYTES, sanitizeContributionXml } from './services/xml-sanitizer';
+import { generateXPlaneRemovalsJson } from './services/xplane-removals';
+import { DIVISION_DATA_ACTOR_ID, isDivisionDataAutomationRequest } from './services/division-data-auth';
 import { AirportObject, PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
@@ -204,7 +206,9 @@ interface ContributionSubmissionPayload {
 	packageName: string;
 	submittedXml: string;
 	notes?: string;
-	simulator: 'msfs2020' | 'msfs2024';
+	simulator: Simulator;
+	generationToken: string;
+	generationHash: string;
 }
 
 interface ContributionDecisionPayload {
@@ -215,14 +219,27 @@ interface ContributionDecisionPayload {
 
 interface ContributionGenerationCacheEntry {
 	icao: string;
+	simulator: Simulator;
+	generationHash: string;
 	expiresAt: string;
-	supportsXml: string;
+	removalArtifact: string;
 	barsXml: string;
 }
 
 const CONTRIBUTION_GENERATION_CACHE_NAMESPACE = 'generation';
 const CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS = 86400;
 const MIN_CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS = 1;
+
+const summarizeContributionStatuses = (items: Array<{ status: string }>, total: number) =>
+	items.reduce(
+		(summary, item) => {
+			if (item.status === 'approved' || item.status === 'pending' || item.status === 'rejected' || item.status === 'outdated') {
+				summary[item.status] += 1;
+			}
+			return summary;
+		},
+		{ total, approved: 0, pending: 0, rejected: 0, outdated: 0 },
+	);
 
 type VatsimConnectionStatus = {
 	callsign: string;
@@ -415,26 +432,25 @@ app.get('/favicon.ico', () => {
 	});
 });
 
-async function resolveUserFromVatsimOrApi(
-	c: Context<{ Bindings: Env; Variables: { vatsimUser?: VatsimUser; user?: UserRecord } }>,
+export async function resolveUserFromCredentials(
+	vatsimToken: string | undefined,
+	authz: string,
+	vatsim: Pick<VatsimService, 'getUser'>,
+	auth: Pick<AuthService, 'getUserByVatsimId' | 'getUserByApiKey'>,
 ): Promise<{ user: UserRecord | null; vatsimUser?: VatsimUser }> {
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	const authz = c.req.header('Authorization') || '';
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-
 	if (vatsimToken) {
 		try {
 			const vUser = await vatsim.getUser(vatsimToken);
 			const user = await auth.getUserByVatsimId(vUser.id);
 			return { user, vatsimUser: vUser };
 		} catch {
-			return { user: null };
+			// A stale browser session must not prevent a valid API key from
+			// authenticating the same request.
 		}
 	}
 
 	if (authz.toLowerCase().startsWith('bearer ')) {
-		const apiKey = authz.slice(7);
+		const apiKey = authz.slice(7).trim();
 		try {
 			const user = await auth.getUserByApiKey(apiKey);
 			if (user) {
@@ -446,6 +462,17 @@ async function resolveUserFromVatsimOrApi(
 	}
 
 	return { user: null };
+}
+
+async function resolveUserFromVatsimOrApi(
+	c: Context<{ Bindings: Env; Variables: { vatsimUser?: VatsimUser; user?: UserRecord } }>,
+): Promise<{ user: UserRecord | null; vatsimUser?: VatsimUser }> {
+	return resolveUserFromCredentials(
+		c.req.header('X-Vatsim-Token'),
+		c.req.header('Authorization') || '',
+		ServicePool.getVatsim(c.env),
+		ServicePool.getAuth(c.env),
+	);
 }
 
 /**
@@ -732,6 +759,7 @@ app.delete('/contact/:id', async (c) => {
  *         | --- | --- | --- |
  *         | `HEARTBEAT` | controller, pilot, observer | Server replies with `HEARTBEAT_ACK` |
  *         | `GET_STATE` | controller, pilot, observer | Server replies with `STATE_SNAPSHOT` |
+ *         | `GET_ONLINE_PILOTS` | controller, pilot, observer | Server replies with `ONLINE_PILOTS` for the connected airport |
  *         | `STATE_UPDATE` | controller only | Broadcast to same-airport clients (except sender) |
  *         | `MULTI_STATE_UPDATE` | controller only | Broadcast to same-airport clients (except sender) |
  *         | `SHARED_STATE_UPDATE` | controller only | Broadcast to same-airport clients (including sender) |
@@ -747,6 +775,11 @@ app.delete('/contact/:id', async (c) => {
  *         ### GET_STATE
  *         ```json
  *         { "type": "GET_STATE" }
+ *         ```
+ *
+ *         ### GET_ONLINE_PILOTS
+ *         ```json
+ *         { "type": "GET_ONLINE_PILOTS" }
  *         ```
  *
  *         ### STATE_UPDATE (controller only)
@@ -815,6 +848,21 @@ app.delete('/contact/:id', async (c) => {
  *         - `HEARTBEAT` every 60 seconds
  *         - `HEARTBEAT_ACK` in response to client `HEARTBEAT`
  *         - `STATE_SNAPSHOT` in response to `GET_STATE`
+ *         - `ONLINE_PILOTS` in response to `GET_ONLINE_PILOTS`:
+ *           ```json
+ *           {
+ *             "type": "ONLINE_PILOTS",
+ *             "airport": "YSSY",
+ *             "data": {
+ *               "pilots": [
+ *                 { "cid": "1234567", "callsign": "QFA12" },
+ *                 { "cid": "7654321", "callsign": "VOZ456" }
+ *               ],
+ *               "requestedAt": 1739400000000
+ *             },
+ *             "timestamp": 1739400000123
+ *           }
+ *           ```
  *         - `STATE_UPDATE` when a controller changes one object state
  *         - `MULTI_STATE_UPDATE` when a controller sends a batch state change
  *         - `CONTROLLER_CONNECT` / `CONTROLLER_DISCONNECT` for controller presence changes
@@ -1728,11 +1776,7 @@ app.get(
 
 const airportMutationApp = new Hono<{ Bindings: Env }>();
 
-airportMutationApp.use('*', async (c, next) => {
-	if (c.req.method !== 'POST' && c.req.method !== 'PATCH') {
-		await next();
-		return;
-	}
+const requireLeadDeveloperForAirportMutation: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) return c.text('Unauthorized', 401);
 
@@ -1747,7 +1791,7 @@ airportMutationApp.use('*', async (c, next) => {
 	if (!staff) return c.text('Unauthorized', 401);
 	if (staff.role !== StaffRole.LEAD_DEVELOPER) return c.text('Forbidden', 403);
 	await next();
-});
+};
 
 /**
  * @openapi
@@ -1791,7 +1835,7 @@ airportMutationApp.use('*', async (c, next) => {
  *       403: { description: Lead developer role required }
  *       409: { description: Airport already exists }
  */
-airportMutationApp.post('/', async (c) => {
+airportMutationApp.post('/', requireLeadDeveloperForAirportMutation, async (c) => {
 	let body: unknown;
 	try {
 		body = await c.req.json();
@@ -1832,7 +1876,7 @@ airportMutationApp.post('/', async (c) => {
  *       403: { description: Lead developer role required }
  *       404: { description: Airport not found }
  */
-airportMutationApp.patch('/:icao', async (c) => {
+airportMutationApp.patch('/:icao', requireLeadDeveloperForAirportMutation, async (c) => {
 	const icao = c.req.param('icao').trim().toUpperCase();
 	if (!ICAO_REGEX.test(icao)) return c.json({ error: 'Invalid airport ICAO format' }, 400);
 	let body: unknown;
@@ -2766,15 +2810,25 @@ app.post('/airports/:icao/points/batch', async (c) => {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
-	const { user } = await resolveUserFromVatsimOrApi(c);
-	if (!user) {
-		return c.text('Unauthorized', 401);
+	const isDivisionDataAutomation = isDivisionDataAutomationRequest(c.req.header('Authorization') || '', c.env.DIVISION_DATA_API_KEY);
+	let actorId = DIVISION_DATA_ACTOR_ID;
+	if (!isDivisionDataAutomation) {
+		const { user } = await resolveUserFromVatsimOrApi(c);
+		if (!user) {
+			return c.text('Unauthorized', 401);
+		}
+		actorId = user.vatsim_id;
 	}
 
 	const points = ServicePool.getPoints(c.env);
 
 	const changeset = (await c.req.json()) as PointChangeset;
-	const newPoints = await points.applyChangeset(airportId, user.vatsim_id, changeset);
+	const newPoints = await points.applyChangeset(
+		airportId,
+		actorId,
+		changeset,
+		isDivisionDataAutomation ? { kind: 'division-data-automation' } : { kind: 'division-member' },
+	);
 	return c.json(newPoints, 201);
 });
 
@@ -3361,19 +3415,24 @@ const getStoredContributionGenerationResponse = async (c: Context): Promise<Resp
 			return c.json({ error: 'Generation not found or expired' }, 404);
 		case 'payload-not-found':
 			return c.json({ error: 'Generation payload not found' }, 404);
-		case 'ok':
+		case 'ok': {
 			c.header('X-Cache-Gen', 'TOKEN');
+			const isXPlane = result.supportsXml.trimStart().startsWith('{');
 			return c.json({
 				token: result.token,
 				icao: result.icao,
-				supportsXml: result.supportsXml,
+				simulator: result.simulator,
+				generationHash: result.generationHash,
+				supportsXml: isXPlane ? undefined : result.supportsXml,
+				removalsJson: isXPlane ? result.supportsXml : undefined,
 				barsXml: result.barsXml,
 				expiresAt: result.expiresAt,
 			});
+		}
 	}
 };
 
-const getContributionGenerationCacheKey = (token: string): string => `supports-gen:${token}`;
+const getContributionGenerationCacheKey = (token: string): string => `supports-gen:v2:${token}`;
 
 const getContributionGenerationExpiresAt = (): string =>
 	new Date(Date.now() + CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS * 1000).toISOString();
@@ -3412,10 +3471,10 @@ const cacheContributionGeneration = (c: Context, token: string, entry: Contribut
  * @openapi
  * /supports/generate:
  *   post:
- *     summary: Generate Light Supports and BARS XML
+ *     summary: Generate simulator removals and BARS XML
  *     tags:
  *       - Generation
- *     description: Upload raw XML and generate both light supports XML and processed BARS XML.
+ *     description: Upload a draft and generate processed BARS XML plus MSFS light-support XML or compact X-Plane removal JSON.
  *     parameters:
  *       - in: query
  *         name: token
@@ -3436,6 +3495,9 @@ const cacheContributionGeneration = (c: Context, token: string, entry: Contribut
  *                 format: binary
  *               icao:
  *                 type: string
+ *               simulator:
+ *                 type: string
+ *                 enum: [msfs2020, msfs2024, xplane]
  *     responses:
  *       200:
  *         description: Generated XML returned
@@ -3464,12 +3526,16 @@ app.post(
 			const formData = await c.req.formData();
 			const xmlFile = formData.get('xmlFile');
 			const icao = formData.get('icao')?.toString();
+			const requestedSimulator = formData.get('simulator')?.toString().trim().toLowerCase();
 
 			if (!xmlFile || !(xmlFile instanceof File)) {
 				return c.json({ error: 'XML file is required' }, 400);
 			}
 			if (!icao) {
 				return c.json({ error: 'ICAO code is required' }, 400);
+			}
+			if (requestedSimulator && !['msfs2020', 'msfs2024', 'xplane'].includes(requestedSimulator)) {
+				return c.json({ error: 'Invalid simulator' }, 400);
 			}
 
 			// Enforce XML content type or .xml extension for safety
@@ -3496,8 +3562,21 @@ app.post(
 				return c.json({ error: msg }, 400);
 			}
 
+			const embeddedXPlane = /<FSData\b[^>]*\bsimulator\s*=\s*["']xplane["']/i.test(sanitized);
+			const simulator = requestedSimulator || (embeddedXPlane ? 'xplane' : 'msfs2024');
+			if ((simulator === 'xplane') !== embeddedXPlane) {
+				return c.json({ error: 'Draft simulator metadata does not match the selected simulator' }, 400);
+			}
+
 			const icaoUpper = icao.trim().toUpperCase();
-			const contentToken = await deriveContributionGenerationTokenFromMsfsXml(sanitized, icaoUpper);
+			if (!ICAO_REGEX.test(icaoUpper)) {
+				return c.json({ error: 'ICAO code must be exactly 4 letters or digits' }, 400);
+			}
+			const simulatorTyped = simulator as Simulator;
+			const [contentToken, generationHash] = await Promise.all([
+				deriveContributionGenerationToken(sanitized, icaoUpper, simulatorTyped),
+				deriveContributionGenerationHash(sanitized),
+			]);
 
 			const cacheService = ServicePool.getCache(c.env);
 			const cacheKey = getContributionGenerationCacheKey(contentToken);
@@ -3510,8 +3589,11 @@ app.post(
 				return c.json({
 					token: contentToken,
 					icao: cachedEdge.icao,
+					simulator: cachedEdge.simulator,
+					generationHash: cachedEdge.generationHash,
 					expiresAt: cachedEdge.expiresAt,
-					supportsXml: cachedEdge.supportsXml,
+					supportsXml: simulator === 'xplane' ? undefined : cachedEdge.removalArtifact,
+					removalsJson: simulator === 'xplane' ? cachedEdge.removalArtifact : undefined,
 					barsXml: cachedEdge.barsXml,
 				});
 			}
@@ -3526,8 +3608,10 @@ app.post(
 					storedGen.token,
 					{
 						icao: storedGen.icao,
+						simulator: storedGen.simulator ?? simulatorTyped,
+						generationHash: storedGen.generationHash ?? generationHash,
 						expiresAt: storedGen.expiresAt,
-						supportsXml: storedGen.supportsXml,
+						removalArtifact: storedGen.supportsXml,
 						barsXml: storedGen.barsXml,
 					},
 					cacheTtlSeconds,
@@ -3535,8 +3619,11 @@ app.post(
 				return c.json({
 					token: storedGen.token,
 					icao: storedGen.icao,
+					simulator: storedGen.simulator ?? simulatorTyped,
+					generationHash: storedGen.generationHash ?? generationHash,
 					expiresAt: storedGen.expiresAt,
-					supportsXml: storedGen.supportsXml,
+					supportsXml: simulator === 'xplane' ? undefined : storedGen.supportsXml,
+					removalsJson: simulator === 'xplane' ? storedGen.supportsXml : undefined,
 					barsXml: storedGen.barsXml,
 				});
 			}
@@ -3548,9 +3635,12 @@ app.post(
 			let supportsDuration = 0;
 			let barsDuration = 0;
 
-			const supportsPromise = (async () => {
+			const removalPromise = (async () => {
 				const start = performance.now();
-				const result = await supportService.generateLightSupportsXML(sanitized, icaoUpper);
+				const result =
+					simulator === 'xplane'
+						? generateXPlaneRemovalsJson(sanitized, icaoUpper)
+						: await supportService.generateLightSupportsXML(sanitized, icaoUpper);
 				supportsDuration = performance.now() - start;
 				return result;
 			})();
@@ -3562,7 +3652,7 @@ app.post(
 				return result;
 			})();
 
-			const [supportsXml, barsXml] = await Promise.all([supportsPromise, barsPromise]);
+			const [removalArtifact, barsXml] = await Promise.all([removalPromise, barsPromise]);
 			const totalDuration = performance.now() - totalStart;
 
 			const serverTiming: string[] = [];
@@ -3571,15 +3661,25 @@ app.post(
 			serverTiming.push(`total;dur=${totalDuration.toFixed(2)}`);
 			c.header('Server-Timing', serverTiming.join(', '));
 
-			await contributionsService.storeGeneration(icaoUpper, supportsXml, barsXml, contentToken);
+			await contributionsService.storeGeneration(icaoUpper, removalArtifact, barsXml, contentToken, simulatorTyped, generationHash);
 			const expiresAt = getContributionGenerationExpiresAt();
-			cacheContributionGeneration(c, contentToken, { icao: icaoUpper, expiresAt, supportsXml, barsXml });
+			cacheContributionGeneration(c, contentToken, {
+				icao: icaoUpper,
+				simulator: simulatorTyped,
+				generationHash,
+				expiresAt,
+				removalArtifact,
+				barsXml,
+			});
 			c.header('X-Cache-Gen', 'MISS');
 			return c.json({
 				token: contentToken,
 				icao: icaoUpper,
+				simulator: simulatorTyped,
+				generationHash,
 				expiresAt,
-				supportsXml,
+				supportsXml: simulator === 'xplane' ? undefined : removalArtifact,
+				removalsJson: simulator === 'xplane' ? removalArtifact : undefined,
 				barsXml,
 			});
 		} catch (error) {
@@ -3596,6 +3696,9 @@ app.post(
 				'no bars points found within',
 				'airport with icao',
 				'invalid xml',
+				'invalid x-plane',
+				'x-plane draft',
+				'x-plane light selector',
 			];
 			const matchesUserError = userFacingPatterns.some((pattern) => normalized.includes(pattern));
 			if (matchesUserError) {
@@ -4151,6 +4254,12 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *           type: boolean
  *         description: When true, returns only contribution id, airport ICAO, package name, and simulator.
  *       - in: query
+ *         name: projection
+ *         schema:
+ *           type: string
+ *           enum: [metadata]
+ *         description: Bounded contribution metadata including artifact keys, without submitted XML or generation proof.
+ *       - in: query
  *         name: summary
  *         schema:
  *           type: boolean
@@ -4180,6 +4289,7 @@ contributionsApp.get(
 		const airportIcao = c.req.query('airport') || undefined;
 		const requestedUserId = c.req.query('user') || undefined;
 		const simple = (c.req.query('simple') || 'false').toLowerCase() === 'true';
+		const projection = c.req.query('projection')?.trim().toLowerCase();
 		const authz = c.req.header('Authorization') || '';
 		let authenticatedUserId: string | undefined;
 
@@ -4201,6 +4311,12 @@ contributionsApp.get(
 		const userId = authenticatedUserId ?? requestedUserId;
 		const includeSummary = authenticatedUserId !== undefined || (c.req.query('summary') || 'false').toLowerCase() === 'true';
 
+		if (projection !== undefined && projection !== 'metadata') {
+			return c.json({ error: 'projection must be metadata when provided' }, 400);
+		}
+		if (simple && projection) {
+			return c.json({ error: 'simple cannot be combined with projection' }, 400);
+		}
 		if (simple && includeSummary) {
 			return c.json({ error: 'summary cannot be combined with simple view' }, 400);
 		}
@@ -4218,6 +4334,15 @@ contributionsApp.get(
 			});
 		}
 
+		if (projection === 'metadata') {
+			const result = await contributions.listContributionMetadata({ status, airportIcao, userId });
+			if (!includeSummary) {
+				return c.json({ ...result, projection: 'metadata' as const });
+			}
+			const summary = summarizeContributionStatuses(result.contributions, result.total);
+			return c.json({ ...result, projection: 'metadata' as const, summary });
+		}
+
 		const result = await contributions.listContributions({
 			status,
 			airportIcao,
@@ -4228,28 +4353,7 @@ contributionsApp.get(
 			return c.json(result);
 		}
 
-		const summary = result.contributions.reduce(
-			(acc, item) => {
-				switch (item.status) {
-					case 'approved':
-						acc.approved += 1;
-						break;
-					case 'pending':
-						acc.pending += 1;
-						break;
-					case 'rejected':
-						acc.rejected += 1;
-						break;
-					case 'outdated':
-						acc.outdated += 1;
-						break;
-					default:
-						break;
-				}
-				return acc;
-			},
-			{ total: result.total, approved: 0, pending: 0, rejected: 0, outdated: 0 },
-		);
+		const summary = summarizeContributionStatuses(result.contributions, result.total);
 
 		return c.json({ ...result, summary });
 	},
@@ -4322,7 +4426,7 @@ contributionsApp.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [airportIcao, packageName, submittedXml, simulator]
+ *             required: [airportIcao, packageName, submittedXml, simulator, generationToken, generationHash]
  *             properties:
  *               airportIcao:
  *                 type: string
@@ -4335,8 +4439,14 @@ contributionsApp.get(
  *               notes: { type: string, maxLength: 1000 }
  *               simulator:
  *                 type: string
- *                 enum: [msfs2020, msfs2024]
+ *                 enum: [msfs2020, msfs2024, xplane]
  *                 description: Target flight simulator for this contribution
+ *               generationToken:
+ *                 type: string
+ *                 description: Token returned by testing this exact normalized draft through /supports/generate.
+ *               generationHash:
+ *                 type: string
+ *                 description: Normalized draft hash returned by /supports/generate.
  *     responses:
  *       201:
  *         description: Contribution created
@@ -4369,6 +4479,8 @@ contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 			submittedXml: payload.submittedXml,
 			notes: payload.notes,
 			simulator: payload.simulator,
+			generationToken: payload.generationToken,
+			generationHash: payload.generationHash,
 		});
 
 		return c.json(result, 201);
@@ -4613,7 +4725,7 @@ const cdnApp = new Hono<{ Bindings: Env }>();
  *         required: false
  *         schema:
  *           type: string
- *           enum: [msfs2020, msfs2024]
+ *           enum: [msfs2020, msfs2024, xplane]
  *         description: Filter by simulator (optional - returns latest across all simulators if not specified)
  *     responses:
  *       200:
@@ -4624,7 +4736,7 @@ const cdnApp = new Hono<{ Bindings: Env }>();
 app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const pkg = c.req.param('package');
-	const simulatorParam = c.req.query('simulator') as 'msfs2020' | 'msfs2024' | undefined;
+	const simulatorParam = c.req.query('simulator') as Simulator | undefined;
 	const contributions = ServicePool.getContributions(c.env);
 	const storage = ServicePool.getStorage(c.env);
 
@@ -4633,8 +4745,8 @@ app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900
 		return c.text('No approved map found', 404);
 	}
 
-	const safePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
-	const fileKey = `Maps/${icao}_${safePackageName}_${latest.simulator}_bars.xml`;
+	const legacySafePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
+	const fileKey = latest.barsArtifactKey ?? `Maps/${icao}_${legacySafePackageName}_${latest.simulator}_bars.xml`;
 
 	const stored = await storage.getFile(fileKey);
 	if (!stored) {
@@ -5012,14 +5124,25 @@ const euroscopeApp = new Hono<{
 	Variables: {
 		vatsimUser?: VatsimUser;
 		user?: UserRecord;
+		actorId?: string;
+		divisionDataAutomation?: boolean;
 	};
 }>();
 
 euroscopeApp.use('*', async (c, next) => {
+	if (isDivisionDataAutomationRequest(c.req.header('Authorization') || '', c.env.DIVISION_DATA_API_KEY)) {
+		c.set('actorId', DIVISION_DATA_ACTOR_ID);
+		c.set('divisionDataAutomation', true);
+		await next();
+		return;
+	}
+
 	const { user, vatsimUser } = await resolveUserFromVatsimOrApi(c);
 	if (!user) return c.text('Unauthorized', 401);
 	c.set('vatsimUser', vatsimUser!);
 	c.set('user', user);
+	c.set('actorId', vatsimUser!.id.toString());
+	c.set('divisionDataAutomation', false);
 	await next();
 });
 
@@ -5052,7 +5175,8 @@ euroscopeApp.use('*', async (c, next) => {
  *         description: File uploaded
  */
 euroscopeApp.post('/upload', async (c) => {
-	const vatsimUser = c.get('vatsimUser')!;
+	const actorId = c.get('actorId')!;
+	const isDivisionDataAutomation = c.get('divisionDataAutomation') === true;
 
 	try {
 		const formData = await c.req.formData();
@@ -5100,7 +5224,7 @@ euroscopeApp.post('/upload', async (c) => {
 
 		// Check if user has access to upload files for this ICAO
 		const divisions = ServicePool.getDivisions(c.env);
-		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+		const hasAccess = isDivisionDataAutomation || (await divisions.userHasAirportAccess(actorId, icao));
 
 		if (!hasAccess) {
 			return c.json(
@@ -5132,7 +5256,7 @@ euroscopeApp.post('/upload', async (c) => {
 
 		// Stream directly to R2 instead of duplicating the entire upload in memory.
 		const result = await storage.uploadFile(fileKey, file.stream(), file.type, {
-			uploadedBy: vatsimUser.id.toString(),
+			uploadedBy: actorId,
 			icao: icao,
 			fileName: file.name,
 			size: file.size.toString(),
@@ -5190,7 +5314,8 @@ euroscopeApp.post('/upload', async (c) => {
 euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const filename = c.req.param('filename');
-	const vatsimUser = c.get('vatsimUser')!;
+	const actorId = c.get('actorId')!;
+	const isDivisionDataAutomation = c.get('divisionDataAutomation') === true;
 
 	// Validate ICAO format
 	if (!ICAO_REGEX.test(icao)) {
@@ -5205,7 +5330,7 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	try {
 		// Check if user has access to delete files for this ICAO
 		const divisions = ServicePool.getDivisions(c.env);
-		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+		const hasAccess = isDivisionDataAutomation || (await divisions.userHasAirportAccess(actorId, icao));
 
 		if (!hasAccess) {
 			return c.json(
@@ -5269,7 +5394,8 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
  */
 euroscopeApp.get('/:icao/editable', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
-	const vatsimUser = c.get('vatsimUser')!;
+	const actorId = c.get('actorId')!;
+	const isDivisionDataAutomation = c.get('divisionDataAutomation') === true;
 
 	// Validate ICAO format
 	if (!ICAO_REGEX.test(icao)) {
@@ -5282,9 +5408,17 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 	}
 
 	try {
+		if (isDivisionDataAutomation) {
+			return c.json({
+				icao: icao,
+				editable: true,
+				role: 'automation',
+			});
+		}
+
 		// Check if user has access to edit files for this ICAO
 		const divisions = ServicePool.getDivisions(c.env);
-		const userRole = await divisions.getUserRoleForAirport(vatsimUser.id.toString(), icao);
+		const userRole = await divisions.getUserRoleForAirport(actorId, icao);
 
 		return c.json({
 			icao: icao,
@@ -5836,11 +5970,11 @@ app.post('/download', async (c) => {
  * /staff/bars-packages/upload:
  *   post:
  *     x-hidden: true
- *     summary: Upload BARS installer packages (models/removals)
+ *     summary: Upload BARS installer packages
  *     description: >-
- *       Staff-only endpoint to upload the two MSFS data packages used by the installer. Accepts a multipart form
- *       with a single file and a `type` field designating which package is being uploaded. The file is stored in R2
- *       under a fixed key and previous version overwritten. SHA-256 is computed server-side and stored in metadata.
+ *       Staff-only endpoint to upload the data packages used by the installer. MSFS packages overwrite fixed R2 keys.
+ *       X-Plane bridge packages require a semantic `version`, are stored under versioned keys, and advance a latest
+ *       pointer only after the archive upload succeeds. SHA-256 is computed server-side and stored in metadata.
  *     tags:
  *       - Staff
  *       - Data
@@ -5860,7 +5994,10 @@ app.post('/download', async (c) => {
  *                 format: binary
  *               type:
  *                 type: string
- *                 enum: [models, models-2020, removals-2020, removals-2024]
+ *                 enum: [models, models-2020, removals-2020, removals-2024, xplane-bridge]
+ *               version:
+ *                 type: string
+ *                 description: Required semantic version when type is xplane-bridge
  *     responses:
  *       201:
  *         description: Package uploaded successfully
@@ -5908,8 +6045,16 @@ app.post('/staff/bars-packages/upload', async (c) => {
 	}
 	const file = form.get('file');
 	const type = form.get('type')?.toString();
+	const version = form.get('version')?.toString().trim();
 	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
-	if (!type || !['models', 'models-2020', 'removals-2020', 'removals-2024'].includes(type)) return c.json({ error: 'invalid type' }, 400);
+	if (!type || !['models', 'models-2020', 'removals-2020', 'removals-2024', 'xplane-bridge'].includes(type))
+		return c.json({ error: 'invalid type' }, 400);
+	const isXPlaneBridge = type === 'xplane-bridge';
+	const semverPattern =
+		/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+	if (isXPlaneBridge && (!version || !semverPattern.test(version))) {
+		return c.json({ error: 'A valid semantic version is required for xplane-bridge' }, 400);
+	}
 	// Enforce .zip
 	const lowerName = file.name.toLowerCase();
 	if (!lowerName.endsWith('.zip')) return c.json({ error: 'file must be a .zip archive' }, 400);
@@ -5928,19 +6073,50 @@ app.post('/staff/bars-packages/upload', async (c) => {
 		if (type === 'models') key = 'packages/bars-models-2024.zip';
 		else if (type === 'models-2020') key = 'packages/bars-models-2020.zip';
 		else if (type === 'removals-2020') key = 'packages/bars-removals-2020.zip';
-		else key = 'packages/bars-removals-2024.zip';
-		const uploadRes = await storage.uploadFile(key, bytes, 'application/zip', {
-			uploadedBy: user.vatsim_id,
-			type,
-			size: file.size.toString(),
-			sha256,
-		});
+		else if (type === 'removals-2024') key = 'packages/bars-removals-2024.zip';
+		else key = `packages/xplane-bridge/${version}/BARSXPlaneBridge.zip`;
+		if (isXPlaneBridge && (await storage.headFile(key))) {
+			return c.json({ error: `X-Plane bridge ${version} has already been uploaded` }, 409);
+		}
+		const uploadedAt = new Date().toISOString();
+		const uploadRes = await storage.uploadFile(
+			key,
+			bytes,
+			'application/zip',
+			{
+				uploadedBy: user.vatsim_id,
+				type,
+				size: file.size.toString(),
+				sha256,
+				...(isXPlaneBridge ? { version: version!, protocol: 'BARS.XPlaneBridge.v1' } : {}),
+			},
+			isXPlaneBridge ? { onlyIfAbsent: true } : undefined,
+		);
+		if (isXPlaneBridge) {
+			await storage.uploadFile(
+				'packages/xplane-bridge/latest.json',
+				JSON.stringify({
+					schema: 'bars-xplane-bridge-package/v1',
+					type,
+					version,
+					protocol: 'BARS.XPlaneBridge.v1',
+					key: uploadRes.key,
+					size: file.size,
+					sha256,
+					etag: uploadRes.etag,
+					uploaded: uploadedAt,
+				}),
+				'application/json',
+				{ type, version: version!, protocol: 'BARS.XPlaneBridge.v1' },
+			);
+		}
 		const url = new URL(`https://dev-cdn.stopbars.com/${uploadRes.key}`, c.req.url).toString();
 		return c.json(
 			{
 				success: true,
 				package: {
 					type,
+					...(isXPlaneBridge ? { version, protocol: 'BARS.XPlaneBridge.v1' } : {}),
 					key: uploadRes.key,
 					size: file.size,
 					sha256,
@@ -5951,6 +6127,9 @@ app.post('/staff/bars-packages/upload', async (c) => {
 			201,
 		);
 	} catch (err) {
+		if (isXPlaneBridge && err instanceof Error && err.message === 'Storage object already exists') {
+			return c.json({ error: `X-Plane bridge ${version} has already been uploaded` }, 409);
+		}
 		console.error('BARS package upload error', err);
 		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);
 	}
@@ -5961,7 +6140,7 @@ app.post('/staff/bars-packages/upload', async (c) => {
  * /bars-packages:
  *   get:
  *     summary: List current BARS data packages
- *     description: Public metadata for installer MSFS data packages (models & removals). Returns size, hash and timestamps.
+ *     description: Public metadata for installer packages. Returns version, protocol, size, hash and timestamps where applicable.
  *     tags:
  *       - Data
  *     responses:
@@ -6001,7 +6180,45 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
 				}
 			}),
 		);
-		return c.json({ packages: results.filter(Boolean) });
+		let xplaneBridge: Record<string, unknown> | null = null;
+		try {
+			const pointerResponse = await storage.getFile('packages/xplane-bridge/latest.json');
+			if (pointerResponse) {
+				const pointer = (await pointerResponse.json()) as Record<string, unknown>;
+				if (
+					pointer.schema === 'bars-xplane-bridge-package/v1' &&
+					pointer.type === 'xplane-bridge' &&
+					typeof pointer.version === 'string' &&
+					pointer.protocol === 'BARS.XPlaneBridge.v1' &&
+					typeof pointer.key === 'string' &&
+					pointer.key === `packages/xplane-bridge/${pointer.version}/BARSXPlaneBridge.zip` &&
+					typeof pointer.size === 'number' &&
+					Number.isSafeInteger(pointer.size) &&
+					pointer.size > 0 &&
+					typeof pointer.sha256 === 'string' &&
+					/^[a-f0-9]{64}$/.test(pointer.sha256) &&
+					typeof pointer.uploaded === 'string'
+				) {
+					const archive = await storage.headFile(pointer.key);
+					if (
+						archive &&
+						archive.size === pointer.size &&
+						archive.customMetadata?.sha256 === pointer.sha256 &&
+						archive.customMetadata?.version === pointer.version &&
+						archive.customMetadata?.protocol === pointer.protocol
+					) {
+						xplaneBridge = {
+							...pointer,
+							etag: archive.etag,
+							url: new URL(`https://dev-cdn.stopbars.com/${pointer.key}`, c.req.url).toString(),
+						};
+					}
+				}
+			}
+		} catch (error) {
+			console.error('X-Plane bridge package pointer is invalid', error);
+		}
+		return c.json({ packages: [...results.filter(Boolean), ...(xplaneBridge ? [xplaneBridge] : [])] });
 	} catch (err) {
 		console.error('BARS package list error', err);
 		return c.json({ error: 'Failed to list packages' }, 500);

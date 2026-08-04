@@ -27,6 +27,7 @@ export class StorageService {
 		data: ReadableStream | ArrayBuffer | string,
 		contentType: string,
 		metadata: Record<string, string> = {},
+		options: { onlyIfAbsent?: boolean } = {},
 	): Promise<{ key: string; etag: string }> {
 		// Normalize key to avoid any issues
 		const normalizedKey = this.normalizeKey(key);
@@ -39,6 +40,7 @@ export class StorageService {
 
 		// Upload to R2
 		const uploaded = await this.bucket.put(normalizedKey, data, {
+			...(options.onlyIfAbsent ? { onlyIf: { etagDoesNotMatch: '*' } } : {}),
 			httpMetadata: {
 				contentType,
 				cacheControl: `public, max-age=${this.MAX_AGE_DEFAULT}`,
@@ -47,6 +49,7 @@ export class StorageService {
 		});
 
 		if (!uploaded) {
+			if (options.onlyIfAbsent) throw new Error('Storage object already exists');
 			throw new Error('Failed to upload file to storage');
 		}
 
@@ -87,8 +90,7 @@ export class StorageService {
 			const rangeOffset = 'offset' in object.range && typeof object.range.offset === 'number' ? object.range.offset : 0;
 			const offset = suffix === undefined ? rangeOffset : Math.max(0, object.size - suffix);
 			const rangeLength = 'length' in object.range && typeof object.range.length === 'number' ? object.range.length : undefined;
-			const length =
-				suffix === undefined ? (rangeLength ?? Math.max(0, object.size - offset)) : Math.min(object.size, suffix);
+			const length = suffix === undefined ? (rangeLength ?? Math.max(0, object.size - offset)) : Math.min(object.size, suffix);
 			headers.set('Content-Range', `bytes ${offset}-${offset + length - 1}/${object.size}`);
 			headers.set('Content-Length', String(length));
 			status = 206;
