@@ -225,7 +225,7 @@ export class AuthService {
 
 	async getUserByApiKey(apiKey: string): Promise<UserRecord | null> {
 		return this.withDbSession(async (dbSession) => {
-			const result = await dbSession.executeRead<UserRecord>(
+			const result = await dbSession.executeLatest<UserRecord>(
 				`SELECT u.*
 				 FROM users u
 				 LEFT JOIN bans b ON b.vatsim_id = u.vatsim_id

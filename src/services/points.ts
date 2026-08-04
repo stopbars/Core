@@ -23,6 +23,8 @@ type PointRow = {
 	created_by: string;
 };
 
+export type PointChangesetAuthorization = { kind: 'division-member' } | { kind: 'division-data-automation' };
+
 export class PointsService {
 	private dbSession: DatabaseSessionService;
 
@@ -247,10 +249,17 @@ export class PointsService {
 		}
 	}
 
-	async applyChangeset(airportId: string, userId: string, changeset: PointChangeset): Promise<Point[]> {
-		const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, airportId);
-		if (!hasDivisionAccess) {
-			throw new HttpError(403, 'Forbidden: You do not have permission to apply this changeset');
+	async applyChangeset(
+		airportId: string,
+		userId: string,
+		changeset: PointChangeset,
+		authorization: PointChangesetAuthorization = { kind: 'division-member' },
+	): Promise<Point[]> {
+		if (authorization.kind === 'division-member') {
+			const hasDivisionAccess = await this.divisions.userHasAirportAccess(userId, airportId);
+			if (!hasDivisionAccess) {
+				throw new HttpError(403, 'Forbidden: You do not have permission to apply this changeset');
+			}
 		}
 
 		const modifyEntries = Object.entries(changeset.modify ?? {});
@@ -400,6 +409,7 @@ export class PointsService {
 			this.posthog?.track('Points Changeset Applied', {
 				airportId,
 				userId,
+				authorizationKind: authorization.kind,
 				created: createdPoints.length,
 				modified: modifyContexts.length,
 				deleted: deleteIds.length,

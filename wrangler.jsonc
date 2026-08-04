@@ -29,6 +29,9 @@
 		"VATSIM_CLIENT_ID": "1562", // Change this for local testing
 		"POSTHOG_HOST": "https://a.stopbars.com",
 	},
+	"secrets": {
+		"required": ["AIRPORTDB_API_KEY", "DIVISION_DATA_API_KEY", "GITHUB_TOKEN", "POSTHOG_API_KEY", "VATSIM_CLIENT_SECRET"],
+	},
 	"d1_databases": [
 		{
 			"binding": "DB",
