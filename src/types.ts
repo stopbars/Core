@@ -115,6 +115,11 @@ export interface AirportState {
 	controllers: Set<string>;
 }
 
+export interface OnlinePilot {
+	cid: string;
+	callsign: string;
+}
+
 export interface Packet {
 	type:
 	| 'STATE_UPDATE'
@@ -129,6 +134,8 @@ export interface Packet {
 	| 'CLOSE'
 	| 'GET_STATE'
 	| 'STATE_SNAPSHOT'
+	| 'GET_ONLINE_PILOTS'
+	| 'ONLINE_PILOTS'
 	| 'STOPBAR_CROSSING';
 	airport?: string;
 	data?: {
@@ -140,6 +147,7 @@ export interface Packet {
 		objects?: AirportObject[];
 		controllerId?: string;
 		controllers?: string[];
+		pilots?: OnlinePilot[];
 		updates?: MultiStateUpdateItem[]; // Batched state updates
 		message?: string; // For error messages
 		connectionType?: ClientType; // Add connection type to data

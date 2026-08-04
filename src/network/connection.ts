@@ -1,4 +1,4 @@
-import { ClientType, Packet, AirportState, AirportObject, MultiStateUpdateItem, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT } from '../types';
+import { ClientType, Packet, AirportState, AirportObject, MultiStateUpdateItem, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, OnlinePilot } from '../types';
 import { AuthService } from '../services/auth';
 import { VatsimService } from '../services/vatsim';
 import { PointsService } from '../services/points';
@@ -35,6 +35,8 @@ const VALID_PACKET_TYPES = new Set<Packet['type']>([
 	'ERROR',
 	'GET_STATE',
 	'STATE_SNAPSHOT',
+	'GET_ONLINE_PILOTS',
+	'ONLINE_PILOTS',
 	'STOPBAR_CROSSING',
 ]);
 const createNullObject = (): Record<string, unknown> => Object.create(null) as Record<string, unknown>;
@@ -42,6 +44,7 @@ const isDisallowedKey = (key: string): boolean => key === '__proto__' || key ===
 
 type SocketInfo = {
 	controllerId: string;
+	callsign: string;
 	type: ClientType;
 	airport: string;
 	lastHeartbeat: number;
@@ -228,7 +231,7 @@ export class Connection {
 	private dirtySharedStates = new Set<string>();
 	private socketQueues = new Map<WebSocket, Promise<void>>();
 	private controllerSockets = new Map<string, Map<string, Set<WebSocket>>>();
-	private pilotConnectionCounts = new Map<string, Map<string, number>>();
+	private pilotConnectionCounts = new Map<string, Map<string, { count: number; callsign: string }>>();
 	private pendingConnectionStatusChecks = new Map<string, Promise<ConnectionStatus>>();
 	private offlineStateCache = new Map<
 		string,
@@ -260,9 +263,10 @@ export class Connection {
 		});
 	}
 
-	private registerSocket(socket: WebSocket, info: { controllerId: string; type: ClientType; airport: string; lastHeartbeat: number }) {
+	private registerSocket(socket: WebSocket, info: { controllerId: string; callsign?: string; type: ClientType; airport: string; lastHeartbeat: number }) {
 		const socketInfo: SocketInfo = {
 			...info,
+			callsign: info.callsign ?? info.controllerId,
 			lastStatusCheck: 0,
 			statusCheckInFlight: false,
 			consecutiveVatsimFailures: 0,
@@ -274,7 +278,7 @@ export class Connection {
 		if (socketInfo.type === 'controller') {
 			this.addControllerSocket(socket, socketInfo);
 		} else if (socketInfo.type === 'pilot') {
-			this.adjustPilotConnectionCount(socketInfo.airport, socketInfo.controllerId, 1);
+			this.adjustPilotConnectionCount(socketInfo.airport, socketInfo.controllerId, socketInfo.callsign, 1);
 		}
 	}
 
@@ -290,7 +294,7 @@ export class Connection {
 		if (info.type === 'controller') {
 			this.removeControllerSocket(socket, info);
 		} else if (info.type === 'pilot') {
-			this.adjustPilotConnectionCount(info.airport, info.controllerId, -1);
+			this.adjustPilotConnectionCount(info.airport, info.controllerId, info.callsign, -1);
 		}
 		if (this.sockets.size === 0) {
 			this.lastKnownAirport = 'unknown';
@@ -374,7 +378,7 @@ export class Connection {
 		return airportControllers ? Array.from(airportControllers.keys()) : [];
 	}
 
-	private adjustPilotConnectionCount(airport: string, pilotId: string, delta: number) {
+	private adjustPilotConnectionCount(airport: string, pilotId: string, callsign: string, delta: number) {
 		let airportPilots = this.pilotConnectionCounts.get(airport);
 		if (!airportPilots) {
 			if (delta <= 0) return;
@@ -382,8 +386,9 @@ export class Connection {
 			this.pilotConnectionCounts.set(airport, airportPilots);
 		}
 
-		const nextCount = (airportPilots.get(pilotId) ?? 0) + delta;
-		if (nextCount > 0) airportPilots.set(pilotId, nextCount);
+		const current = airportPilots.get(pilotId);
+		const nextCount = (current?.count ?? 0) + delta;
+		if (nextCount > 0) airportPilots.set(pilotId, { count: nextCount, callsign: delta > 0 ? callsign : (current?.callsign ?? callsign) });
 		else airportPilots.delete(pilotId);
 		if (airportPilots.size === 0) this.pilotConnectionCounts.delete(airport);
 	}
@@ -391,6 +396,30 @@ export class Connection {
 	private getLivePilotIds(airport: string): string[] {
 		const airportPilots = this.pilotConnectionCounts.get(airport);
 		return airportPilots ? Array.from(airportPilots.keys()) : [];
+	}
+
+	private getLivePilots(airport: string): OnlinePilot[] {
+		const airportPilots = this.pilotConnectionCounts.get(airport);
+		return airportPilots
+			? Array.from(airportPilots, ([cid, pilot]) => ({ cid, callsign: pilot.callsign }))
+			: [];
+	}
+
+	private updatePilotCallsign(airport: string, pilotId: string, callsign: string) {
+		const pilot = this.pilotConnectionCounts.get(airport)?.get(pilotId);
+		if (pilot) pilot.callsign = callsign;
+	}
+
+	private createOnlinePilotsPacket(airport: string, requestedAt: number, now = Date.now()): Packet {
+		return {
+			type: 'ONLINE_PILOTS',
+			airport,
+			data: {
+				pilots: this.getLivePilots(airport),
+				requestedAt,
+			},
+			timestamp: now,
+		};
 	}
 
 	private emitAnalytics(event: string, properties: Record<string, unknown>) {
@@ -957,6 +986,10 @@ export class Connection {
 			}
 
 			socketInfo.consecutiveVatsimFailures = 0;
+			if (socketInfo.type === 'pilot' && status.callsign !== socketInfo.callsign) {
+				socketInfo.callsign = status.callsign;
+				this.updatePilotCallsign(socketInfo.airport, socketInfo.controllerId, status.callsign);
+			}
 			const isController = this.vatsim.isController(status);
 			const isPilot = this.vatsim.isPilot(status);
 			const isObserver = this.vatsim.isObserver(status);
@@ -1157,6 +1190,7 @@ export class Connection {
 		// Initialize socket info with the airport and heartbeat
 		this.registerSocket(server, {
 			controllerId: user.vatsim_id,
+			callsign: status.callsign,
 			type: clientType,
 			airport: airport,
 			lastHeartbeat: Date.now(),
@@ -1359,6 +1393,15 @@ export class Connection {
 									timestamp: Date.now(),
 								};
 								this.sendPacket(server, snapshot, 'state_snapshot');
+								break;
+							}
+
+							case 'GET_ONLINE_PILOTS': {
+								this.sendPacket(
+									server,
+									this.createOnlinePilotsPacket(packetAirport, (packet as Packet).timestamp ?? now, now),
+									'online_pilots',
+								);
 								break;
 							}
 
