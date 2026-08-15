@@ -20,7 +20,7 @@ export abstract class BarsTypeHandler {
 	protected addHeadingToPoints(points: GeoPoint[], headingAdjustment: number = 0): BarsLightPoint[] {
 		if (points.length < 2) return [];
 
-		const segmentHeadings: Array<number | null> = new Array(points.length - 1).fill(null);
+		const segmentHeadings: Array<number | null> = Array.from({ length: points.length - 1 }, () => null);
 		for (let i = 0; i < points.length - 1; i++) {
 			const heading = calculateHeading(points[i], points[i + 1]);
 			segmentHeadings[i] = Number.isFinite(heading) ? heading : null;
@@ -125,7 +125,6 @@ export class StopbarHandler extends BarsTypeHandler {
 			};
 		});
 
-		// Add properties to base stopbar lights
 		const lightsWithProperties: BarsLightPoint[] = lightsWithHeading.map(
 			(light): BarsLightPoint => ({
 				...light,
@@ -177,7 +176,6 @@ export class StopbarHandler extends BarsTypeHandler {
 		const IHP_LIGHT_SPACING = 1.4; // meters between IHP lights
 		const IHP_LIGHT_OFFSET = 0.4;
 
-		// Find the center point of the stopbar
 		const centerIndex = Math.floor(points.length / 2);
 		const centerPoint = points[centerIndex];
 
@@ -196,11 +194,9 @@ export class StopbarHandler extends BarsTypeHandler {
 		// Either 90 degrees clockwise or 90 degrees counterclockwise from stopbar direction
 		const offsetDirection = placeOnRightSide ? (stopbarDirection + 90) % 360 : (stopbarDirection + 270) % 360;
 
-		// Create the center IHP light
 		// It's offset 0.7m from the center of the stopbar in the offset direction
 		const centerIhpPoint = calculateDestinationPoint(centerPoint, IHP_LIGHT_OFFSET, offsetDirection);
 
-		// Create left and right IHP lights
 		// They are positioned ALONG THE STOPBAR DIRECTION (parallel to it)
 		// Left IHP light (1.5m along stopbar direction)
 		const leftIhpPoint = calculateDestinationPoint(centerIhpPoint, IHP_LIGHT_SPACING, stopbarDirection);
@@ -208,7 +204,6 @@ export class StopbarHandler extends BarsTypeHandler {
 		// Right IHP light (1.5m in opposite direction along stopbar)
 		const rightIhpPoint = calculateDestinationPoint(centerIhpPoint, IHP_LIGHT_SPACING, (stopbarDirection + 180) % 360);
 
-		// Create the three IHP lights with inherited heading from stopbar
 		[leftIhpPoint, centerIhpPoint, rightIhpPoint].forEach((point) => {
 			ihpLights.push({
 				...point,
@@ -234,7 +229,6 @@ export class StopbarHandler extends BarsTypeHandler {
 
 		const elevatedLights: BarsLightPoint[] = [];
 
-		// Get the first and last lights with their headings already calculated
 		const firstLight = lightsWithHeading[0];
 		const lastLight = lightsWithHeading[lightsWithHeading.length - 1];
 
@@ -270,7 +264,6 @@ export class StopbarHandler extends BarsTypeHandler {
 		const firstElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE) % 360;
 		const lastElevatedHeading = (baseLineHeading - ELEVATED_LIGHT_INWARD_ANGLE + 90) % 360;
 
-		// Add the elevated lights with correct positions and inward headings
 		elevatedLights.push({
 			...startInwardPoint,
 			heading: firstElevatedHeading,
@@ -548,7 +541,7 @@ export function deduplicateTaxiwayPoints(objects: ProcessedBarsObject[]): Proces
 	const pointToGroup = new Map<BarsLightPoint, MergeGroup>();
 
 	const toCellKey = (x: number, y: number): string => `${x}:${y}`;
-	const toMeters = (point: BarsLightPoint): { x: number; y: number } => {
+	const toMeters = (point: BarsLightPoint) => {
 		const latRadians = (point.lat * Math.PI) / 180;
 		const lonScale = Math.max(Math.cos(latRadians), 0.000001) * METERS_PER_DEGREE_LAT;
 		return {

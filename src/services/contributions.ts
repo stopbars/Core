@@ -306,11 +306,11 @@ export class ContributionService {
 		try {
 			let expiredKeys: string[] = [];
 			try {
-				const [expired] = await session.executeBatch([
+				const [expired] = await session.executeBatch<Pick<StoredContributionGenerationRow, 'supports_key' | 'bars_key'>>([
 					{ query: "SELECT supports_key, bars_key FROM contribution_generations WHERE expires_at <= datetime('now')" },
 					{ query: "DELETE FROM contribution_generations WHERE expires_at <= datetime('now')" },
 				]);
-				expiredKeys = (expired.results as Array<Pick<StoredContributionGenerationRow, 'supports_key' | 'bars_key'>>).flatMap(
+				expiredKeys = (expired.results ?? []).flatMap(
 					(row) => [row.supports_key, row.bars_key].filter((key): key is string => Boolean(key)),
 				);
 			} catch (error) {
@@ -319,11 +319,11 @@ export class ContributionService {
 					throw error;
 				}
 
-				const [expired] = await session.executeBatch([
+				const [expired] = await session.executeBatch<Pick<StoredContributionGenerationRow, 'supports_xml' | 'bars_xml'>>([
 					{ query: "SELECT supports_xml, bars_xml FROM contribution_generations WHERE expires_at <= datetime('now')" },
 					{ query: "DELETE FROM contribution_generations WHERE expires_at <= datetime('now')" },
 				]);
-				expiredKeys = (expired.results as Array<Pick<StoredContributionGenerationRow, 'supports_xml' | 'bars_xml'>>).flatMap(
+				expiredKeys = (expired.results ?? []).flatMap(
 					(row) => [row.supports_xml, row.bars_xml].filter((key): key is string => Boolean(key)),
 				);
 			}
@@ -354,7 +354,7 @@ export class ContributionService {
 
 		const session = DatabaseContextFactory.createSessionService(this.db);
 		try {
-			const [, existing] = await session.executeBatch([
+			const [, existing] = await session.executeBatch<{ one: number }>([
 				{
 					query: "DELETE FROM contribution_generations WHERE token = ? AND expires_at <= datetime('now')",
 					params: [token],
@@ -366,7 +366,7 @@ export class ContributionService {
 					params: [token],
 				},
 			]);
-			if ((existing.results as Array<{ one: number }> | undefined)?.[0]) {
+			if (existing.results?.[0]) {
 				return token;
 			}
 
@@ -470,7 +470,7 @@ export class ContributionService {
 	}
 
 	private normalizeAirportIcao(raw: string): string {
-		if (typeof raw !== 'string') {
+		if (String(raw) !== raw) {
 			throw new Error('airportIcao must be a string');
 		}
 		const normalized = raw.trim().toUpperCase();
@@ -481,7 +481,7 @@ export class ContributionService {
 	}
 
 	private sanitizePackageName(raw: string, fieldLabel = 'packageName'): string {
-		if (typeof raw !== 'string') {
+		if (String(raw) !== raw) {
 			throw new Error(`${fieldLabel} must be a string`);
 		}
 		const trimmed = raw.trim();
@@ -514,7 +514,7 @@ export class ContributionService {
 
 		let sanitizedNotes: string | null = null;
 		if (submission.notes !== undefined && submission.notes !== null) {
-			if (typeof submission.notes !== 'string') {
+			if (String(submission.notes) !== submission.notes) {
 				throw new Error('Notes must be a string');
 			}
 			const trimmed = submission.notes.trim();

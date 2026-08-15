@@ -45,7 +45,7 @@ export class CacheService {
 		const res = await cache.match(this.versionMetaKey(namespace));
 		if (!res) return 1;
 		try {
-			const data = (await res.json()) as { version?: number };
+			const data = await res.json<{ version?: number }>();
 			const v = Number(data?.version);
 			return Number.isFinite(v) && v > 0 ? v : 1;
 		} catch {
@@ -136,11 +136,9 @@ export class CacheService {
 	async set<T>(key: string, data: T, options: CacheOptions = {}): Promise<void> {
 		const { ttl = 60, namespace = 'default' } = options;
 
-		// Versioned cache key with namespace
 		const ver = await this.resolveNamespaceVersion(namespace);
 		const cacheKey = this.dataKey(key, namespace, ver);
 
-		// Create response with the data
 		const response = new Response(JSON.stringify(data), {
 			headers: {
 				'Content-Type': 'application/json',
@@ -148,7 +146,6 @@ export class CacheService {
 			},
 		});
 
-		// Store in cache
 		const cache = caches.default;
 		await cache.put(cacheKey, response);
 	}
@@ -204,6 +201,13 @@ export function withCache(
 			return next();
 		}
 
+		// The Cache API cannot store Worker-generated 206 responses. Bypass
+		// explicit range requests so a partial response is never read from or
+		// written to the cache under the full-response key.
+		if (c.req.raw.headers.has('Range')) {
+			return next();
+		}
+
 		if (shouldBypass?.(c.req.raw)) {
 			return next();
 		}
@@ -211,7 +215,6 @@ export function withCache(
 		cacheService ??= new CacheService(c.env);
 		const cacheKey = cacheKeyFn(c.req.raw);
 
-		// Try to get from cache
 		const cachedResponse = await cacheService.getResponse(cacheKey, namespace);
 		if (cachedResponse) {
 			const response = new Response(cachedResponse.body, cachedResponse);
@@ -222,13 +225,12 @@ export function withCache(
 			return response;
 		}
 
-		// Cache miss, proceed to handler
 		c.header('X-Cache', 'MISS');
 		await next();
 
-		// After handler executes, cache the response if it was successful
-		// Don't cache error responses (4xx, 5xx) including 404 Not Found
-		if (c.res && c.res.status >= 200 && c.res.status < 300) {
+		// Cache only complete responses. In particular, Cache.put rejects 206
+		// Partial Content even though it is otherwise a successful response.
+		if (c.res?.status === 200) {
 			try {
 				const contentType = c.res.headers.get('content-type');
 				if (
@@ -245,7 +247,6 @@ export function withCache(
 				}
 			} catch {
 				// Silently fail if we can't cache
-				// console.error('Failed to cache response:', e);
 			}
 		}
 	};

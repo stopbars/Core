@@ -4,7 +4,7 @@ import { HttpError } from './errors';
 import { Point, PointChangeset, PointData } from '../types';
 import { PostHogService } from './posthog';
 
-import { DatabaseSessionService, PreparedStatement, DatabaseSerializable } from './database-session';
+import { DatabaseSessionService, DatabaseSerializable } from './database-session';
 
 type PointRow = {
 	id: string;
@@ -23,6 +23,16 @@ type PointRow = {
 	created_by: string;
 };
 
+type Coordinate = Point['coordinates'][number];
+type PointValidationInput = Omit<PointData, 'coordinates' | 'elevated' | 'ihp'> & {
+	coordinates: Coordinate | Coordinate[];
+	elevated?: PointData['elevated'] | 0 | 1;
+	ihp?: PointData['ihp'] | 0 | 1;
+};
+
+type PointUpdateColumn = 'type' | 'name' | 'coordinates' | 'directionality' | 'color' | 'elevated' | 'ihp';
+type PointUpdateValue = string | number | boolean | null;
+
 export type PointChangesetAuthorization = { kind: 'division-member' } | { kind: 'division-data-automation' };
 
 export class PointsService {
@@ -31,12 +41,12 @@ export class PointsService {
 	private static parseLinkedTo(value: string | null | undefined): string[] {
 		if (!value) return [];
 		try {
-			const parsed = JSON.parse(value);
+			const parsed: string | string[] | null = JSON.parse(value);
 			if (Array.isArray(parsed)) {
-				return parsed.filter((id): id is string => typeof id === 'string');
+				return parsed.filter((id) => Object.prototype.toString.call(id) === '[object String]').map(String);
 			}
-			if (typeof parsed === 'string') {
-				return [parsed];
+			if (Object.prototype.toString.call(parsed) === '[object String]') {
+				return [String(parsed)];
 			}
 		} catch {
 			// Legacy rows stored a single ID directly instead of JSON.
@@ -50,32 +60,33 @@ export class PointsService {
 		return uniqueIds.length > 0 ? JSON.stringify(uniqueIds) : null;
 	}
 
-	private static isCoordinate(value: unknown): value is { lat: number; lng: number } {
-		if (!value || typeof value !== 'object') return false;
-		const obj = value as Record<string, unknown>;
+	private static isCoordinate(value: Coordinate): boolean {
 		return (
-			Object.prototype.hasOwnProperty.call(obj, 'lat') &&
-			Object.prototype.hasOwnProperty.call(obj, 'lng') &&
-			typeof obj.lat === 'number' &&
-			typeof obj.lng === 'number' &&
-			obj.lat >= -90 &&
-			obj.lat <= 90 &&
-			obj.lng >= -180 &&
-			obj.lng <= 180
+			Number.isFinite(value?.lat) &&
+			Number.isFinite(value?.lng) &&
+			value.lat >= -90 &&
+			value.lat <= 90 &&
+			value.lng >= -180 &&
+			value.lng <= 180
 		);
 	}
 
-	private static isCoordinateArray(value: unknown): value is Array<{ lat: number; lng: number }> {
+	private static isCoordinateArray(value: Coordinate | Coordinate[]): value is Coordinate[] {
 		return Array.isArray(value) && value.length > 0 && value.every((v) => PointsService.isCoordinate(v));
 	}
 
-	private stmtSelect: PreparedStatement<{
-		id: string;
-		airportId: string;
-	}>;
-	private stmtCheckPointId: PreparedStatement<{
-		id: string;
-	}>;
+	private static parseCoordinates(value: string): Coordinate[] {
+		let parsed: Coordinate | Coordinate[] | null;
+		try {
+			parsed = JSON.parse(value);
+		} catch {
+			return [];
+		}
+
+		if (parsed === null) return [];
+		if (PointsService.isCoordinateArray(parsed)) return parsed;
+		return PointsService.isCoordinate(parsed) ? [parsed] : [];
+	}
 
 	constructor(
 		private db: D1Database,
@@ -85,14 +96,6 @@ export class PointsService {
 	) {
 		this.dbSession = new DatabaseSessionService(db);
 
-		this.stmtSelect = this.dbSession.prepare(
-			`SELECT
-				type, name, coordinates, directionality, color, elevated, ihp, linked_to
-				FROM points
-				WHERE id = ? AND airport_id = ?;`,
-			['id', 'airportId'],
-		);
-		this.stmtCheckPointId = this.dbSession.prepare('SELECT id FROM points WHERE id = ? LIMIT 1;', ['id']);
 	}
 
 	async createPoint(airportId: string, userId: string, point: PointData): Promise<Point> {
@@ -147,7 +150,6 @@ export class PointsService {
 		return newPoint;
 	}
 	async updatePoint(pointId: string, userId: string, updates: Partial<PointData>): Promise<Point> {
-		// Get existing point
 		const point = await this.getPoint(pointId);
 		if (!point) {
 			throw new HttpError(404, 'Point not found');
@@ -160,41 +162,31 @@ export class PointsService {
 		}
 
 		// Validate updates
-		const mergedPoint = { ...point, ...updates } as PointData;
+		const mergedPoint: PointData = { ...point, ...updates };
 		this.validatePoint(mergedPoint);
 
 		// Define allowed fields for updates
-		const allowedFields = ['type', 'name', 'coordinates', 'directionality', 'color', 'elevated', 'ihp'];
-		const processedUpdates: Record<string, string | number | boolean | null> = {};
-		Object.entries(updates).forEach(([key, value]) => {
-			if (allowedFields.includes(key)) {
-				if (key === 'coordinates') {
-					processedUpdates[key] = JSON.stringify((mergedPoint as PointData).coordinates);
-				} else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-					processedUpdates[key] = value;
-				} else if (value == null) {
-					processedUpdates[key] = null;
-				}
-			}
-		});
+		const processedUpdates: Partial<Record<PointUpdateColumn, PointUpdateValue>> = {};
+		if (Object.prototype.hasOwnProperty.call(updates, 'type')) processedUpdates.type = updates.type ?? null;
+		if (Object.prototype.hasOwnProperty.call(updates, 'name')) processedUpdates.name = updates.name ?? null;
+		if (Object.prototype.hasOwnProperty.call(updates, 'coordinates')) {
+			processedUpdates.coordinates = JSON.stringify(mergedPoint.coordinates);
+		}
+		if (Object.prototype.hasOwnProperty.call(updates, 'directionality')) {
+			processedUpdates.directionality = updates.directionality ?? null;
+		}
+		if (Object.prototype.hasOwnProperty.call(updates, 'color')) processedUpdates.color = updates.color ?? null;
+		if (Object.prototype.hasOwnProperty.call(updates, 'elevated')) processedUpdates.elevated = updates.elevated ?? null;
+		if (Object.prototype.hasOwnProperty.call(updates, 'ihp')) processedUpdates.ihp = updates.ihp ?? null;
 		if (Object.keys(processedUpdates).length === 0) {
 			return point;
 		}
-		const fieldMappings: Record<string, string> = {
-			type: 'type',
-			name: 'name',
-			coordinates: 'coordinates',
-			directionality: 'directionality',
-			color: 'color',
-			elevated: 'elevated',
-			ihp: 'ihp',
-		};
 
 		const updateFields = Object.keys(processedUpdates)
-			.map((field) => `${fieldMappings[field]} = ?`)
+			.map((field) => `${field} = ?`)
 			.join(', ');
 
-		const result = await this.dbSession.executeWrite(
+		const result = await this.dbSession.executeWrite<PointRow>(
 			`
 			UPDATE points
 			SET ${updateFields}, updated_at = ?
@@ -205,7 +197,7 @@ export class PointsService {
 			[...Object.values(processedUpdates), new Date().toISOString(), pointId],
 		);
 
-		const updatedRow = (result.results as unknown as PointRow[] | null)?.[0];
+		const updatedRow = result.results?.[0];
 		if (!updatedRow) throw new HttpError(404, 'Point not found');
 		const finalPoint = this.mapPointFromDb(updatedRow);
 		try {
@@ -221,7 +213,7 @@ export class PointsService {
 		return finalPoint;
 	}
 
-	async deletePoint(pointId: string, userId: string): Promise<void> {
+	async deletePoint(pointId: string, userId: string): Promise<string> {
 		// Get point to check permissions
 		const point = await this.getPoint(pointId);
 		if (!point) {
@@ -247,6 +239,7 @@ export class PointsService {
 		} catch (e) {
 			console.warn('Posthog track failed (Point Deleted)', e);
 		}
+		return point.airportId;
 	}
 
 	async applyChangeset(
@@ -263,15 +256,23 @@ export class PointsService {
 		}
 
 		const modifyEntries = Object.entries(changeset.modify ?? {});
-		const selects = modifyEntries.map(([id]) => this.stmtSelect.bindAll({ id, airportId }));
-		const selectResults = await this.dbSession.executeBatch(selects);
-		const modifyContexts = modifyEntries.map(([id, patch], index) => {
-			const rows = selectResults[index]?.results as unknown as PointRow[] | null;
-			const first = rows && rows[0];
-			if (!first) {
+		const modifyIds = modifyEntries.map(([id]) => id);
+		const modifyRows: PointRow[] = [];
+		const maxModifyIdsPerQuery = 99;
+		for (let index = 0; index < modifyIds.length; index += maxModifyIdsPerQuery) {
+			const idChunk = modifyIds.slice(index, index + maxModifyIdsPerQuery);
+			const result = await this.dbSession.executeLatest<PointRow>(
+				`SELECT * FROM points WHERE airport_id = ? AND id IN (${idChunk.map(() => '?').join(', ')})`,
+				[airportId, ...idChunk],
+			);
+			modifyRows.push(...result.results);
+		}
+		const modifyPointsById = new Map(modifyRows.map((row) => [row.id, this.mapPointFromDb(row)]));
+		const modifyContexts = modifyEntries.map(([id, patch]) => {
+			const basePoint = modifyPointsById.get(id);
+			if (!basePoint) {
 				throw new HttpError(404, 'Point targeted by modify operation does not exist');
 			}
-			const basePoint = this.mapPointFromDb(first);
 			const merged: PointData = {
 				type: patch.type ?? basePoint.type,
 				name: patch.name ?? basePoint.name,
@@ -483,15 +484,19 @@ export class PointsService {
 			}
 
 			const candidates = Array.from(candidateSet);
-			const statements = candidates.map((id) => this.stmtCheckPointId.bindAll({ id }));
-			const results = await this.dbSession.executeBatch(statements);
-
-			results.forEach((result, index) => {
-				const rows = (result.results as unknown as Array<{ id: string }> | null) ?? [];
-				if (rows.length === 0) {
-					allocatedIds.add(candidates[index]);
-				}
-			});
+			const existingIds = new Set<string>();
+			const maxCandidateIdsPerQuery = 100;
+			for (let index = 0; index < candidates.length; index += maxCandidateIdsPerQuery) {
+				const candidateChunk = candidates.slice(index, index + maxCandidateIdsPerQuery);
+				const existingRows = await this.dbSession.executeLatest<{ id: string }>(
+					`SELECT id FROM points WHERE id IN (${candidateChunk.map(() => '?').join(', ')})`,
+					candidateChunk,
+				);
+				for (const { id } of existingRows.results) existingIds.add(id);
+			}
+			for (const candidate of candidates) {
+				if (!existingIds.has(candidate)) allocatedIds.add(candidate);
+			}
 		}
 
 		if (allocatedIds.size < count) {
@@ -501,17 +506,17 @@ export class PointsService {
 		return Array.from(allocatedIds);
 	}
 
-	private validatePoint(point: PointData) {
+	private validatePoint(point: PointValidationInput): asserts point is PointData {
 		const allowedTypes: Array<Point['type']> = ['stopbar', 'lead_on', 'taxiway', 'stand'];
 		if (!point.type || !allowedTypes.includes(point.type)) {
 			throw new HttpError(400, 'Point must have a valid type');
 		}
 
 		// Normalize coordinates: accept either legacy single object or array of objects
-		const rawCoords: unknown = (point as unknown as { coordinates?: unknown }).coordinates;
+		const rawCoords = point.coordinates;
 		if (rawCoords === undefined || rawCoords === null) throw new HttpError(400, 'Point must have coordinates');
 
-		let arr: Array<{ lat: number; lng: number }>;
+		let arr: Coordinate[];
 		if (PointsService.isCoordinateArray(rawCoords)) {
 			arr = rawCoords;
 		} else if (PointsService.isCoordinate(rawCoords)) {
@@ -523,7 +528,7 @@ export class PointsService {
 		if (arr.length < 1) {
 			throw new HttpError(400, 'Coordinates must contain at least one point');
 		}
-		(point as PointData).coordinates = arr as { lat: number; lng: number }[];
+		point.coordinates = arr;
 
 		// Validate type-specific fields
 		if (point.type === 'stopbar') {
@@ -540,26 +545,26 @@ export class PointsService {
 			// elevated is optional for stopbars, defaulting to false
 			if (point.elevated !== undefined) {
 				// Convert numeric 1/0 to boolean if needed
-				if (point.elevated === true || (point.elevated as unknown as number) === 1) {
+				if (point.elevated === true || point.elevated === 1) {
 					point.elevated = true;
-				} else if (point.elevated === false || (point.elevated as unknown as number) === 0) {
+				} else if (point.elevated === false || point.elevated === 0) {
 					point.elevated = false;
 				}
 
-				if (typeof point.elevated !== 'boolean') {
+				if (point.elevated !== true && point.elevated !== false) {
 					throw new HttpError(400, 'Elevated property must be a boolean when specified');
 				}
 			}
 
 			if (point.ihp !== undefined) {
 				// Convert numeric 1/0 to boolean if needed
-				if (point.ihp === true || (point.ihp as unknown as number) === 1) {
+				if (point.ihp === true || point.ihp === 1) {
 					point.ihp = true;
-				} else if (point.ihp === false || (point.ihp as unknown as number) === 0) {
+				} else if (point.ihp === false || point.ihp === 0) {
 					point.ihp = false;
 				}
 
-				if (typeof point.ihp !== 'boolean') {
+				if (point.ihp !== true && point.ihp !== false) {
 					throw new HttpError(400, 'IHP property must be a boolean when specified');
 				}
 			}
@@ -581,18 +586,7 @@ export class PointsService {
 	}
 
 	private mapPointFromDb(dbPoint: PointRow): Point {
-		let raw: unknown;
-		try {
-			raw = JSON.parse(dbPoint.coordinates);
-		} catch {
-			raw = null;
-		}
-		let coordinates: Array<{ lat: number; lng: number }> = [];
-		if (PointsService.isCoordinateArray(raw)) {
-			coordinates = raw;
-		} else if (PointsService.isCoordinate(raw)) {
-			coordinates = [raw];
-		}
+		const coordinates = PointsService.parseCoordinates(dbPoint.coordinates);
 
 		const parsedLinkedTo = PointsService.parseLinkedTo(dbPoint.linked_to);
 		const linkedTo = parsedLinkedTo.length > 0 ? parsedLinkedTo : undefined;
@@ -763,11 +757,11 @@ export class PointsService {
 		for (const row of results.results) {
 			let stopbarIds: string[] = [];
 			try {
-				const parsed = JSON.parse(row.linked_to);
+				const parsed: string | string[] | null = JSON.parse(row.linked_to);
 				if (Array.isArray(parsed)) {
-					stopbarIds = parsed.filter((id): id is string => typeof id === 'string');
-				} else if (typeof parsed === 'string') {
-					stopbarIds = [parsed];
+					stopbarIds = parsed.filter((id) => Object.prototype.toString.call(id) === '[object String]').map(String);
+				} else if (Object.prototype.toString.call(parsed) === '[object String]') {
+					stopbarIds = [String(parsed)];
 				}
 			} catch {
 				// Legacy single ID format

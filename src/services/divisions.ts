@@ -130,7 +130,7 @@ export class DivisionService {
 			AND da.status IN ('pending', 'approved')
 		`;
 
-		if (typeof excludeAirportId === 'number') {
+		if (excludeAirportId !== undefined) {
 			query += ' AND da.id != ?';
 			params.push(excludeAirportId);
 		}
@@ -156,7 +156,8 @@ export class DivisionService {
 
 	async createDivision(name: string, headVatsimId: string): Promise<Division> {
 		const result = await this.dbSession.executeWrite('INSERT INTO divisions (name) VALUES (?) RETURNING *', [name]);
-		const rows = result.results as unknown as Division[] | null;
+		// SAFETY: This INSERT returns every column of the divisions row, whose schema is represented by Division.
+		const rows = result.results as Division[] | null;
 		const division = rows && rows[0];
 		if (!division) throw new Error('Failed to create division');
 
@@ -172,7 +173,8 @@ export class DivisionService {
 
 	async updateDivisionName(id: number, newName: string): Promise<Division> {
 		const result = await this.dbSession.executeWrite('UPDATE divisions SET name = ? WHERE id = ? RETURNING *', [newName, id]);
-		const rows = result.results as unknown as Division[] | null;
+		// SAFETY: This UPDATE returns every column of the divisions row, whose schema is represented by Division.
+		const rows = result.results as Division[] | null;
 		const division = rows && rows[0];
 		if (!division) throw new Error('Division not found');
 		try {
@@ -185,7 +187,8 @@ export class DivisionService {
 
 	async deleteDivision(id: number): Promise<boolean> {
 		const result = await this.dbSession.executeWrite('DELETE FROM divisions WHERE id = ? RETURNING id', [id]);
-		const rows = result.results as unknown as Array<{ id: number }> | null;
+		// SAFETY: The DELETE statement returns only the numeric divisions.id column.
+		const rows = result.results as Array<{ id: number }> | null;
 		const deleted = !!(rows && rows[0]);
 		if (deleted) {
 			try {
@@ -209,7 +212,8 @@ export class DivisionService {
 				[divisionId, vatsimId, role],
 			);
 
-			const rows = result.results as unknown as DivisionMember[] | null;
+			// SAFETY: This INSERT returns every division_members column, whose schema is represented by DivisionMember.
+			const rows = result.results as DivisionMember[] | null;
 			const member = rows && rows[0];
 			if (!member) throw new Error('Failed to add member to division');
 			try {
@@ -255,6 +259,7 @@ export class DivisionService {
 			[divisionId, normalizedIcao, requestedBy],
 		);
 
+		// SAFETY: The INSERT statement returns a division_airports row containing its numeric id.
 		const rows = result.results as Array<{ id: number }> | null;
 		const request = rows && rows[0];
 		if (!request) throw new Error('Failed to create airport request');
@@ -276,6 +281,7 @@ export class DivisionService {
 			[divisionId, normalizedIcao, requestedBy],
 		);
 
+		// SAFETY: The INSERT statement returns a division_airports row containing its numeric id.
 		const rows = result.results as Array<{ id: number }> | null;
 		const request = rows && rows[0];
 		if (!request) throw new Error('Failed to create airport request');
@@ -314,6 +320,7 @@ export class DivisionService {
 			[approved ? 'approved' : 'rejected', approvedBy, airportId],
 		);
 
+		// SAFETY: The UPDATE statement returns a division_airports row containing its numeric id.
 		const rows = result.results as Array<{ id: number }> | null;
 		const updatedAirport = rows && rows[0];
 		const airport = updatedAirport ? await this.getDivisionAirportById(existing.division_id, updatedAirport.id) : null;
@@ -358,6 +365,7 @@ export class DivisionService {
 			`,
 			[contributionsEnabled ? 1 : 0, airportId, divisionId],
 		);
+		// SAFETY: The UPDATE statement explicitly returns the numeric division_airports.id column.
 		const rows = result.results as Array<{ id: number }> | null;
 		const updated = rows?.[0];
 		if (!updated) {
@@ -415,7 +423,9 @@ export class DivisionService {
 			[airportId, 'pending', 'rejected'],
 		);
 
-		const deleted = !!(deleteResult.results && (deleteResult.results as Array<{ id: number }>)[0]);
+		// SAFETY: The DELETE statement explicitly returns the numeric division_airports.id column.
+		const deletedRows = deleteResult.results as Array<{ id: number }> | null;
+		const deleted = Boolean(deletedRows?.[0]);
 		if (deleted) {
 			try {
 				this.posthog?.track('Division Airport Request Deleted', {

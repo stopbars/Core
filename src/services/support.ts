@@ -19,16 +19,6 @@ interface LightSupport {
 	heading: number;
 }
 
-// Define an interface for airport data to help TypeScript
-interface AirportData {
-	latitude?: number;
-	longitude?: number;
-	icao?: string;
-	name?: string;
-	continent?: string;
-	runways?: Record<string, unknown>[];
-}
-
 export class SupportService {
 	private airportService: AirportService;
 	private readonly EARTH_RADIUS = 6378137; // Earth radius in meters at equator
@@ -239,7 +229,6 @@ export class SupportService {
 			out.push({ latitude: latCenter, longitude: lonCenter, width: meters, length: meters, heading: 0 });
 		};
 
-		// state
 		const supports: LightSupport[] = [];
 		const covered: Uint8Array[] = Array.from({ length: rows }, () => new Uint8Array(cols));
 		const scratch: Uint8Array[] = Array.from({ length: rows }, () => new Uint8Array(cols));
@@ -491,7 +480,7 @@ export class SupportService {
 			this.validateXMLContent(inputXml);
 
 			// Get airport data to get coordinates
-			const airportData = (await this.airportService.getAirport(icao)) as AirportData;
+			const airportData = await this.airportService.getAirport(icao);
 			if (!airportData) {
 				throw new Error(`Airport with ICAO ${icao} not found`);
 			}
@@ -539,11 +528,9 @@ export class SupportService {
 				};
 			};
 
-			// Process each polygon
 			for (let i = 0; i < polygons.length; i++) {
 				const polygon = polygons[i];
 
-				// Get the supports for this polygon
 				const supports = this.calculateLightSupports(polygon);
 
 				// Add each support and store exclusion rectangle

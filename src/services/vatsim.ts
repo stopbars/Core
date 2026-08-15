@@ -87,7 +87,7 @@ export class VatsimService {
 			throw new HttpError(502, `Failed to get VATSIM user (${status})`, { statusText: text }, false);
 		}
 
-		const userData = (await res.json()) as VatsimUserResponse;
+		const userData = await res.json<VatsimUserResponse>();
 		const vatsim = userData.data.vatsim || {};
 		const user: VatsimUser = {
 			id: userData.data.cid,

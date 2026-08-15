@@ -3,10 +3,20 @@
 import { waitUntil as cfWaitUntil } from 'cloudflare:workers';
 import { cancelResponseBody } from './http';
 
+export type AnalyticsPropertyValue = string | number | boolean | null | undefined | AnalyticsPropertyValue[] | AnalyticsProperties;
+
+export interface AnalyticsProperties {
+	[key: string]: AnalyticsPropertyValue;
+}
+
+type BackgroundTaskRuntime = typeof globalThis & {
+	waitUntil?: (promise: Promise<void>) => void;
+};
+
 interface PostHogCapturePayload {
 	api_key: string;
 	event: string;
-	properties: Record<string, unknown>;
+	properties: AnalyticsProperties;
 	timestamp?: string; // ISO 8601
 	$process_person_profile?: boolean;
 }
@@ -20,7 +30,7 @@ export interface TrackOptions {
 
 export interface BatchTrackEvent {
 	event: string;
-	properties?: Record<string, unknown>;
+	properties?: AnalyticsProperties;
 	distinctId?: string;
 	timestamp?: Date | string;
 }
@@ -44,7 +54,7 @@ export class PostHogService {
 		return PII_KEYS.has(lk) || lk.includes('vatsim');
 	}
 
-	private async hashValue(value: unknown): Promise<string> {
+	private async hashValue(value: AnalyticsPropertyValue): Promise<string> {
 		try {
 			const data = UTF8_ENCODER.encode(String(value));
 			const digest = await crypto.subtle.digest('SHA-256', data);
@@ -62,8 +72,8 @@ export class PostHogService {
 		}
 	}
 
-	private async sanitizeProperties(props: Record<string, unknown>): Promise<Record<string, unknown>> {
-		const sanitized: Record<string, unknown> = {};
+	private async sanitizeProperties(props: AnalyticsProperties): Promise<AnalyticsProperties> {
+		const sanitized: AnalyticsProperties = {};
 		const pendingHashes: Promise<void>[] = [];
 		for (const [key, value] of Object.entries(props)) {
 			sanitized[key] = value;
@@ -76,11 +86,11 @@ export class PostHogService {
 	}
 
 	private async prepareProperties(
-		properties: Record<string, unknown>,
+		properties: AnalyticsProperties,
 		distinctId: string,
 		options: Pick<TrackOptions, 'product' | 'omitProduct'>,
-	): Promise<Record<string, unknown>> {
-		const mergedProps: Record<string, unknown> = { ...properties };
+	): Promise<AnalyticsProperties> {
+		const mergedProps: AnalyticsProperties = { ...properties };
 		if (!options.omitProduct && mergedProps.product === undefined) {
 			mergedProps.product = options.product || 'Core';
 		}
@@ -98,15 +108,14 @@ export class PostHogService {
 	private dispatch(doFetch: () => Promise<void>, inline = false): void | Promise<void> {
 		if (inline) return doFetch();
 		try {
-			if (typeof (cfWaitUntil as unknown) === 'function') {
-				cfWaitUntil(doFetch());
-				return;
-			}
+			cfWaitUntil(doFetch());
+			return;
 		} catch {
 			/* ignore */
 		}
 		try {
-			(globalThis as unknown as { waitUntil?: (p: Promise<unknown>) => void }).waitUntil?.(doFetch());
+			const runtimeGlobal: BackgroundTaskRuntime = globalThis;
+			runtimeGlobal.waitUntil?.(doFetch());
 		} catch {
 			/* ignore */
 		}
@@ -114,7 +123,7 @@ export class PostHogService {
 
 	track(
 		event: string,
-		properties: Record<string, unknown> = {},
+		properties: AnalyticsProperties = {},
 		distinctId = 'anonymous',
 		options: TrackOptions = {},
 	): void | Promise<void> {
@@ -127,7 +136,7 @@ export class PostHogService {
 				$process_person_profile: false,
 			};
 			if (options.timestamp) {
-				payload.timestamp = typeof options.timestamp === 'string' ? options.timestamp : options.timestamp.toISOString();
+				payload.timestamp = options.timestamp instanceof Date ? options.timestamp.toISOString() : options.timestamp;
 			}
 			return JSON.stringify(payload);
 		};
@@ -161,14 +170,17 @@ export class PostHogService {
 
 		const doFetch = async () => {
 			const batch = await Promise.all(
-				events.map(async (item) => ({
-					event: item.event,
-					properties: await this.prepareProperties(item.properties ?? {}, item.distinctId ?? 'anonymous', options),
-					...(item.timestamp
-						? { timestamp: typeof item.timestamp === 'string' ? item.timestamp : item.timestamp.toISOString() }
-						: {}),
-					$process_person_profile: false,
-				})),
+				events.map(async (item) => {
+					const payload: Omit<PostHogCapturePayload, 'api_key'> = {
+						event: item.event,
+						properties: await this.prepareProperties(item.properties ?? {}, item.distinctId ?? 'anonymous', options),
+						$process_person_profile: false,
+					};
+					if (item.timestamp) {
+						payload.timestamp = item.timestamp instanceof Date ? item.timestamp.toISOString() : item.timestamp;
+					}
+					return payload;
+				}),
 			);
 
 			return fetch(`${this.host}/batch/`, {

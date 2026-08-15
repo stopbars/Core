@@ -4,9 +4,25 @@ import { DatabaseSessionService, type SessionOptions } from './database-session'
 import { PostHogService } from './posthog';
 
 type DisplayModeUser = Pick<UserRecord, 'id' | 'vatsim_id' | 'full_name' | 'display_mode' | 'display_name'>;
+type DisplayNameFields = Pick<UserRecord, 'vatsim_id' | 'full_name' | 'display_mode'>;
+type PersistedUserRow = Omit<UserRecord, 'vatsimToken'>;
+type LoginStateRow = Omit<PersistedUserRow, 'id'> & {
+	id: number | null;
+	ban_vatsim_id: string | null;
+	ban_expires_at: string | null;
+};
+
+interface LocationFields {
+	regionId: string | null;
+	regionName: string | null;
+	divisionId: string | null;
+	divisionName: string | null;
+	subdivisionId: string | null;
+	subdivisionName: string | null;
+}
 
 interface ExistingUserLookup {
-	user: UserRecord | null;
+	user: PersistedUserRow | null;
 	bookmark: string | null;
 }
 
@@ -94,7 +110,10 @@ export class AuthService {
 		return { vatsimToken: auth.access_token };
 	}
 
-	private async getOrCreateUser(vatsimUser: VatsimUser, lookup?: ExistingUserLookup): Promise<{ user: UserRecord; created: boolean }> {
+	private async getOrCreateUser(
+		vatsimUser: VatsimUser,
+		lookup?: ExistingUserLookup,
+	): Promise<{ user: Pick<UserRecord, 'id'>; created: boolean }> {
 		if (lookup?.user) {
 			return { user: lookup.user, created: false };
 		}
@@ -116,7 +135,7 @@ export class AuthService {
 
 	private async createNewUser(vatsimUser: VatsimUser, dbSession: DatabaseSessionService) {
 		// Check for existing VATSIM user using session
-		const existingVatsimUserResult = await dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE vatsim_id = ?', [
+		const existingVatsimUserResult = await dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE vatsim_id = ?', [
 			vatsimUser.id,
 		]);
 
@@ -127,7 +146,7 @@ export class AuthService {
 		let apiKey = this.generateApiKey();
 
 		while (true) {
-			const existingKeyResult = await dbSession.executeRead<UserRecord>('SELECT id FROM users WHERE api_key = ?', [apiKey]);
+			const existingKeyResult = await dbSession.executeRead<{ id: number }>('SELECT id FROM users WHERE api_key = ?', [apiKey]);
 
 			if (!existingKeyResult.results[0]) break;
 			apiKey = this.generateApiKey();
@@ -137,20 +156,14 @@ export class AuthService {
 		const displayMode = 0;
 		const displayName = this.computeDisplayName(
 			{
-				id: 0,
 				vatsim_id: vatsimUser.id,
-				api_key: apiKey,
-				email: vatsimUser.email,
 				full_name: fullName,
 				display_mode: displayMode,
-				created_at: '',
-				last_login: '',
-				vatsimToken: '',
 			},
 			vatsimUser,
 		);
 		const { regionId, regionName, divisionId, divisionName, subdivisionId, subdivisionName } = this.normalizeLocationFields(vatsimUser);
-		const result = await dbSession.executeWrite(
+		const result = await dbSession.executeWrite<PersistedUserRow>(
 			'INSERT INTO users (vatsim_id, api_key, email, full_name, display_mode, display_name, region_id, region_name, division_id, division_name, subdivision_id, subdivision_name, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *',
 			[
 				vatsimUser.id,
@@ -170,10 +183,9 @@ export class AuthService {
 			],
 		);
 
-		const rows = result.results as unknown as UserRecord[] | null;
-		const created = rows && rows[0];
+		const created = result.results?.[0];
 		if (!created) throw new Error('Failed to create user');
-		return created as UserRecord;
+		return created;
 	}
 
 	async syncUserLocationFields(userId: number, vatsimUser: VatsimUser) {
@@ -257,7 +269,7 @@ export class AuthService {
 			const row = result.results[0];
 			if (!row) return { user: null, banned: false };
 			const { is_banned, ...user } = row;
-			return { user: user as UserRecord, banned: is_banned === 1 };
+			return { user, banned: is_banned === 1 };
 		});
 	}
 
@@ -286,7 +298,7 @@ export class AuthService {
 		});
 	}
 
-	computeDisplayName(user: UserRecord, vatsimUser?: VatsimUser): string {
+	computeDisplayName(user: DisplayNameFields, vatsimUser?: VatsimUser): string {
 		const mode = user.display_mode ?? 0;
 		const fullName = user.full_name || [vatsimUser?.first_name, vatsimUser?.last_name].filter(Boolean).join(' ').trim();
 		if (mode === 2) return user.vatsim_id;
@@ -318,9 +330,9 @@ export class AuthService {
 				}
 				if (!user) return;
 
-				if (user.display_mode === mode) return; // nothing to do
+				if (user.display_mode === mode) return;
 
-				const displayName = this.computeDisplayName({ ...user, display_mode: mode } as UserRecord);
+				const displayName = this.computeDisplayName({ ...user, display_mode: mode });
 
 				await dbSession.executeWrite('UPDATE users SET display_mode = ?, display_name = ? WHERE id = ?', [
 					mode,
@@ -341,7 +353,7 @@ export class AuthService {
 				);
 				const user = current.results[0];
 				if (user) {
-					const displayName = this.computeDisplayName({ ...user, full_name: fullName } as UserRecord);
+					const displayName = this.computeDisplayName({ ...user, full_name: fullName });
 					await dbSession.executeWrite('UPDATE users SET full_name = ?, display_name = ? WHERE id = ?', [
 						fullName,
 						displayName,
@@ -379,15 +391,8 @@ export class AuthService {
 		}
 	}
 
-	private normalizeLocationFields(vatsimUser: VatsimUser): {
-		regionId: string | null;
-		regionName: string | null;
-		divisionId: string | null;
-		divisionName: string | null;
-		subdivisionId: string | null;
-		subdivisionName: string | null;
-	} {
-		const norm = (s?: string) => (typeof s === 'string' && s.trim().length > 0 ? s.trim() : null);
+	private normalizeLocationFields(vatsimUser: VatsimUser): LocationFields {
+		const norm = (value?: string) => value?.trim() || null;
 		return {
 			regionId: norm(vatsimUser.region?.id),
 			regionName: norm(vatsimUser.region?.name),
@@ -414,17 +419,17 @@ export class AuthService {
 				}
 
 				// Update the user's API key in the database
-				const result = await dbSession.executeWrite('UPDATE users SET api_key = ? WHERE id = ? RETURNING api_key', [
+				const result = await dbSession.executeWrite<{ api_key: string }>('UPDATE users SET api_key = ? WHERE id = ? RETURNING api_key', [
 					newApiKey,
 					userId,
 				]);
 
-				const rows = result.results as unknown as Array<{ api_key: string }> | null;
-				if (!rows || !rows[0]) {
+				const updated = result.results?.[0];
+				if (!updated) {
 					throw new Error('Failed to update API key');
 				}
 
-				return rows[0].api_key;
+				return updated.api_key;
 			},
 			{ mode: 'first-primary' },
 		);
@@ -511,7 +516,7 @@ export class AuthService {
 	}> {
 		return this.withDbSession(
 			async (dbSession) => {
-				const result = await dbSession.executeRead<UserRecord & { ban_vatsim_id: string | null; ban_expires_at: string | null }>(
+				const result = await dbSession.executeRead<LoginStateRow>(
 					`SELECT u.*, b.vatsim_id AS ban_vatsim_id, b.expires_at AS ban_expires_at
 				 FROM (SELECT 1) anchor
 				 LEFT JOIN users u ON u.vatsim_id = ?
@@ -521,10 +526,10 @@ export class AuthService {
 				);
 				const row = result.results[0];
 				if (!row) throw new Error('Failed to load login state');
-				const { ban_vatsim_id, ban_expires_at, ...userFields } = row;
+				const { ban_vatsim_id, ban_expires_at, id, ...userFields } = row;
 				const bookmark = dbSession.getSessionInfo().bookmark;
 				return {
-					existingUser: { user: userFields.id == null ? null : (userFields as UserRecord), bookmark },
+					existingUser: { user: id == null ? null : { ...userFields, id }, bookmark },
 					banRecord: ban_vatsim_id ? { vatsim_id: ban_vatsim_id, expires_at: ban_expires_at } : null,
 				};
 			},

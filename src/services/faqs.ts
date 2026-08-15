@@ -33,19 +33,19 @@ export class FAQService {
 
 	async create(data: { question: string; answer: string; order_position: number }): Promise<FAQRecord> {
 		const id = crypto.randomUUID();
-		const result = await this.dbSession.executeWrite(
+		const result = await this.dbSession.executeWrite<FAQRecord>(
 			`INSERT INTO faqs (id, question, answer, order_position, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
 			 RETURNING id, question, answer, order_position, created_at, updated_at`,
 			[id, data.question, data.answer, data.order_position],
 		);
-		const created = (result.results as unknown as FAQRecord[] | null)?.[0];
+		const created = result.results?.[0];
 		if (!created) throw new Error('Failed to create FAQ');
 		return created;
 	}
 
 	async update(id: string, data: Partial<{ question: string; answer: string; order_position: number }>): Promise<FAQRecord | null> {
-		const result = await this.dbSession.executeWrite(
+		const result = await this.dbSession.executeWrite<FAQRecord>(
 			`UPDATE faqs
 			 SET question = CASE WHEN ? THEN ? ELSE question END,
 				 answer = CASE WHEN ? THEN ? ELSE answer END,
@@ -63,7 +63,7 @@ export class FAQService {
 				id,
 			],
 		);
-		return (result.results as unknown as FAQRecord[] | null)?.[0] ?? null;
+		return result.results?.[0] ?? null;
 	}
 
 	async delete(id: string): Promise<boolean> {

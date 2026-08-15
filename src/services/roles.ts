@@ -3,10 +3,10 @@ export enum StaffRole {
 	PRODUCT_MANAGER = 'PRODUCT_MANAGER',
 }
 
-export const roleHierarchy: Record<StaffRole, number> = {
+export const roleHierarchy = {
 	LEAD_DEVELOPER: 999,
 	PRODUCT_MANAGER: 500,
-};
+} satisfies Record<StaffRole, number>;
 
 export type Role = 'lead_developer' | 'product_manager' | 'nav_head' | 'nav_member';
 
@@ -24,28 +24,44 @@ import { StaffRecord } from '../types';
 
 import { DatabaseSessionService } from './database-session';
 
+type StaffRow = Omit<StaffRecord, 'role'> & { role: string };
+type StaffWriteRow = Pick<StaffRow, 'user_id' | 'role' | 'created_at'>;
+
+function parseStaffRole(role: string | null | undefined): StaffRole | null {
+	switch (role) {
+		case StaffRole.LEAD_DEVELOPER:
+		case StaffRole.PRODUCT_MANAGER:
+			return role;
+		default:
+			return null;
+	}
+}
+
+export interface ListedStaffMember {
+	user_id: number;
+	role: string;
+	created_at: string;
+	vatsim_id: string;
+	full_name: string | null;
+}
+
 export class RoleService {
 	private dbSession: DatabaseSessionService;
 	constructor(private db: D1Database) {
 		this.dbSession = new DatabaseSessionService(db);
 	}
 
-	private async fetchStaffRecord(userId: number): Promise<StaffRecord | null> {
-		const staffResult = await this.dbSession.executeRead<StaffRecord>(
+	private async fetchStaffRecord(userId: number): Promise<StaffRow | null> {
+		const staffResult = await this.dbSession.executeRead<StaffRow>(
 			'SELECT id, user_id, role, created_at FROM staff WHERE user_id = ? LIMIT 1',
 			[userId],
 		);
 		return staffResult.results[0] ?? null;
 	}
 
-	private normalizeStaffRole(role?: StaffRecord['role'] | null): StaffRole | null {
-		if (!role) return null;
-		return role in roleHierarchy ? (role as StaffRole) : null;
-	}
-
 	async getStaffStatus(userId: number): Promise<{ isStaff: boolean; role: StaffRole | null }> {
 		const staff = await this.fetchStaffRecord(userId);
-		const role = this.normalizeStaffRole(staff?.role);
+		const role = parseStaffRole(staff?.role);
 		return { isStaff: !!role, role };
 	}
 
@@ -60,7 +76,7 @@ export class RoleService {
 		);
 		const row = result.results[0];
 		if (!row) return null;
-		return { userId: row.user_id, role: this.normalizeStaffRole(row.role as StaffRecord['role'] | null) };
+		return { userId: row.user_id, role: parseStaffRole(row.role) };
 	}
 
 	async isStaff(userId: number): Promise<boolean> {
@@ -80,11 +96,12 @@ export class RoleService {
 	}
 
 	async hasRole(userId: number, role: StaffRole | Role): Promise<boolean> {
-		if (role in StaffRole) {
-			return this.hasPermission(userId, role as StaffRole);
+		if (role === StaffRole.LEAD_DEVELOPER || role === StaffRole.PRODUCT_MANAGER) {
+			return this.hasPermission(userId, role);
 		}
+		if (role !== 'nav_head' && role !== 'nav_member') return false;
 		const divisionRoles = await this.getDivisionRoles(userId);
-		return !!divisionRoles[role as keyof DivisionRoles];
+		return !!divisionRoles[role];
 	}
 
 	async getDivisionRoles(userId: number): Promise<DivisionRoles> {
@@ -105,8 +122,8 @@ export class RoleService {
 	}
 
 	// --- Staff management helpers (write) ---
-	private async getRoleChangeState(userId: number): Promise<(StaffRecord & { lead_count: number }) | null> {
-		const result = await this.dbSession.executeLatest<StaffRecord & { lead_count: number }>(
+	private async getRoleChangeState(userId: number): Promise<(StaffRow & { lead_count: number }) | null> {
+		const result = await this.dbSession.executeLatest<StaffRow & { lead_count: number }>(
 			`SELECT id, user_id, role, created_at,
 				(SELECT COUNT(*) FROM staff WHERE role = ?) AS lead_count
 			 FROM staff
@@ -117,10 +134,10 @@ export class RoleService {
 		return result.results[0] ?? null;
 	}
 
-	private ensureNotLastLeadDeveloper(current: (StaffRecord & { lead_count: number }) | null, changingToRole?: StaffRole | null) {
+	private ensureNotLastLeadDeveloper(current: (StaffRow & { lead_count: number }) | null, changingToRole?: StaffRole | null) {
 		if (!current) return;
 		if (
-			(current.role as StaffRole) === StaffRole.LEAD_DEVELOPER &&
+			parseStaffRole(current.role) === StaffRole.LEAD_DEVELOPER &&
 			(changingToRole == null || changingToRole !== StaffRole.LEAD_DEVELOPER)
 		) {
 			if (current.lead_count <= 1) throw new Error('Cannot modify or remove the last remaining lead developer');
@@ -131,15 +148,17 @@ export class RoleService {
 		const existing = await this.getRoleChangeState(userId);
 		this.ensureNotLastLeadDeveloper(existing, role);
 		const createdAt = new Date().toISOString();
-		const result = await this.dbSession.executeWrite(
+		const result = await this.dbSession.executeWrite<StaffWriteRow>(
 			`INSERT INTO staff (user_id, role, created_at) VALUES (?, ?, ?)
 			 ON CONFLICT(user_id) DO UPDATE SET role = excluded.role
 			 RETURNING user_id, role, created_at`,
 			[userId, role, createdAt],
 		);
-		const row = (result.results as unknown as StaffRecord[] | null)?.[0];
+		const row = result.results?.[0];
 		if (!row) throw new Error('Failed to add staff member');
-		return { user_id: row.user_id, role: row.role as StaffRole, created_at: row.created_at };
+		const createdRole = parseStaffRole(row.role);
+		if (!createdRole) throw new Error('Database returned an invalid staff role');
+		return { user_id: row.user_id, role: createdRole, created_at: row.created_at };
 	}
 
 	async updateStaffRole(userId: number, role: StaffRole): Promise<boolean> {
@@ -154,9 +173,7 @@ export class RoleService {
 		return !!result.success;
 	}
 
-	async listStaff(): Promise<
-		Array<{ user_id: number; role: StaffRole; created_at: string; vatsim_id: string; full_name: string | null }>
-	> {
+	async listStaff(): Promise<ListedStaffMember[]> {
 		const res = await this.dbSession.executeRead<{
 			user_id: number;
 			role: string;
@@ -170,12 +187,12 @@ export class RoleService {
 			 ORDER BY s.created_at DESC`,
 			[],
 		);
-		return res.results.map((r) => ({
-			user_id: r.user_id,
-			role: r.role as StaffRole,
-			created_at: r.created_at,
-			vatsim_id: r.vatsim_id,
-			full_name: r.full_name,
+		return res.results.map((row) => ({
+			user_id: row.user_id,
+			role: row.role,
+			created_at: row.created_at,
+			vatsim_id: row.vatsim_id,
+			full_name: row.full_name,
 		}));
 	}
 }

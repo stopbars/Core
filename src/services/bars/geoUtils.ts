@@ -18,7 +18,6 @@ export function calculateDistance(point1: GeoPoint, point2: GeoPoint): number {
 export function calculateHeading(point1: GeoPoint, point2: GeoPoint): number {
 	const heading = getGreatCircleBearing({ latitude: point1.lat, longitude: point1.lon }, { latitude: point2.lat, longitude: point2.lon });
 
-	// Convert to 0-360 range
 	return (heading + 360) % 360;
 }
 
@@ -72,7 +71,6 @@ export function smoothLine(points: GeoPoint[], segments = 5): GeoPoint[] {
 		}
 	}
 
-	// Add the last point
 	result.push(points[points.length - 1]);
 
 	return result;
@@ -89,8 +87,8 @@ export function generateEquidistantPoints(
 	if (interval <= 0) return points.map((p) => ({ ...p }));
 
 	// Precompute segment lengths and bearings to avoid repeated geodesic calculations
-	const segmentLengths: number[] = new Array(points.length - 1);
-	const segmentBearings: number[] = new Array(points.length - 1);
+	const segmentLengths = Array.from({ length: points.length - 1 }, () => 0);
+	const segmentBearings = Array.from({ length: points.length - 1 }, () => 0);
 	for (let i = 0; i < points.length - 1; i++) {
 		const a = points[i];
 		const b = points[i + 1];

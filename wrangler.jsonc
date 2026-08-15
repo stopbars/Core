@@ -26,6 +26,7 @@
 		"crons": ["0 * * * *"],
 	},
 	"vars": {
+		"DEBUG": "true",
 		"VATSIM_CLIENT_ID": "1562", // Change this for local testing
 		"POSTHOG_HOST": "https://a.stopbars.com",
 	},

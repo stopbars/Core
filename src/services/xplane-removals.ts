@@ -105,12 +105,14 @@ export function generateXPlaneRemovalsJson(xml: string, icao: string): string {
 	return JSON.stringify(artifact);
 }
 
-function parseTag(tag: string): {
+interface ParsedXmlTag {
 	name: string;
 	attributes: Record<string, string>;
 	closing: boolean;
 	selfClosing: boolean;
-} {
+}
+
+function parseTag(tag: string): ParsedXmlTag {
 	const closing = /^<\s*\//.test(tag);
 	const selfClosing = /\/\s*>$/.test(tag);
 	const nameMatch = tag.match(/^<\s*\/?\s*([A-Za-z_:][\w:.-]*)/);

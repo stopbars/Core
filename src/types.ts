@@ -70,6 +70,9 @@ export interface StaffRecord {
 export type LightType = 'STOPBAR' | 'LEAD_ON';
 export type MessageType = LightType;
 export type ClientType = 'controller' | 'pilot' | 'observer';
+export type JsonPrimitive = boolean | number | string | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+export type JsonObject = { [key: string]: JsonValue };
 
 export interface LightState {
 	barsId: string;
@@ -87,8 +90,8 @@ export interface StateUpdate {
 
 export type MultiStateUpdateItem = {
 	objectId: string;
-	state?: boolean | Record<string, unknown>;
-	patch?: Record<string, unknown> | null;
+	state?: boolean | JsonObject;
+	patch?: JsonObject | null;
 };
 
 export interface UpdateData {
@@ -103,7 +106,7 @@ export interface ControllerState {
 
 export interface AirportObject {
 	id: string; // BARS Global ID
-	state: boolean | Record<string, unknown>;
+	state: boolean | JsonObject;
 	controllerId?: string; // ID of controller who last modified
 	timestamp: number;
 }
@@ -122,38 +125,40 @@ export interface OnlinePilot {
 
 export interface Packet {
 	type:
-	| 'STATE_UPDATE'
-	| 'MULTI_STATE_UPDATE'
-	| 'INITIAL_STATE'
-	| 'CONTROLLER_CONNECT'
-	| 'CONTROLLER_DISCONNECT'
-	| 'SHARED_STATE_UPDATE'
-	| 'ERROR'
-	| 'HEARTBEAT'
-	| 'HEARTBEAT_ACK'
-	| 'CLOSE'
-	| 'GET_STATE'
-	| 'STATE_SNAPSHOT'
-	| 'GET_ONLINE_PILOTS'
-	| 'ONLINE_PILOTS'
-	| 'STOPBAR_CROSSING';
+		| 'STATE_UPDATE'
+		| 'MULTI_STATE_UPDATE'
+		| 'INITIAL_STATE'
+		| 'CONTROLLER_CONNECT'
+		| 'CONTROLLER_DISCONNECT'
+		| 'SHARED_STATE_UPDATE'
+		| 'ERROR'
+		| 'HEARTBEAT'
+		| 'HEARTBEAT_ACK'
+		| 'CLOSE'
+		| 'GET_STATE'
+		| 'STATE_SNAPSHOT'
+		| 'GET_ONLINE_PILOTS'
+		| 'ONLINE_PILOTS'
+		| 'STOPBAR_CROSSING';
 	airport?: string;
-	data?: {
-		objectId?: string;
-		state?: boolean;
-		patch?: Record<string, unknown>; // New field for patch-based updates
-		sharedStatePatch?: Record<string, unknown>; // New field for shared state patches
-		sharedState?: Record<string, unknown>; // Full shared state (for initial state)
-		objects?: AirportObject[];
-		controllerId?: string;
-		controllers?: string[];
-		pilots?: OnlinePilot[];
-		updates?: MultiStateUpdateItem[]; // Batched state updates
-		message?: string; // For error messages
-		connectionType?: ClientType; // Add connection type to data
-		offline?: boolean; // Flag to indicate if state is offline (no controllers)
-		requestedAt?: number; // For STATE_SNAPSHOT - when request was made
-	} | MultiStateUpdateItem[];
+	data?:
+		| {
+				objectId?: string;
+				state?: boolean | JsonObject;
+				patch?: JsonObject | null; // New field for patch-based updates
+				sharedStatePatch?: JsonObject; // New field for shared state patches
+				sharedState?: JsonObject; // Full shared state (for initial state)
+				objects?: AirportObject[];
+				controllerId?: string;
+				controllers?: string[];
+				pilots?: OnlinePilot[];
+				updates?: MultiStateUpdateItem[]; // Batched state updates
+				message?: string; // For error messages
+				connectionType?: ClientType; // Add connection type to data
+				offline?: boolean; // Flag to indicate if state is offline (no controllers)
+				requestedAt?: number; // For STATE_SNAPSHOT - when request was made
+		  }
+		| MultiStateUpdateItem[];
 	timestamp?: number; // Optional since server will set it
 }
 

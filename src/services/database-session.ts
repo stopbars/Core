@@ -42,6 +42,12 @@ export interface DatabaseResponse<T = unknown> {
 	meta?: DatabaseMeta;
 }
 
+export interface DatabaseWriteResponse<T = unknown> {
+	results?: T[] | null;
+	success: boolean;
+	meta?: DatabaseMeta;
+}
+
 export type DatabaseSerializable = null | number | string | boolean | ArrayBuffer;
 export type DatabaseBinding = Record<string, DatabaseSerializable>;
 
@@ -114,7 +120,6 @@ export class DatabaseSessionService {
 		params: DatabaseSerializable[] = [],
 		options: SessionOptions = {},
 	): Promise<DatabaseResponse<T>> {
-		// Start session if not already started
 		if (!this.session) {
 			this.startSession(options);
 		}
@@ -123,7 +128,6 @@ export class DatabaseSessionService {
 			const stmt = this.session!.prepare(query);
 			let boundStmt = stmt;
 
-			// Bind parameters if provided
 			if (params.length > 0) {
 				boundStmt = stmt.bind(...params);
 			}
@@ -152,7 +156,6 @@ export class DatabaseSessionService {
 		params: DatabaseSerializable[] = [],
 		options: SessionOptions = {},
 	): Promise<DatabaseResult<T>> {
-		// Start session if not already started
 		if (!this.session) {
 			this.startSession(options);
 		}
@@ -161,7 +164,6 @@ export class DatabaseSessionService {
 			const stmt = this.session!.prepare(query);
 			let boundStmt = stmt;
 
-			// Bind parameters if provided
 			if (params.length > 0) {
 				boundStmt = stmt.bind(...params);
 			}
@@ -186,7 +188,7 @@ export class DatabaseSessionService {
 	 * Execute a query that modifies data (INSERT, UPDATE, DELETE)
 	 * Always uses primary database for consistency
 	 */
-	public async executeWrite(query: string, params: DatabaseSerializable[] = []): Promise<DatabaseResponse<unknown>> {
+	public async executeWrite<T = unknown>(query: string, params: DatabaseSerializable[] = []): Promise<DatabaseWriteResponse<T>> {
 		// Force primary mode for write operations
 		if (!this.session) {
 			this.startSession({ mode: 'first-primary' });
@@ -201,7 +203,7 @@ export class DatabaseSessionService {
 				boundStmt = stmt.bind(...params);
 			}
 
-			const result = await boundStmt.run();
+			const result = await boundStmt.run<T>();
 
 			// Update bookmark after write operation
 			this.getBookmark();
@@ -221,7 +223,7 @@ export class DatabaseSessionService {
 	 * Execute multiple statements in a batch
 	 * Uses primary database for consistency
 	 */
-	public async executeBatch(
+	public async executeBatch<TBatchRow = unknown>(
 		statements: Array<
 			| {
 					query: string;
@@ -229,7 +231,7 @@ export class DatabaseSessionService {
 			  }
 			| D1PreparedStatement
 		>,
-	): Promise<DatabaseResponse<unknown>[]> {
+	): Promise<DatabaseWriteResponse<TBatchRow>[]> {
 		if (statements.length === 0) return [];
 
 		// Force primary mode for batch operations
@@ -239,16 +241,18 @@ export class DatabaseSessionService {
 
 		try {
 			const preparedStatements = statements.map((statement) => {
-				if ('query' in statement && typeof statement.query === 'string') {
+				if ('query' in statement) {
 					const { query, params = [] } = statement;
 					const stmt = this.session!.prepare(query);
 					return params.length > 0 ? stmt.bind(...params) : stmt;
-				} else {
-					return statement as D1PreparedStatement;
 				}
+				return statement;
 			});
 
-			const results = await this.session!.batch(preparedStatements);
+			// D1 exposes one generic row type for the whole batch. Callers with
+			// heterogeneous statements must supply a union or shared optional-field
+			// contract and narrow by the known statement index.
+			const results = await this.session!.batch<TBatchRow>(preparedStatements);
 
 			// Update bookmark after batch operation
 			this.getBookmark();
@@ -330,11 +334,7 @@ export class DatabaseSessionService {
 	/**
 	 * Get current session statistics for observability
 	 */
-	public getSessionInfo(): {
-		hasSession: boolean;
-		hasBookmark: boolean;
-		bookmark: string | null;
-	} {
+	public getSessionInfo() {
 		return {
 			hasSession: this.session !== null,
 			hasBookmark: this.currentBookmark !== null,
@@ -368,7 +368,7 @@ export class DatabaseSessionService {
 		db: D1Database,
 		query: string,
 		params: DatabaseSerializable[] = [],
-	): Promise<DatabaseResponse<unknown>> {
+	): Promise<DatabaseWriteResponse<unknown>> {
 		const session = new DatabaseSessionService(db);
 		try {
 			return await session.executeWrite(query, params);

@@ -1,4 +1,3 @@
-// import { UserRecord } from '../types';
 import { RoleService, StaffRole } from './roles';
 import { AuthService } from './auth';
 import { PostHogService } from './posthog';
@@ -21,6 +20,26 @@ type StaffUserDTO = {
 	last_login: string;
 	is_staff: boolean;
 };
+
+type StaffUserRow = {
+	id: number;
+	vatsim_id: string;
+	email: string;
+	full_name: string | null;
+	display_mode: number | null;
+	display_name: string | null;
+	region_id: string | null;
+	region_name: string | null;
+	division_id: string | null;
+	division_name: string | null;
+	subdivision_id: string | null;
+	subdivision_name: string | null;
+	created_at: string;
+	last_login: string;
+	is_staff: number;
+};
+
+type UserCountRow = { count: number };
 
 export class UserService {
 	private dbSession: DatabaseSessionService;
@@ -59,24 +78,10 @@ export class UserService {
 				},
 				{ query: 'SELECT COUNT(*) AS count FROM users' },
 			]);
-			const users = usersResult.results as Array<{
-				id: number;
-				vatsim_id: string;
-				email: string;
-				full_name: string | null;
-				display_mode: number | null;
-				display_name: string | null;
-				region_id: string | null;
-				region_name: string | null;
-				division_id: string | null;
-				division_name: string | null;
-				subdivision_id: string | null;
-				subdivision_name: string | null;
-				created_at: string;
-				last_login: string;
-				is_staff: number;
-			}>;
-			const count = countResult.results as Array<{ count: number }>;
+			// SAFETY: The first SELECT explicitly projects every StaffUserRow column, and D1 preserves those column names in results.
+			const users = usersResult.results as StaffUserRow[];
+			// SAFETY: The second SELECT aliases its single aggregate column to `count`, matching UserCountRow.
+			const count = countResult.results as UserCountRow[];
 			return {
 				users: users.map((u) => ({
 					id: u.id,

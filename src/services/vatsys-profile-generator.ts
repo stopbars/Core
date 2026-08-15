@@ -6,6 +6,54 @@ import { cancelResponseBody } from './http';
 
 type VatSysFormat = 'legacy' | 'intas';
 
+type JsonObject = { [key: string]: JsonValue };
+type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
+
+type GeoBoundingBox = {
+	south: number;
+	west: number;
+	north: number;
+	east: number;
+};
+
+type SignaturePoint = {
+	lat: string;
+	lon: string;
+};
+
+type NormalizedPointSignature = {
+	id: string;
+	type: ParsedPoint['type'];
+	coordinates: SignaturePoint[];
+	linkedTo: string[];
+};
+
+type NormalizedRunwaySignature = {
+	id: number;
+	widthFt: string;
+	leIdent: string;
+	lePoint: SignaturePoint;
+	heIdent: string;
+	hePoint: SignaturePoint;
+};
+
+type OrientedRunwayEnds = {
+	leftEnd: GeoPoint;
+	rightEnd: GeoPoint;
+	leftEndName: string;
+	rightEndName: string;
+};
+
+type AxisCoordinates = {
+	x: number;
+	y: number;
+};
+
+type LocalCoordinates = {
+	east: number;
+	north: number;
+};
+
 type AirportBounds = {
 	bbox_min_lat: number | null;
 	bbox_min_lon: number | null;
@@ -17,25 +65,17 @@ type VatSysTaxiwayCache = {
 	version: number;
 	fetched_at: string;
 	source_signature: string;
-	bbox: {
-		south: number;
-		west: number;
-		north: number;
-		east: number;
-	};
+	bbox: GeoBoundingBox;
 	lines: GeoPoint[][];
 	windsocks: GeoPoint[];
 };
 
-type VatSysConfig = {
-	is_vatsys?: boolean;
-	is_legacy?: boolean;
-	is_intas?: boolean;
-	intas_osm_taxiways?: VatSysTaxiwayCache | null;
-	intas?: {
-		osm_taxiways?: VatSysTaxiwayCache | null;
-	};
-	[key: string]: unknown;
+type VatSysConfig = JsonObject & {
+	is_vatsys?: JsonValue;
+	is_legacy?: JsonValue;
+	is_intas?: JsonValue;
+	intas_osm_taxiways?: JsonValue;
+	intas?: JsonValue;
 };
 
 type VatSysConfigRecord = {
@@ -146,6 +186,19 @@ type IntasOsmData = {
 	windsocks: GeoPoint[];
 };
 
+type OverpassElement = {
+	type: string;
+	id: number;
+	geometry?: Array<{ lat?: JsonValue; lon?: JsonValue }>;
+	lat?: JsonValue;
+	lon?: JsonValue;
+	tags?: Record<string, string>;
+};
+
+type OverpassResponse = {
+	elements: OverpassElement[];
+};
+
 type GenerationInputs = {
 	configRecord: VatSysConfigRecord;
 	points: ParsedPoint[];
@@ -174,6 +227,18 @@ export class VatSysProfileGeneratorService {
 	private readonly axisProjectionCache = new WeakMap<ProfileAxis, AxisProjection>();
 
 	constructor(private db: D1Database) {}
+
+	private isJsonObject(value: JsonValue): value is JsonObject {
+		return value !== null && !Array.isArray(value) && Object.prototype.toString.call(value) === '[object Object]';
+	}
+
+	private isJsonNumber(value: JsonValue | undefined): value is number {
+		return Object.prototype.toString.call(value) === '[object Number]' && Number.isFinite(Number(value));
+	}
+
+	private isJsonString(value: JsonValue | undefined): value is string {
+		return Object.prototype.toString.call(value) === '[object String]';
+	}
 
 	async generate(icao: string): Promise<VatSysProfileGenerationResult> {
 		const normalizedIcao = icao.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -287,6 +352,7 @@ export class VatSysProfileGeneratorService {
 			},
 		]);
 
+		// SAFETY: The fixed SELECT projects id and the non-null vatsys TEXT column from division_airports.
 		const row = configResult.results[0] as { id: number; vatsys: string } | undefined;
 		if (!row) {
 			throw new HttpError(404, `No approved division airport found for ${icao}`);
@@ -294,25 +360,29 @@ export class VatSysProfileGeneratorService {
 
 		let config: VatSysConfig;
 		try {
-			config = JSON.parse(row.vatsys) as VatSysConfig;
-			if (!config || typeof config !== 'object') {
+			const parsed: JsonValue = JSON.parse(row.vatsys);
+			if (!this.isJsonObject(parsed)) {
 				throw new Error('Invalid vatSys flags');
 			}
+			config = parsed;
 		} catch {
 			throw new HttpError(422, `Invalid vatSys configuration for ${icao}`);
 		}
 
 		const points: ParsedPoint[] = [];
 		for (const rawRow of pointsResult.results) {
+			// SAFETY: The fixed points SELECT projects every PointRow field and restricts type to the two declared values.
 			const point = this.parsePoint(rawRow as PointRow);
 			if (point) points.push(point);
 		}
+		// SAFETY: The fixed runways SELECT projects every RunwayRow field from schema-backed columns.
 		const runways = (runwaysResult.results as RunwayRow[]).filter((runway) => this.getRunwayAxis(runway) !== null);
 
 		return {
 			configRecord: { id: row.id, config },
 			points,
 			runways,
+			// SAFETY: The fixed airports SELECT projects exactly the four nullable numeric bounding-box columns.
 			airportBounds: boundsResult.results[0] as AirportBounds | undefined,
 		};
 	}
@@ -451,7 +521,12 @@ export class VatSysProfileGeneratorService {
 	}
 
 	private parseIntasTaxiwayCache(config: VatSysConfig, sourceSignature: string): VatSysTaxiwayCache | null {
-		const cache = config.intas_osm_taxiways ?? config.intas?.osm_taxiways;
+		const nestedIntas = config.intas && this.isJsonObject(config.intas) ? config.intas : null;
+		const rawCache = config.intas_osm_taxiways ?? nestedIntas?.osm_taxiways;
+		if (!rawCache || !this.isJsonObject(rawCache)) {
+			return null;
+		}
+		const cache = this.parseTaxiwayCache(rawCache);
 		if (
 			!cache ||
 			cache.version !== VatSysProfileGeneratorService.INTAS_TAXIWAY_CACHE_VERSION ||
@@ -459,22 +534,43 @@ export class VatSysProfileGeneratorService {
 		) {
 			return null;
 		}
-		if (!Array.isArray(cache.lines)) {
+		if (cache.lines.length === 0) {
 			return null;
 		}
 
-		const lines = cache.lines.map((line) => this.normalizeTaxiwayLine(line)).filter((line): line is GeoPoint[] => line !== null);
-		if (lines.length === 0) {
+		return cache;
+	}
+
+	private parseTaxiwayCache(rawCache: JsonObject): VatSysTaxiwayCache | null {
+		const bbox = rawCache.bbox;
+		if (
+			!this.isJsonNumber(rawCache.version) ||
+			!this.isJsonString(rawCache.fetched_at) ||
+			!this.isJsonString(rawCache.source_signature) ||
+			!bbox ||
+			!this.isJsonObject(bbox) ||
+			!this.isJsonNumber(bbox.south) ||
+			!this.isJsonNumber(bbox.west) ||
+			!this.isJsonNumber(bbox.north) ||
+			!this.isJsonNumber(bbox.east) ||
+			!Array.isArray(rawCache.lines)
+		) {
 			return null;
 		}
-		const windsocks = Array.isArray(cache.windsocks)
-			? cache.windsocks.map((point) => this.normalizeGeoPoint(point)).filter((point): point is GeoPoint => point !== null)
+
+		const lines = rawCache.lines
+			.filter((line): line is JsonValue[] => Array.isArray(line))
+			.map((line) => line.map((point) => (this.isJsonObject(point) ? { lat: point.lat, lon: point.lon } : {})));
+		const windsocks = Array.isArray(rawCache.windsocks)
+			? rawCache.windsocks.map((point) => (this.isJsonObject(point) ? { lat: point.lat, lon: point.lon } : {}))
 			: [];
-
 		return {
-			...cache,
-			lines,
-			windsocks,
+			version: rawCache.version,
+			fetched_at: rawCache.fetched_at,
+			source_signature: rawCache.source_signature,
+			bbox: { south: bbox.south, west: bbox.west, north: bbox.north, east: bbox.east },
+			lines: lines.map((line) => this.normalizeTaxiwayLine(line)).filter((line): line is GeoPoint[] => line !== null),
+			windsocks: windsocks.map((point) => this.normalizeGeoPoint(point)).filter((point): point is GeoPoint => point !== null),
 		};
 	}
 
@@ -503,7 +599,7 @@ export class VatSysProfileGeneratorService {
 		return `v1:${this.hashString(JSON.stringify(payload))}`;
 	}
 
-	private normalizeBboxForSignature(bbox: { south: number; west: number; north: number; east: number }): Record<string, string> {
+	private normalizeBboxForSignature(bbox: GeoBoundingBox) {
 		return {
 			south: this.formatCoordinate(bbox.south),
 			west: this.formatCoordinate(bbox.west),
@@ -512,12 +608,7 @@ export class VatSysProfileGeneratorService {
 		};
 	}
 
-	private normalizePointForSignature(point: ParsedPoint): {
-		id: string;
-		type: ParsedPoint['type'];
-		coordinates: Array<{ lat: string; lon: string }>;
-		linkedTo: string[];
-	} {
+	private normalizePointForSignature(point: ParsedPoint): NormalizedPointSignature {
 		return {
 			id: point.id,
 			type: point.type,
@@ -526,14 +617,7 @@ export class VatSysProfileGeneratorService {
 		};
 	}
 
-	private normalizeRunwayForSignature(runway: RunwayRow): {
-		id: number;
-		widthFt: string;
-		leIdent: string;
-		lePoint: { lat: string; lon: string };
-		heIdent: string;
-		hePoint: { lat: string; lon: string };
-	} {
+	private normalizeRunwayForSignature(runway: RunwayRow): NormalizedRunwaySignature {
 		return {
 			id: runway.id,
 			widthFt: runway.width_ft,
@@ -550,7 +634,7 @@ export class VatSysProfileGeneratorService {
 		};
 	}
 
-	private formatPointForSignature(point: GeoPoint): { lat: string; lon: string } {
+	private formatPointForSignature(point: GeoPoint): SignaturePoint {
 		return {
 			lat: this.formatCoordinate(point.lat),
 			lon: this.formatCoordinate(point.lon),
@@ -571,7 +655,7 @@ export class VatSysProfileGeneratorService {
 		configRecord: VatSysConfigRecord,
 		cache: VatSysTaxiwayCache,
 	): Promise<void> {
-		const nextConfig: VatSysConfig = {
+		const nextConfig = {
 			...configRecord.config,
 			intas_osm_taxiways: cache,
 		};
@@ -588,7 +672,7 @@ export class VatSysProfileGeneratorService {
 	private validateAirportBounds(
 		row: AirportBounds | undefined,
 		icao: string,
-	): { south: number; west: number; north: number; east: number } {
+	): GeoBoundingBox {
 		if (!row) {
 			throw new HttpError(422, `No airport metadata found for ${icao}`);
 		}
@@ -614,20 +698,8 @@ export class VatSysProfileGeneratorService {
 
 	private async fetchIntasOsmData(
 		icao: string,
-		bbox: { south: number; west: number; north: number; east: number },
+		bbox: GeoBoundingBox,
 	): Promise<IntasOsmData> {
-		type OverpassElement = {
-			type: string;
-			id: number;
-			geometry?: Array<{ lat?: number; lon?: number }>;
-			lat?: number;
-			lon?: number;
-			tags?: Record<string, string>;
-		};
-		type OverpassResponse = {
-			elements?: OverpassElement[];
-		};
-
 		const query = `[out:json][timeout:25];(way["aeroway"="taxiway"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});nwr["aeroway"="windsock"](${bbox.south},${bbox.west},${bbox.north},${bbox.east}););out body geom;`;
 		const body = new URLSearchParams({ data: query }).toString();
 		const maxAttempts = 3;
@@ -652,7 +724,8 @@ export class VatSysProfileGeneratorService {
 					throw new HttpError(503, `OSM taxiway data unavailable for ${icao}`);
 				}
 
-				const json = (await response.json()) as OverpassResponse;
+				const payload: JsonValue = await response.json();
+				const json = this.parseOverpassResponse(payload);
 				const taxiwayLines: GeoPoint[][] = [];
 				const windSockPoints: GeoPoint[] = [];
 				for (const element of json.elements ?? []) {
@@ -687,6 +760,46 @@ export class VatSysProfileGeneratorService {
 		}
 
 		throw new HttpError(503, `OSM taxiway data unavailable for ${icao}`);
+	}
+
+	private parseOverpassResponse(payload: JsonValue): OverpassResponse {
+		if (!this.isJsonObject(payload)) {
+			throw new Error('Invalid Overpass response');
+		}
+		if (payload.elements === undefined) return { elements: [] };
+		if (!Array.isArray(payload.elements)) throw new Error('Invalid Overpass response elements');
+
+		const elements: OverpassElement[] = [];
+		for (const rawElement of payload.elements) {
+			if (
+				!this.isJsonObject(rawElement) ||
+				!this.isJsonString(rawElement.type) ||
+				!this.isJsonNumber(rawElement.id)
+			) {
+				continue;
+			}
+
+			const geometry = Array.isArray(rawElement.geometry)
+				? rawElement.geometry
+						.filter((point): point is JsonObject => this.isJsonObject(point))
+						.map((point) => ({ lat: point.lat, lon: point.lon }))
+				: undefined;
+			const tags: Record<string, string> = {};
+			if (rawElement.tags && this.isJsonObject(rawElement.tags)) {
+				for (const [key, value] of Object.entries(rawElement.tags)) {
+					if (this.isJsonString(value)) tags[key] = value;
+				}
+			}
+			elements.push({
+				type: rawElement.type,
+				id: rawElement.id,
+				lat: rawElement.lat,
+				lon: rawElement.lon,
+				geometry,
+				tags,
+			});
+		}
+		return { elements };
 	}
 
 	private buildIntasXml(taxiwayLines: GeoPoint[][], windsocks: GeoPoint[], stopbars: ParsedPoint[], leadOns: ParsedPoint[]): string {
@@ -1123,7 +1236,7 @@ export class VatSysProfileGeneratorService {
 		};
 	}
 
-	private normalizeTaxiwayLine(rawLine: Array<Partial<GeoPoint>>): GeoPoint[] | null {
+	private normalizeTaxiwayLine(rawLine: Array<{ lat?: JsonValue; lon?: JsonValue }>): GeoPoint[] | null {
 		const points: GeoPoint[] = [];
 		for (const point of rawLine) {
 			const normalized = this.normalizeGeoPoint(point);
@@ -1138,10 +1251,10 @@ export class VatSysProfileGeneratorService {
 		return points.length >= 2 ? points : null;
 	}
 
-	private normalizeGeoPoint(point: Partial<GeoPoint>): GeoPoint | null {
+	private normalizeGeoPoint(point: { lat?: JsonValue; lon?: JsonValue }): GeoPoint | null {
 		const lat = point.lat;
 		const lon = point.lon;
-		if (typeof lat !== 'number' || typeof lon !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+		if (!this.isJsonNumber(lat) || !this.isJsonNumber(lon)) {
 			return null;
 		}
 		return {
@@ -1150,7 +1263,7 @@ export class VatSysProfileGeneratorService {
 		};
 	}
 
-	private getOsmElementPoint(element: { lat?: number; lon?: number; geometry?: Array<{ lat?: number; lon?: number }> }): GeoPoint | null {
+	private getOsmElementPoint(element: OverpassElement): GeoPoint | null {
 		const nodePoint = this.normalizeGeoPoint({ lat: element.lat, lon: element.lon });
 		if (nodePoint) return nodePoint;
 		let latTotal = 0;
@@ -1195,15 +1308,14 @@ export class VatSysProfileGeneratorService {
 
 	private parseCoordinates(rawCoordinates: string): GeoPoint[] {
 		try {
-			const parsed = JSON.parse(rawCoordinates) as unknown;
+			const parsed: JsonValue = JSON.parse(rawCoordinates);
 			const rawPoints = Array.isArray(parsed) ? parsed : [parsed];
 			const coordinates: GeoPoint[] = [];
 			for (const value of rawPoints) {
-				if (!value || typeof value !== 'object') continue;
-				const point = value as { lat?: unknown; lng?: unknown; lon?: unknown };
-				const lat = typeof point.lat === 'number' ? point.lat : null;
-				const lon = typeof point.lng === 'number' ? point.lng : typeof point.lon === 'number' ? point.lon : null;
-				if (lat === null || lon === null || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+				if (!this.isJsonObject(value)) continue;
+				const lat = this.isJsonNumber(value.lat) ? value.lat : null;
+				const lon = this.isJsonNumber(value.lng) ? value.lng : this.isJsonNumber(value.lon) ? value.lon : null;
+				if (lat === null || lon === null) continue;
 				coordinates.push({ lat, lon });
 			}
 			return coordinates;
@@ -1215,11 +1327,11 @@ export class VatSysProfileGeneratorService {
 	private parseLinkedTo(rawLinkedTo: string | null): string[] {
 		if (!rawLinkedTo) return [];
 		try {
-			const parsed = JSON.parse(rawLinkedTo) as unknown;
+			const parsed: JsonValue = JSON.parse(rawLinkedTo);
 			if (Array.isArray(parsed)) {
-				return parsed.filter((id): id is string => typeof id === 'string' && id.length > 0);
+				return parsed.filter((id): id is string => this.isJsonString(id) && id.length > 0);
 			}
-			if (typeof parsed === 'string' && parsed.length > 0) {
+			if (this.isJsonString(parsed) && parsed.length > 0) {
 				return [parsed];
 			}
 		} catch {
@@ -1254,7 +1366,7 @@ export class VatSysProfileGeneratorService {
 		leEnd: GeoPoint,
 		heEnd: GeoPoint,
 		towerPosition?: GeoPoint,
-	): { leftEnd: GeoPoint; rightEnd: GeoPoint; leftEndName: string; rightEndName: string } {
+	): OrientedRunwayEnds {
 		const mapOriented = this.orientRunwayEndsByMapAxis(runway, leEnd, heEnd);
 		if (mapOriented) {
 			return mapOriented;
@@ -1306,7 +1418,7 @@ export class VatSysProfileGeneratorService {
 		runway: RunwayRow,
 		leEnd: GeoPoint,
 		heEnd: GeoPoint,
-	): { leftEnd: GeoPoint; rightEnd: GeoPoint; leftEndName: string; rightEndName: string } | null {
+	): OrientedRunwayEnds | null {
 		const heLocal = this.toLocalMeters(heEnd, leEnd);
 		const absEast = Math.abs(heLocal.east);
 		const absNorth = Math.abs(heLocal.north);
@@ -1545,7 +1657,7 @@ export class VatSysProfileGeneratorService {
 		return this.clamp(axis.lengthMeters * 0.04, 100, 220);
 	}
 
-	private projectToAxis(point: GeoPoint, axis: ProfileAxis): { x: number; y: number } {
+	private projectToAxis(point: GeoPoint, axis: ProfileAxis): AxisCoordinates {
 		const projection = this.getAxisProjection(axis);
 		const earthRadiusMeters = 6371000;
 		const deltaLat = ((point.lat - axis.start.lat) * Math.PI) / 180;
@@ -1576,7 +1688,7 @@ export class VatSysProfileGeneratorService {
 		return projection;
 	}
 
-	private toLocalMeters(point: GeoPoint, origin: GeoPoint): { east: number; north: number } {
+	private toLocalMeters(point: GeoPoint, origin: GeoPoint): LocalCoordinates {
 		const earthRadiusMeters = 6371000;
 		const originLatRad = (origin.lat * Math.PI) / 180;
 		const deltaLat = ((point.lat - origin.lat) * Math.PI) / 180;
