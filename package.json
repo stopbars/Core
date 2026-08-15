@@ -14,15 +14,17 @@
 		"prettify": "prettier --write .",
 		"build": "wrangler build",
 		"openapi": "node scripts/generate-openapi.mjs && prettier --write data/openapi.json",
-		"lint": "eslint . --fix"
+		"lint": "oxlint && eslint . --fix"
 	},
 	"devDependencies": {
 		"@eslint/js": "9.39.2",
+		"@oxlint/plugins": "1.78.0",
 		"@types/node": "24.10.9",
 		"@types/swagger-jsdoc": "6.0.4",
 		"eslint": "9.39.2",
 		"globals": "16.5.0",
 		"jiti": "2.6.1",
+		"oxlint": "1.78.0",
 		"prettier": "3.8.0",
 		"ts-node": "10.9.2",
 		"typescript": "5.9.3",
