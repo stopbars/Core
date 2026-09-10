@@ -16,6 +16,7 @@ import { PointsService } from '../services/points';
 import { IDService } from '../services/id';
 import { DivisionService } from '../services/divisions';
 import { DatabaseContextFactory } from '../services/database-context';
+import { allowsLargeLightingPacket, isEuroScopeGraphPatch, MAX_LIGHTING_MESSAGE_BYTES, MAX_LIGHTING_UPDATES } from './euroscope-packets';
 import { PostHogService, type AnalyticsProperties, type AnalyticsPropertyValue } from '../services/posthog';
 import {
 	buildPointStateTemplate,
@@ -306,7 +307,7 @@ function describeWebSocketErrorEvent(
 }
 
 // Add recursive merge utility function with safety checks
-function recursivelyMergeObjects(target: StructuredValue, source: StructuredValue, depth = 0): StructuredValue {
+function recursivelyMergeObjects(target: StructuredValue, source: StructuredValue, depth = 0, euroScopeGraph = false): StructuredValue {
 	// Prevent infinite recursion and overly deep nesting
 	const MAX_DEPTH = 20;
 	if (depth > MAX_DEPTH) {
@@ -331,7 +332,7 @@ function recursivelyMergeObjects(target: StructuredValue, source: StructuredValu
 	}
 
 	// Handle objects - lazily clone properties when needed
-	const MAX_PROPERTIES = 100;
+	const MAX_PROPERTIES = euroScopeGraph && depth === 1 ? MAX_LIGHTING_UPDATES : 100;
 	const sourceKeys = Object.keys(source);
 	if (sourceKeys.length > MAX_PROPERTIES) {
 		throw new Error(`Object has too many properties (${sourceKeys.length} > ${MAX_PROPERTIES})`);
@@ -369,14 +370,14 @@ function recursivelyMergeObjects(target: StructuredValue, source: StructuredValu
 
 		if (isMergeDictionary(sv)) {
 			if (isMergeDictionary(rv)) {
-				const merged = recursivelyMergeObjects(rv, sv, depth + 1);
+				const merged = recursivelyMergeObjects(rv, sv, depth + 1, euroScopeGraph);
 				if (merged !== rv) {
 					ensureClone();
 					result[key] = merged;
 				}
 			} else {
 				ensureClone();
-				result[key] = recursivelyMergeObjects(createNullObject(), sv, depth + 1);
+				result[key] = recursivelyMergeObjects(createNullObject(), sv, depth + 1, euroScopeGraph);
 			}
 		} else if (sv !== rv) {
 			ensureClone();
@@ -1153,8 +1154,8 @@ export class Connection {
 			throw new Error('Missing updates array');
 		}
 
-		if (updatesPayload.length > MAX_MULTI_STATE_UPDATES) {
-			throw new Error(`Batch update exceeds maximum allowed size of ${MAX_MULTI_STATE_UPDATES}`);
+		if (updatesPayload.length > MAX_LIGHTING_UPDATES) {
+			throw new Error(`Batch update exceeds maximum allowed size of ${MAX_LIGHTING_UPDATES}`);
 		}
 
 		const updates = updatesPayload;
@@ -1687,8 +1688,8 @@ export class Connection {
 							rawData = event.data;
 							rawBytes = PACKET_ENCODER.encode(rawData).byteLength;
 						} else {
-							if (event.data.byteLength > MAX_MESSAGE_SIZE) {
-								throw new Error(`Message size exceeds maximum allowed size of ${MAX_MESSAGE_SIZE} characters`);
+							if (event.data.byteLength > MAX_LIGHTING_MESSAGE_BYTES) {
+								throw new Error(`Message size exceeds maximum allowed size of ${MAX_LIGHTING_MESSAGE_BYTES} bytes`);
 							}
 							try {
 								rawData = PACKET_DECODER.decode(event.data);
@@ -1699,8 +1700,8 @@ export class Connection {
 						}
 
 						// Validate message size
-						if (rawData.length > MAX_MESSAGE_SIZE) {
-							throw new Error(`Message size exceeds maximum allowed size of ${MAX_MESSAGE_SIZE} characters`);
+						if (rawBytes > MAX_LIGHTING_MESSAGE_BYTES) {
+							throw new Error(`Message size exceeds maximum allowed size of ${MAX_LIGHTING_MESSAGE_BYTES} bytes`);
 						}
 
 						// Parse JSON with error handling
@@ -1712,6 +1713,9 @@ export class Connection {
 						}
 
 						// Validate packet structure
+						if (rawBytes > MAX_MESSAGE_SIZE && !allowsLargeLightingPacket(parsedPacket)) {
+							throw new Error(`Message size exceeds maximum allowed size of ${MAX_MESSAGE_SIZE} bytes`);
+						}
 						const validationFailure = this.getPacketValidationFailure(parsedPacket);
 						if (validationFailure) {
 							const packetTypeValue = isStructuredObject(parsedPacket) ? parsedPacket.type : undefined;
@@ -2482,9 +2486,10 @@ export class Connection {
 			// Validate patch structure and size
 			try {
 				serializedPatch = JSON.stringify(patch);
-				patchSize = serializedPatch.length;
-				if (patchSize > MAX_SHARED_PATCH_SIZE) {
-					throw new Error(`Patch size exceeds maximum allowed size of ${MAX_SHARED_PATCH_SIZE} characters`);
+				patchSize = PACKET_ENCODER.encode(serializedPatch).byteLength;
+				const sizeLimit = isEuroScopeGraphPatch(patch) ? MAX_LIGHTING_MESSAGE_BYTES : MAX_SHARED_PATCH_SIZE;
+				if (patchSize > sizeLimit) {
+					throw new Error(`Patch size exceeds maximum allowed size of ${sizeLimit} bytes`);
 				}
 			} catch {
 				throw new Error('Patch data is not serializable');
@@ -2494,11 +2499,14 @@ export class Connection {
 			const currentState = this.getOrCreateSharedState(airport);
 
 			// Apply recursive merge with error handling
-			const updatedState = recursivelyMergeObjects(currentState, patch);
+			const updatedState = recursivelyMergeObjects(currentState, patch, 0, isEuroScopeGraphPatch(patch));
 
 			// Update the stored state
 			if (!isStructuredObject(updatedState)) {
 				throw new Error('Shared-state merge did not produce an object');
+			}
+			if (PACKET_ENCODER.encode(JSON.stringify(updatedState)).byteLength > MAX_STATE_SIZE) {
+				throw new Error('Merged shared state exceeds the supported persistence size.');
 			}
 			this.airportSharedStates.set(airport, updatedState);
 
@@ -2600,7 +2608,7 @@ export class Connection {
 			return false;
 		}
 
-		if (updates.length > MAX_MULTI_STATE_UPDATES) {
+		if (updates.length > MAX_LIGHTING_UPDATES) {
 			return false;
 		}
 
@@ -2614,7 +2622,7 @@ export class Connection {
 			return false;
 		}
 
-		if (!isSafeNestedValue(packet.data.sharedStatePatch)) return false;
+		if (!isSafeNestedValue(packet.data.sharedStatePatch) && !isEuroScopeGraphPatch(packet.data.sharedStatePatch)) return false;
 		return true;
 	}
 
