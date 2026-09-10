@@ -1,3 +1,14 @@
+export interface XPlaneDsfSelector {
+	kind: 'dsf-string' | 'dsf-object';
+	source: string;
+	sha256: string;
+	definition: string;
+	command: number;
+	pool: number;
+	filter: number;
+	index: number;
+}
+
 export interface XPlaneRemovalSelector {
 	feature: string;
 	code: number;
@@ -6,7 +17,8 @@ export interface XPlaneRemovalSelector {
 }
 
 export interface XPlaneRemovalArtifact {
-	schema: 'bars-xplane-removals/v1';
+	schema: 'bars-xplane-removals/v1' | 'bars-xplane-removals/v2';
+	dsfSelectors?: XPlaneDsfSelector[];
 	icao: string;
 	selectors: XPlaneRemovalSelector[];
 }
@@ -28,6 +40,9 @@ const ATTRIBUTE_PATTERN = /\s+([A-Za-z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')
 export function generateXPlaneRemovalsJson(xml: string, icao: string): string {
 	if (xml.length > MAX_XPLANE_XML_CHARS) throw new Error('Invalid X-Plane draft: XML is too large');
 	const grouped = new Map<string, XPlaneRemovalSelector>();
+	const dsfSelectors = new Map<string, XPlaneDsfSelector>();
+	let version = '1';
+	let dsfElementCount = 0;
 	let sawFsData = false;
 	let sawRemovals = false;
 	let insideRemovals = false;
@@ -66,6 +81,8 @@ export function generateXPlaneRemovalsJson(xml: string, icao: string): string {
 			if (!sawFsData || sawRemovals || parsed.selfClosing) {
 				throw new Error('Invalid X-Plane draft: expected one non-empty XPlaneRemovals section');
 			}
+			version = parsed.attributes.version ?? '1';
+			if (!['1', '2'].includes(version)) throw new Error('Unsupported X-Plane removal version');
 			sawRemovals = true;
 			insideRemovals = true;
 			continue;
@@ -74,12 +91,21 @@ export function generateXPlaneRemovalsJson(xml: string, icao: string): string {
 		if (!insideRemovals) {
 			continue;
 		}
+		if (parsed.name === 'Dsf') {
+			if (version !== '2' || !parsed.selfClosing) throw new Error('DSF removals require version 2 and self-closing elements');
+			if (++dsfElementCount + removalElementCount > MAX_XPLANE_REMOVAL_ELEMENTS)
+				throw new Error('Too many X-Plane removal selectors');
+			const selector = parseDsfSelector(parsed.attributes);
+			const key = JSON.stringify(selector);
+			dsfSelectors.set(key, selector);
+			continue;
+		}
 		if (parsed.name !== 'Light') throw new Error(`Invalid X-Plane draft: unsupported ${parsed.name} removal element`);
 		if (!parsed.selfClosing) {
 			throw new Error('Invalid X-Plane light selector: Light elements must be self-closing');
 		}
 		removalElementCount += 1;
-		if (removalElementCount > MAX_XPLANE_REMOVAL_ELEMENTS) {
+		if (removalElementCount + dsfElementCount > MAX_XPLANE_REMOVAL_ELEMENTS) {
 			throw new Error(`Invalid X-Plane draft: more than ${MAX_XPLANE_REMOVAL_ELEMENTS} light selectors`);
 		}
 		addSelector(grouped, parsed.attributes);
@@ -90,7 +116,7 @@ export function generateXPlaneRemovalsJson(xml: string, icao: string): string {
 	if (insideRemovals) throw new Error('Invalid X-Plane draft: unclosed XPlaneRemovals section');
 	const removalsSource = xml.match(/<XPlaneRemovals\b[\s\S]*?<\/XPlaneRemovals\s*>/)?.[0] ?? '';
 	const declaredLightCount = removalsSource.match(/<Light\b/g)?.length ?? 0;
-	if (declaredLightCount !== removalElementCount) {
+	if ((removalsSource.match(/<Dsf\b/g)?.length ?? 0) !== dsfElementCount || declaredLightCount !== removalElementCount) {
 		throw new Error('Invalid X-Plane draft: malformed Light element');
 	}
 
@@ -98,7 +124,8 @@ export function generateXPlaneRemovalsJson(xml: string, icao: string): string {
 		.map((selector) => ({ ...selector, ranges: mergeRanges(selector.ranges) }))
 		.sort((left, right) => left.feature.localeCompare(right.feature) || left.code - right.code || left.run - right.run);
 	const artifact: XPlaneRemovalArtifact = {
-		schema: 'bars-xplane-removals/v1',
+		schema: version === '2' ? 'bars-xplane-removals/v2' : 'bars-xplane-removals/v1',
+		...(version === '2' ? { dsfSelectors: [...dsfSelectors.values()] } : {}),
 		icao: icao.trim().toUpperCase(),
 		selectors,
 	};
@@ -194,4 +221,34 @@ function roundFraction(value: number): number {
 
 function clampAndRoundFraction(value: number): number {
 	return roundFraction(Math.min(1, Math.max(0, value)));
+}
+
+function parseDsfSelector(attributes: Record<string, string>): XPlaneDsfSelector {
+	const keys = ['kind', 'source', 'sha256', 'definition', 'command', 'pool', 'filter', 'index'];
+	if (Object.keys(attributes).length !== keys.length || keys.some((key) => !attributes[key]))
+		throw new Error('Invalid DSF selector attributes');
+	const { kind, source, sha256, definition } = attributes;
+	const command = Number(attributes.command),
+		pool = Number(attributes.pool),
+		filter = Number(attributes.filter),
+		index = Number(attributes.index);
+	if (
+		!['dsf-string', 'dsf-object'].includes(kind) ||
+		!/^Earth nav data\/[+-]\d{2}[+-]\d{3}\/[+-]\d{2}[+-]\d{3}\.dsf$/.test(source) ||
+		!/^[a-f0-9]{64}$/.test(sha256) ||
+		definition.length > 512 ||
+		/[<>"&]/.test(definition) || [...definition].some((character) => character.charCodeAt(0) < 32) ||
+		!definition.endsWith(kind === 'dsf-string' ? '.str' : '.obj') ||
+		![command, pool, filter, index].every(Number.isInteger) ||
+		command < 12 ||
+		command > 0x7fffffff ||
+		pool < 0 ||
+		pool > 65535 ||
+		filter < -1 ||
+		filter > 0x7fffffff ||
+		index < 0 ||
+		index > 65535
+	)
+		throw new Error('Invalid DSF removal selector');
+	return { kind: kind as XPlaneDsfSelector['kind'], source, sha256, definition, command, pool, filter, index };
 }
