@@ -1,4 +1,5 @@
 import { AirportService } from './airport';
+import { buildRemovalArtifacts, calculateAirportTestRadius, parseRemovalPolygons } from './msfs-removals';
 
 interface PolygonVertex {
 	lat: number;
@@ -54,47 +55,7 @@ export class SupportService {
 	 * Parses polygons from XML content that have displayName="remove"
 	 */
 	parsePolygonsFromXML(xmlContent: string): Polygon[] {
-		const polygons: Polygon[] = [];
-		const regex = {
-			polygon: /<Polygon([^>]*)>([\s\S]*?)<\/Polygon>/g,
-			vertex: /<Vertex\s+lat="([^"]+)"\s+lon="([^"]+)"/g,
-			altitude: /altitude="([^"]+)"/,
-			displayName: /displayName="([^"]+)"/,
-		};
-
-		let polygonMatch;
-		while ((polygonMatch = regex.polygon.exec(xmlContent)) !== null) {
-			const polygonContent = polygonMatch[0];
-			const polygonAttributes = polygonMatch[1];
-
-			// Check if this polygon has displayName="remove" (case insensitive)
-			const displayNameMatch = polygonAttributes.match(regex.displayName);
-			if (!displayNameMatch || displayNameMatch[1].toLowerCase() !== 'remove') {
-				continue; // Skip if not a remove polygon
-			}
-
-			const altitudeMatch = polygonAttributes.match(regex.altitude);
-			const altitude = altitudeMatch ? parseFloat(altitudeMatch[1]) : 0;
-
-			const vertices: PolygonVertex[] = [];
-			let vertexMatch;
-			while ((vertexMatch = regex.vertex.exec(polygonContent)) !== null) {
-				vertices.push({
-					lat: parseFloat(vertexMatch[1]),
-					lon: parseFloat(vertexMatch[2]),
-				});
-			}
-
-			if (vertices.length > 0) {
-				polygons.push({
-					id: crypto.randomUUID(),
-					vertices,
-					altitude,
-				});
-			}
-		}
-
-		return polygons;
+		return parseRemovalPolygons(xmlContent);
 	}
 
 	/**
@@ -448,22 +409,19 @@ export class SupportService {
 	 * Validates XML content before processing with protection against XXE attacks
 	 */
 	private validateXMLContent(xmlContent: string): boolean {
-		// Basic XML validation
-		if (!xmlContent.trim().startsWith('<?xml')) {
+		if (!/^\s*<\?xml\b/i.test(xmlContent)) {
 			throw new Error('Invalid XML: Missing XML declaration');
 		}
 
-		if (!xmlContent.includes('<FSData')) {
+		if (!/<FSData\b/i.test(xmlContent)) {
 			throw new Error('Invalid XML: Missing FSData root element');
 		}
 
-		// Check for XXE attack patterns
-		if (xmlContent.includes('<!ENTITY') || xmlContent.includes('<!DOCTYPE') || xmlContent.includes('<!ELEMENT')) {
+		if (/<!(?:ENTITY|DOCTYPE|ELEMENT)\b/i.test(xmlContent)) {
 			throw new Error('Invalid XML: External entities are not allowed');
 		}
 
-		// Check for at least one remove polygon
-		const hasRemovePolygon = /<Polygon[^>]*displayName="remove"[^>]*>/i.test(xmlContent);
+		const hasRemovePolygon = /<Polygon\b[^>]*displayName\s*=\s*(["'])remove\1[^>]*>/i.test(xmlContent);
 		if (!hasRemovePolygon) {
 			throw new Error('No remove polygons found in XML');
 		}
@@ -476,98 +434,25 @@ export class SupportService {
 	 */
 	async generateLightSupportsXML(inputXml: string, icao: string): Promise<string> {
 		try {
-			// Validate XML content
 			this.validateXMLContent(inputXml);
-
-			// Get airport data to get coordinates
 			const airportData = await this.airportService.getAirport(icao);
-			if (!airportData) {
-				throw new Error(`Airport with ICAO ${icao} not found`);
-			}
-
-			// Parse polygons from input XML
-			const polygons = this.parsePolygonsFromXML(inputXml);
-
-			if (polygons.length === 0) {
-				throw new Error('No valid remove polygons found in input XML');
-			}
-
+			if (!airportData) throw new Error(`Airport with ICAO ${icao} not found`);
+			const polygons = parseRemovalPolygons(inputXml);
+			if (polygons.length === 0) throw new Error('No valid remove polygons found in input XML');
+			const { supports, exclusions } = buildRemovalArtifacts(polygons);
+			const airportLatitude = Number(airportData.latitude) || 0;
+			const airportLongitude = Number(airportData.longitude) || 0;
+			const airportTestRadius = calculateAirportTestRadius({ lat: airportLatitude, lon: airportLongitude }, supports, exclusions);
 			let xml = '<?xml version="1.0"?>\n<FSData version="9.0">\n';
-
-			// Start airport tag with coordinates from airport data
-			// Add explicit nullish coalescing to handle potentially undefined values
-			xml += `\t<Airport displayName="BARS ${icao}" groupIndex="1" groupID="2" name="BARS ${icao}" ident="${icao}" lat="${airportData.latitude ?? 0}" lon="${airportData.longitude ?? 0}" alt="0.00000000000000" magvar="0.000000" trafficScalar="1.000000" airportTestRadius="5000.00000000000000" applyFlatten="FALSE" isOnTIN="FALSE" tinColorCorrection="FALSE" closed="FALSE">\n`;
-
-			// Add light supports
-			let supportCount = 1;
-			let exclusionRectangles = ''; // Store exclusion rectangles separately
-			const exclusionCosCache = new Map<number, number>();
-
-			// Helper function to calculate exclusion rectangle coordinates
-			const calculateExclusionCoords = (center: { latitude: number; longitude: number }, width: number, length: number) => {
-				// Add a small buffer (35%) to make exclusion rectangle slightly larger
-				const bufferFactor = 1.35;
-				const bufferedWidth = width * bufferFactor;
-				const bufferedLength = length * bufferFactor;
-
-				// Convert width/length from meters to degrees
-				const halfWidthDeg = bufferedWidth * 0.5 * this.metersToDegreesBase;
-				const cacheKey = Math.round(center.latitude * 1e6);
-				let cosLat = exclusionCosCache.get(cacheKey);
-				if (cosLat === undefined) {
-					cosLat = this.getCosineLatitude(center.latitude);
-					exclusionCosCache.set(cacheKey, cosLat);
-				}
-				const halfLengthDeg = this.metersToDegreesLonFromCos(bufferedLength * 0.5, cosLat);
-
-				return {
-					latMin: center.latitude - halfWidthDeg,
-					latMax: center.latitude + halfWidthDeg,
-					lonMin: center.longitude - halfLengthDeg,
-					lonMax: center.longitude + halfLengthDeg,
-				};
-			};
-
-			for (let i = 0; i < polygons.length; i++) {
-				const polygon = polygons[i];
-
-				const supports = this.calculateLightSupports(polygon);
-
-				// Add each support and store exclusion rectangle
-				supports.forEach((support) => {
-					// Add light support inside Airport tag
-					xml += `\t\t<LightSupport displayName="BARS-${supportCount}" parentGroupID="2" groupIndex="1" latitude="${support.latitude}" longitude="${support.longitude}" altitude="${polygon.altitude || 0}" altitude2="${polygon.altitude || 0}" heading="${support.heading}" width="${support.width}" length="${support.length}" excludeLights="TRUE" excludeLightObjects="TRUE"/>\n`;
-
-					// Calculate and store exclusion rectangle to add later outside Airport tag
-					const exclusionCoords = calculateExclusionCoords(
-						{ latitude: support.latitude, longitude: support.longitude },
-						support.width,
-						support.length,
-					);
-
-					exclusionRectangles += `\t<ExclusionRectangle latitudeMinimum="${exclusionCoords.latMin}" latitudeMaximum="${exclusionCoords.latMax}" longitudeMinimum="${exclusionCoords.lonMin}" longitudeMaximum="${exclusionCoords.lonMax}" excludeLibraryObjects="TRUE"/>\n`;
-
-					supportCount++;
-				});
-
-				// Count intentionally unused for now; metrics removed
+			xml += `\t<Airport displayName="BARS ${icao}" groupIndex="1" groupID="2" name="BARS ${icao}" ident="${icao}" lat="${airportLatitude}" lon="${airportLongitude}" alt="0.00000000000000" magvar="0.000000" trafficScalar="1.000000" airportTestRadius="${airportTestRadius.toFixed(6)}" applyFlatten="FALSE" isOnTIN="FALSE" tinColorCorrection="FALSE" closed="FALSE">\n`;
+			for (const [index, support] of supports.entries()) {
+				xml += `\t\t<LightSupport displayName="BARS-${index + 1}" parentGroupID="2" groupIndex="1" latitude="${support.latitude}" longitude="${support.longitude}" altitude="${support.altitude}" altitude2="${support.altitude}" heading="${support.heading}" width="${support.width}" length="${support.length}" excludeLights="TRUE" excludeLightObjects="TRUE"/>\n`;
 			}
-
-			// Close airport tag
-			xml += '\t\t<Aprons/>\n';
-			xml += '\t\t<PaintedElements/>\n';
-			xml += '\t\t<ApronEdgeLights/>\n';
-			xml += '\t</Airport>\n';
-
-			// Add exclusion rectangles after Airport tag
-			xml += exclusionRectangles;
-
-			// Close FSData
-			xml += '</FSData>';
-
-			// Stats tracking removed
-
-			return xml;
+			xml += '\t\t<Aprons/>\n\t\t<PaintedElements/>\n\t\t<ApronEdgeLights/>\n\t</Airport>\n';
+			for (const exclusion of exclusions) {
+				xml += `\t<ExclusionRectangle latitudeMinimum="${exclusion.latitudeMinimum}" latitudeMaximum="${exclusion.latitudeMaximum}" longitudeMinimum="${exclusion.longitudeMinimum}" longitudeMaximum="${exclusion.longitudeMaximum}"${exclusion.flags.excludeLibraryObjects ? ' excludeLibraryObjects="TRUE"' : ''}${exclusion.flags.excludeVFX ? ' excludeVFX="TRUE"' : ''}${exclusion.flags.excludeSimPropContainers ? ' excludeSimPropContainer="TRUE"' : ''}/>\n`;
+			}
+			return `${xml}</FSData>`;
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 			throw new Error(`Failed to generate light supports: ${errorMessage}`);
