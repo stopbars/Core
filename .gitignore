@@ -175,3 +175,6 @@ dist
 
 .dev.vars
 .wrangler/
+
+# Local development tests
+*.test.ts
