@@ -2121,6 +2121,58 @@
 				}
 			}
 		},
+		"/staff/users/{id}/fast-track": {
+			"put": {
+				"x-hidden": true,
+				"summary": "Update contributor fast-track access",
+				"tags": ["Staff"],
+				"security": [
+					{
+						"VatsimToken": []
+					}
+				],
+				"parameters": [
+					{
+						"in": "path",
+						"name": "id",
+						"required": true,
+						"schema": {
+							"type": "integer"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": ["enabled"],
+								"properties": {
+									"enabled": {
+										"type": "boolean"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Fast-track access updated"
+					},
+					"400": {
+						"description": "Invalid request"
+					},
+					"403": {
+						"description": "Forbidden"
+					},
+					"404": {
+						"description": "User not found"
+					}
+				}
+			}
+		},
 		"/staff/users/{id}": {
 			"delete": {
 				"x-hidden": true,
@@ -2371,6 +2423,10 @@
 									"generationHash": {
 										"type": "string",
 										"description": "Normalized draft hash returned by /supports/generate."
+									},
+									"fastTrackRequested": {
+										"type": "boolean",
+										"description": "Opt in to fast-track publishing when the authenticated account is eligible. Defaults to false."
 									}
 								}
 							}

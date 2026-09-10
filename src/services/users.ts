@@ -19,6 +19,12 @@ type StaffUserDTO = {
 	created_at: string;
 	last_login: string;
 	is_staff: boolean;
+	fast_track: { enabled: boolean; expires_at: string | null };
+	contribution_stats: {
+		approved: number;
+		airports: number;
+		rejected: number;
+	};
 };
 
 type StaffUserRow = {
@@ -37,9 +43,54 @@ type StaffUserRow = {
 	created_at: string;
 	last_login: string;
 	is_staff: number;
+	fast_track_expires_at: string | null;
+	approved_contributions: number;
+	approved_airports: number;
+	rejected_contributions: number;
 };
 
 type UserCountRow = { count: number };
+
+const staffUserProjection = `
+    u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.display_name,
+    u.region_id, u.region_name, u.division_id, u.division_name,
+    u.subdivision_id, u.subdivision_name, u.created_at, u.last_login,
+    CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END AS is_staff,
+    (SELECT ft.expires_at FROM contributor_fast_track ft
+        WHERE ft.user_id = u.id AND ft.enabled = 1
+            AND ft.expires_at > CURRENT_TIMESTAMP LIMIT 1) AS fast_track_expires_at,
+    (SELECT COUNT(*) FROM contributions c
+        WHERE c.user_id = u.vatsim_id AND c.status = 'approved') AS approved_contributions,
+    (SELECT COUNT(DISTINCT c.airport_icao) FROM contributions c
+        WHERE c.user_id = u.vatsim_id AND c.status = 'approved') AS approved_airports,
+    (SELECT COUNT(*) FROM contributions c
+        WHERE c.user_id = u.vatsim_id AND c.status = 'rejected') AS rejected_contributions`;
+
+const toStaffUserDto = (user: StaffUserRow): StaffUserDTO => {
+	return {
+		id: user.id,
+		vatsim_id: user.vatsim_id,
+		email: user.email,
+		full_name: user.full_name,
+		display_mode: user.display_mode ?? undefined,
+		display_name: user.display_name,
+		region: user.region_id || user.region_name ? { id: user.region_id, name: user.region_name } : null,
+		division: user.division_id || user.division_name ? { id: user.division_id, name: user.division_name } : null,
+		subdivision: user.subdivision_id || user.subdivision_name ? { id: user.subdivision_id, name: user.subdivision_name } : null,
+		created_at: user.created_at,
+		last_login: user.last_login,
+		is_staff: user.is_staff === 1,
+		fast_track: {
+			enabled: user.fast_track_expires_at !== null,
+			expires_at: user.fast_track_expires_at,
+		},
+		contribution_stats: {
+			approved: Number(user.approved_contributions) || 0,
+			airports: Number(user.approved_airports) || 0,
+			rejected: Number(user.rejected_contributions) || 0,
+		},
+	};
+};
 
 export class UserService {
 	private dbSession: DatabaseSessionService;
@@ -66,10 +117,7 @@ export class UserService {
 			const [usersResult, countResult] = await this.dbSession.executeReadBatch([
 				{
 					query: `
-						SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.display_name,
-							u.region_id, u.region_name, u.division_id, u.division_name,
-							u.subdivision_id, u.subdivision_name, u.created_at, u.last_login,
-							CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END AS is_staff
+						SELECT ${staffUserProjection}
 						FROM users u
 						LEFT JOIN staff s ON s.user_id = u.id
 						ORDER BY u.created_at DESC
@@ -83,20 +131,7 @@ export class UserService {
 			// SAFETY: The second SELECT aliases its single aggregate column to `count`, matching UserCountRow.
 			const count = countResult.results as UserCountRow[];
 			return {
-				users: users.map((u) => ({
-					id: u.id,
-					vatsim_id: u.vatsim_id,
-					email: u.email,
-					full_name: u.full_name,
-					display_mode: u.display_mode ?? undefined,
-					display_name: u.display_name,
-					region: u.region_id || u.region_name ? { id: u.region_id, name: u.region_name } : null,
-					division: u.division_id || u.division_name ? { id: u.division_id, name: u.division_name } : null,
-					subdivision: u.subdivision_id || u.subdivision_name ? { id: u.subdivision_id, name: u.subdivision_name } : null,
-					created_at: u.created_at,
-					last_login: u.last_login,
-					is_staff: u.is_staff === 1,
-				})),
+				users: users.map(toStaffUserDto),
 				total: count[0]?.count || 0,
 			};
 		} catch {
@@ -113,26 +148,9 @@ export class UserService {
 		}
 
 		try {
-			const result = await this.dbSession.executeRead<{
-				id: number;
-				vatsim_id: string;
-				email: string;
-				full_name: string | null;
-				display_mode: number | null;
-				display_name: string | null;
-				region_id: string | null;
-				region_name: string | null;
-				division_id: string | null;
-				division_name: string | null;
-				subdivision_id: string | null;
-				subdivision_name: string | null;
-				created_at: string;
-				last_login: string;
-				is_staff: number;
-			}>(
+			const result = await this.dbSession.executeRead<StaffUserRow>(
 				`
-		  SELECT u.id, u.vatsim_id, u.email, u.full_name, u.display_mode, u.display_name, u.region_id, u.region_name, u.division_id, u.division_name, u.subdivision_id, u.subdivision_name, u.created_at, u.last_login,
-		  CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_staff
+		  SELECT ${staffUserProjection}
 		  FROM users u
 		  LEFT JOIN staff s ON u.id = s.user_id
 		  WHERE u.email LIKE ? OR u.vatsim_id LIKE ?
@@ -144,23 +162,72 @@ export class UserService {
 			if (!result) {
 				throw new Error('Failed to search users');
 			}
-			return result.results.map((u) => ({
-				id: u.id,
-				vatsim_id: u.vatsim_id,
-				email: u.email,
-				full_name: u.full_name,
-				display_mode: u.display_mode ?? undefined,
-				display_name: u.display_name,
-				region: u.region_id || u.region_name ? { id: u.region_id, name: u.region_name } : null,
-				division: u.division_id || u.division_name ? { id: u.division_id, name: u.division_name } : null,
-				subdivision: u.subdivision_id || u.subdivision_name ? { id: u.subdivision_id, name: u.subdivision_name } : null,
-				created_at: u.created_at,
-				last_login: u.last_login,
-				is_staff: u.is_staff === 1,
-			}));
+			return result.results.map(toStaffUserDto);
 		} catch {
 			throw new HttpError(500, 'Failed to search users');
 		}
+	}
+
+	async setFastTrackAccess(
+		targetUserId: number,
+		enabled: boolean,
+		requestingUserId: number,
+	): Promise<{ enabled: boolean; expires_at: string | null }> {
+		const hasPermission = await this.roles.hasPermission(requestingUserId, StaffRole.PRODUCT_MANAGER);
+		if (!hasPermission) {
+			throw new HttpError(403, 'Forbidden: Only product managers and lead developers can manage fast-track access');
+		}
+
+		const target = await this.dbSession.executeLatest<{ id: number; vatsim_id: string }>(
+			'SELECT id, vatsim_id FROM users WHERE id = ? LIMIT 1',
+			[targetUserId],
+		);
+		const targetUser = target.results[0];
+		if (!targetUser) throw new HttpError(404, 'User not found');
+
+		if (enabled) {
+			await this.dbSession.executeWrite(
+				`INSERT INTO contributor_fast_track (
+						user_id, enabled, granted_by, granted_at, expires_at, updated_by, updated_at
+					) VALUES (?, 1, ?, CURRENT_TIMESTAMP, datetime('now', '+1 year'), ?, CURRENT_TIMESTAMP)
+					ON CONFLICT(user_id) DO UPDATE SET
+						enabled = 1,
+						granted_by = excluded.granted_by,
+						granted_at = excluded.granted_at,
+						expires_at = excluded.expires_at,
+						updated_by = excluded.updated_by,
+						updated_at = excluded.updated_at`,
+				[targetUserId, requestingUserId, requestingUserId],
+			);
+		} else {
+			await this.dbSession.executeWrite(
+				`UPDATE contributor_fast_track
+				 SET enabled = 0, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+				 WHERE user_id = ? AND enabled = 1`,
+				[requestingUserId, targetUserId],
+			);
+		}
+
+		const active = await this.dbSession.executeLatest<{ expires_at: string }>(
+			`SELECT expires_at
+			 FROM contributor_fast_track
+			 WHERE user_id = ? AND enabled = 1 AND expires_at > CURRENT_TIMESTAMP
+			 LIMIT 1`,
+			[targetUserId],
+		);
+		const expiresAt = active.results[0]?.expires_at ?? null;
+
+		try {
+			this.posthog?.track('Contributor Fast Track Updated', {
+				targetVatsimId: targetUser.vatsim_id,
+				requestingUserId,
+				enabled: expiresAt !== null,
+			});
+		} catch (error) {
+			console.warn('Posthog tracking failed', error);
+		}
+
+		return { enabled: expiresAt !== null, expires_at: expiresAt };
 	}
 
 	// Delete user by id

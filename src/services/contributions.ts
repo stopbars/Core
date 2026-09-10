@@ -32,6 +32,8 @@ export interface Contribution {
 	artifactGenerationId: string | null;
 	removalArtifactKey: string | null;
 	barsArtifactKey: string | null;
+	decisionSource?: 'staff' | 'fast_track' | null;
+	decidedBy?: string | null;
 }
 
 export interface ContributionSubmission {
@@ -43,6 +45,7 @@ export interface ContributionSubmission {
 	simulator: Simulator;
 	generationToken: string;
 	generationHash: string;
+	fastTrackRequested: boolean;
 }
 
 export interface ContributionDecision {
@@ -80,6 +83,10 @@ export interface ContributionPublication {
 
 export type ContributionDecisionResult = Contribution & { publication?: ContributionPublication };
 
+export type ContributionSubmissionResult = ContributionDecisionResult & {
+	fastTrack?: { status: 'published' | 'review_required' };
+};
+
 import { DatabaseSessionService } from './database-session';
 
 export const MAX_CONTRIBUTION_NOTES_CHARS = 1000;
@@ -88,6 +95,7 @@ const ICAO_REGEX = /^[A-Z0-9]{4}$/;
 /** URL-safe base64 (no padding) of a SHA-256 digest. */
 export const CONTRIBUTION_GENERATION_TOKEN_REGEX = /^[A-Za-z0-9_-]{43}$/;
 const CONTRIBUTION_GENERATION_CONTRACT_VERSION = 'bars-contribution-generation/v2';
+const MAX_FAST_TRACK_PUBLICATIONS_PER_DAY = 5;
 
 function sha256ToBase64Url(hashBuf: ArrayBuffer): string {
 	const bytes = new Uint8Array(hashBuf);
@@ -201,6 +209,7 @@ export class ContributionService {
 				c.generation_token AS generationToken, c.generation_hash AS generationHash,
 				c.artifact_identity AS artifactIdentity, c.artifact_generation_id AS artifactGenerationId,
 				c.removal_artifact_key AS removalArtifactKey, c.bars_artifact_key AS barsArtifactKey,
+				c.decision_source AS decisionSource, c.decided_by AS decidedBy,
 				CASE WHEN staff.role IN ('LEAD_DEVELOPER', 'PRODUCT_MANAGER') THEN 1 ELSE 0 END AS actorIsProductManager
 			 FROM users actor
 			 LEFT JOIN staff ON staff.user_id = actor.id
@@ -493,7 +502,7 @@ export class ContributionService {
 		}
 		return trimmed;
 	}
-	async createContribution(submission: ContributionSubmission): Promise<Contribution> {
+	async createContribution(submission: ContributionSubmission): Promise<ContributionSubmissionResult> {
 		const normalizedAirportIcao = this.normalizeAirportIcao(submission.airportIcao);
 		const sanitizedPackageName = this.sanitizePackageName(submission.packageName);
 
@@ -629,6 +638,8 @@ export class ContributionService {
 			artifactGenerationId: null,
 			removalArtifactKey: null,
 			barsArtifactKey: null,
+			decisionSource: null,
+			decidedBy: null,
 		};
 		try {
 			this.posthog?.track('Contribution Submitted', {
@@ -640,7 +651,42 @@ export class ContributionService {
 		} catch (e) {
 			console.warn('Posthog track failed (Contribution Submitted)', e);
 		}
-		return contribution;
+		if (!submission.fastTrackRequested) return contribution;
+
+		try {
+			const fastTrack = await this.evaluateFastTrack(contribution);
+			if (!fastTrack.hasActiveGrant) return contribution;
+			if (!fastTrack.canPublish) return { ...contribution, fastTrack: { status: 'review_required' } };
+
+			const published = await this.approvePendingContribution(
+				contribution,
+				contribution.packageName,
+				submission.userId,
+				'fast_track',
+			);
+			try {
+				this.posthog?.track('Contribution Fast Track Published', {
+					id: contribution.id,
+					airport: contribution.airportIcao,
+					packageName: contribution.packageName,
+					simulator: contribution.simulator,
+					userId: submission.userId,
+				});
+			} catch (error) {
+				console.warn('Posthog track failed (Contribution Fast Track)', error);
+			}
+			return { ...published, fastTrack: { status: 'published' } };
+		} catch (error) {
+			console.warn(
+				JSON.stringify({
+					event: 'contribution_fast_track_fallback',
+					contributionId: contribution.id,
+					userId: submission.userId,
+					error: error instanceof Error ? error.message : 'Unknown error',
+				}),
+			);
+			return { ...contribution, fastTrack: { status: 'review_required' } };
+		}
 	}
 	async getContribution(id: string): Promise<Contribution | null> {
 		const result = await this.dbSession.executeRead<Contribution>(
@@ -831,6 +877,133 @@ export class ContributionService {
 		};
 	}
 
+	private fastTrackGuard(alias: string): string {
+		return `
+			AND EXISTS (
+				SELECT 1
+				FROM users trusted_user
+				JOIN contributor_fast_track fast_track ON fast_track.user_id = trusted_user.id
+				WHERE trusted_user.vatsim_id = ${alias}.user_id
+					AND fast_track.enabled = 1
+					AND fast_track.expires_at > CURRENT_TIMESTAMP
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM contributions other_contribution
+				WHERE other_contribution.id != ${alias}.id
+					AND other_contribution.airport_icao = ${alias}.airport_icao
+					AND other_contribution.package_name = ${alias}.package_name COLLATE NOCASE
+					AND other_contribution.simulator = ${alias}.simulator
+					AND other_contribution.status = 'pending'
+			)
+			AND (
+				SELECT COUNT(*) FROM contributions recent
+				WHERE recent.user_id = ${alias}.user_id
+					AND recent.decision_source = 'fast_track'
+					AND datetime(recent.decision_date) >= datetime('now', '-1 day')
+			) < ${MAX_FAST_TRACK_PUBLICATIONS_PER_DAY}`;
+	}
+
+	private async evaluateFastTrack(contribution: Contribution): Promise<{ hasActiveGrant: boolean; canPublish: boolean }> {
+		const result = await this.dbSession.executeLatest<{ hasActiveGrant: number; canPublish: number }>(
+			`SELECT
+				CASE WHEN EXISTS (
+					SELECT 1
+					FROM users trusted_user
+					JOIN contributor_fast_track fast_track ON fast_track.user_id = trusted_user.id
+					WHERE trusted_user.vatsim_id = target.user_id
+						AND fast_track.enabled = 1
+						AND fast_track.expires_at > CURRENT_TIMESTAMP
+				) THEN 1 ELSE 0 END AS hasActiveGrant,
+				CASE WHEN target.status = 'pending' ${this.fastTrackGuard('target')}
+					THEN 1 ELSE 0 END AS canPublish
+			 FROM contributions target
+			 WHERE target.id = ? LIMIT 1`,
+			[contribution.id],
+		);
+		const row = result.results[0];
+		return {
+			hasActiveGrant: row?.hasActiveGrant === 1,
+			canPublish: row?.canPublish === 1,
+		};
+	}
+
+	private async approvePendingContribution(
+		contribution: Contribution,
+		packageName: string,
+		decidedBy: string,
+		decisionSource: 'staff' | 'fast_track',
+	): Promise<ContributionDecisionResult> {
+		const publication = await this.generateAndPublishArtifacts(contribution, packageName, 'approval');
+		const now = new Date().toISOString();
+		const targetGuard = decisionSource === 'fast_track' ? this.fastTrackGuard('target') : '';
+		const currentGuard = decisionSource === 'fast_track' ? this.fastTrackGuard('contributions') : '';
+
+		try {
+			const [, approvedWrite] = await this.dbSession.executeBatch([
+				{
+					query: `UPDATE contributions
+						SET status = 'outdated', decision_date = ?
+						WHERE airport_icao = ?
+							AND package_name = ? COLLATE NOCASE
+							AND simulator = ?
+							AND status = 'approved'
+							AND id != ?
+							AND EXISTS (
+								SELECT 1 FROM contributions target
+								WHERE target.id = ? AND target.status = 'pending' ${targetGuard}
+							)`,
+					params: [now, contribution.airportIcao, packageName, contribution.simulator, contribution.id, contribution.id],
+				},
+				{
+					query: `UPDATE contributions
+						SET status = 'approved', rejection_reason = NULL, decision_date = ?, package_name = ?,
+							artifact_identity = ?, artifact_generation_id = ?, removal_artifact_key = ?, bars_artifact_key = ?,
+							decision_source = ?, decided_by = ?
+						WHERE id = ? AND status = 'pending' ${currentGuard}`,
+					params: [
+						now,
+						packageName,
+						publication.artifactIdentity,
+						publication.generationId,
+						publication.removal.key,
+						publication.bars.key,
+						decisionSource,
+						decidedBy,
+						contribution.id,
+					],
+				},
+			]);
+			if (approvedWrite?.meta?.changes === 0) {
+				throw new Error(
+					decisionSource === 'fast_track'
+						? 'Contribution no longer qualifies for fast-track publishing'
+						: 'Contribution approval lost a concurrent decision race',
+				);
+			}
+		} catch (error) {
+			const publicationIsCurrent = await this.isPublicationCurrent(contribution.id, publication);
+			if (publicationIsCurrent !== true) {
+				if (publicationIsCurrent === false) await this.discardPublication(publication);
+				throw error;
+			}
+		}
+
+		return {
+			...contribution,
+			packageName,
+			status: 'approved',
+			rejectionReason: null,
+			decisionDate: now,
+			artifactIdentity: publication.artifactIdentity,
+			artifactGenerationId: publication.generationId,
+			removalArtifactKey: publication.removal.key,
+			barsArtifactKey: publication.bars.key,
+			decisionSource,
+			decidedBy,
+			publication,
+		};
+	}
+
 	private async generateAndPublishArtifacts(
 		contribution: Contribution,
 		packageName: string,
@@ -950,88 +1123,72 @@ export class ContributionService {
 				? this.sanitizePackageName(decision.newPackageName, 'newPackageName')
 				: contribution.packageName;
 
-		// Update contribution with decision
-		const now = new Date().toISOString();
-		const status = decision.approved ? 'approved' : 'rejected';
-		const rejectionReason = decision.approved ? null : decision.rejectionReason || 'No reason provided';
-		const updateCurrent = {
-			query: `UPDATE contributions
-				SET status = ?, rejection_reason = ?, decision_date = ?, package_name = ?
-				WHERE id = ?`,
-			params: [status, rejectionReason, now, packageName, id],
-		};
-
-		let publication: ContributionPublication | undefined;
-		// Generate and publish a complete immutable pair before the D1 pointer moves.
 		if (decision.approved) {
-			publication = await this.generateAndPublishArtifacts(contribution, packageName, 'approval');
+			const approved = await this.approvePendingContribution(contribution, packageName, userId, 'staff');
 			try {
-				const [, approvedWrite] = await this.dbSession.executeBatch([
-					{
-						query: `UPDATE contributions
-							SET status = 'outdated', decision_date = ?
-							WHERE airport_icao = ?
-								AND package_name = ? COLLATE NOCASE
-								AND simulator = ?
-								AND status = 'approved'
-								AND id != ?
-								AND EXISTS (SELECT 1 FROM contributions target WHERE target.id = ? AND target.status = 'pending')`,
-						params: [now, contribution.airportIcao, packageName, contribution.simulator, id, id],
-					},
-					{
-						query: `UPDATE contributions
-							SET status = 'approved', rejection_reason = NULL, decision_date = ?, package_name = ?,
-								artifact_identity = ?, artifact_generation_id = ?, removal_artifact_key = ?, bars_artifact_key = ?
-							WHERE id = ? AND status = 'pending'`,
-						params: [
-							now,
-							packageName,
-							publication.artifactIdentity,
-							publication.generationId,
-							publication.removal.key,
-							publication.bars.key,
-							id,
-						],
-					},
-				]);
-				if (approvedWrite?.meta?.changes === 0) {
-					throw new Error('Contribution approval lost a concurrent decision race');
-				}
+				this.posthog?.track('Contribution Approved', {
+					id,
+					airport: contribution.airportIcao,
+					packageName,
+					simulator: contribution.simulator,
+					decidedBy: userId,
+				});
 			} catch (error) {
-				const publicationIsCurrent = await this.isPublicationCurrent(id, publication);
-				if (publicationIsCurrent !== true) {
-					if (publicationIsCurrent === false) await this.discardPublication(publication);
-					throw error;
-				}
+				console.warn('Posthog track failed (Contribution Decision)', error);
 			}
-		} else {
-			await this.dbSession.executeWrite(updateCurrent.query, updateCurrent.params);
+			return approved;
+		}
+
+		const now = new Date().toISOString();
+		const rejectionReason = decision.rejectionReason || 'No reason provided';
+		const [rejectedWrite] = await this.dbSession.executeBatch([
+			{
+				query: `UPDATE contributions
+					SET status = 'rejected', rejection_reason = ?, decision_date = ?, package_name = ?,
+						decision_source = 'staff', decided_by = ?
+					WHERE id = ? AND status = 'pending'`,
+				params: [rejectionReason, now, packageName, userId, id],
+			},
+			{
+				query: `UPDATE contributor_fast_track
+					SET enabled = 0,
+						updated_by = (SELECT id FROM users WHERE vatsim_id = ? LIMIT 1),
+						updated_at = CURRENT_TIMESTAMP
+					WHERE user_id = (SELECT id FROM users WHERE vatsim_id = ? LIMIT 1)
+						AND enabled = 1
+						AND EXISTS (
+							SELECT 1 FROM contributions rejected
+							WHERE rejected.id = ? AND rejected.status = 'rejected' AND rejected.decided_by = ?
+						)`,
+				params: [userId, contribution.userId, id, userId],
+			},
+		]);
+		if (rejectedWrite?.meta?.changes === 0) {
+			throw new Error('Contribution rejection lost a concurrent decision race');
 		}
 
 		const updated: Contribution = {
 			...contribution,
 			packageName,
-			status,
+			status: 'rejected',
 			rejectionReason,
 			decisionDate: now,
-			artifactIdentity: publication?.artifactIdentity ?? contribution.artifactIdentity,
-			artifactGenerationId: publication?.generationId ?? contribution.artifactGenerationId,
-			removalArtifactKey: publication?.removal.key ?? contribution.removalArtifactKey,
-			barsArtifactKey: publication?.bars.key ?? contribution.barsArtifactKey,
+			decisionSource: 'staff',
+			decidedBy: userId,
 		};
 		try {
-			this.posthog?.track(decision.approved ? 'Contribution Approved' : 'Contribution Rejected', {
+			this.posthog?.track('Contribution Rejected', {
 				id,
 				airport: contribution.airportIcao,
 				packageName,
 				simulator: contribution.simulator,
 				decidedBy: userId,
-				rejectionReason: decision.approved ? undefined : decision.rejectionReason || 'No reason provided',
+				rejectionReason,
 			});
 		} catch (e) {
 			console.warn('Posthog track failed (Contribution Decision)', e);
 		}
-		return publication ? { ...updated, publication } : updated;
+		return updated;
 	}
 	async getContributionStats(): Promise<{
 		total: number;

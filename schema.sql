@@ -29,6 +29,19 @@ CREATE TABLE IF NOT EXISTS staff (
   )
 );
 
+CREATE TABLE IF NOT EXISTS contributor_fast_track (
+  user_id INTEGER PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  granted_by INTEGER,
+  granted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  updated_by INTEGER,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  FOREIGN KEY (granted_by) REFERENCES users (id) ON DELETE SET NULL,
+  FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS points (
   id TEXT PRIMARY KEY,
   airport_id TEXT NOT NULL,
@@ -200,7 +213,14 @@ CREATE TABLE IF NOT EXISTS contributions (
   artifact_identity TEXT,
   artifact_generation_id TEXT,
   removal_artifact_key TEXT,
-  bars_artifact_key TEXT
+  bars_artifact_key TEXT,
+  decision_source TEXT CHECK (
+    decision_source IN (
+      'staff',
+      'fast_track'
+    )
+  ),
+  decided_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS notams (
@@ -341,6 +361,12 @@ CREATE INDEX IF NOT EXISTS idx_staff_created_at ON staff (
   created_at DESC
 );
 
+CREATE INDEX IF NOT EXISTS idx_contributor_fast_track_active ON contributor_fast_track (
+  user_id,
+  enabled,
+  expires_at
+);
+
 CREATE INDEX IF NOT EXISTS idx_active_objects_name ON active_objects (
   name
 );
@@ -396,6 +422,12 @@ CREATE INDEX IF NOT EXISTS idx_contributions_artifact_identity ON contributions 
   artifact_identity,
   simulator,
   status
+);
+
+CREATE INDEX IF NOT EXISTS idx_contributions_fast_track_limit ON contributions (
+  user_id,
+  decision_source,
+  decision_date DESC
 );
 
 CREATE INDEX IF NOT EXISTS idx_points_timestamps ON points (

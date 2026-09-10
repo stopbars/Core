@@ -237,12 +237,7 @@ interface ContributionSubmissionPayload {
 	simulator: Simulator;
 	generationToken: string;
 	generationHash: string;
-}
-
-interface ContributionDecisionPayload {
-	approved: boolean;
-	rejectionReason?: string;
-	newPackageName?: string;
+	fastTrackRequested?: boolean;
 }
 
 interface AuthNetworkStatusPayload {
@@ -1311,6 +1306,14 @@ app.get('/auth/account', async (c) => {
 		if (!user) {
 			return dbContext.textResponse('User not found', { status: 404 });
 		}
+		const fastTrack = await dbContext.db.executeLatest<{ expires_at: string }>(
+			`SELECT ft.expires_at
+			 FROM contributor_fast_track ft
+			 WHERE ft.user_id = ? AND ft.enabled = 1 AND ft.expires_at > CURRENT_TIMESTAMP
+			 LIMIT 1`,
+			[user.id],
+		);
+		const fastTrackExpiry = fastTrack.results[0]?.expires_at ?? null;
 
 		// Fire-and-forget background maintenance so it doesn't block response
 		try {
@@ -1355,6 +1358,10 @@ app.get('/auth/account', async (c) => {
 					: (vatsimUser.subdivision ?? null),
 			created_at: user.created_at,
 			last_login: user.last_login,
+			fast_track: {
+				enabled: fastTrackExpiry !== null,
+				expires_at: fastTrackExpiry,
+			},
 		});
 	} finally {
 		dbContext.close();
@@ -3959,7 +3966,7 @@ staffUsersApp.use('*', async (c, next) => {
 	}
 
 	c.set('user', user);
-	c.set('userService', new UserService(c.env.DB, roles, auth));
+	c.set('userService', new UserService(c.env.DB, roles, auth, ServicePool.getPostHog(c.env)));
 	await next();
 });
 
@@ -4104,6 +4111,65 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
 
 		c.status(status === 403 ? 403 : status === 404 ? 404 : 500);
 		return c.json({ error: message });
+	}
+});
+
+/**
+ * @openapi
+ * /staff/users/{id}/fast-track:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update contributor fast-track access
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled]
+ *             properties:
+ *               enabled: { type: boolean }
+ *     responses:
+ *       200: { description: Fast-track access updated }
+ *       400: { description: Invalid request }
+ *       403: { description: Forbidden }
+ *       404: { description: User not found }
+ */
+staffUsersApp.put('/:id/fast-track', async (c) => {
+	const targetUserId = Number(c.req.param('id'));
+	if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+		return c.json({ error: 'User ID must be a positive integer' }, 400);
+	}
+
+	let body: JsonValue;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON' }, 400);
+	}
+	const enabled = readBoolean(parseJsonObject(body).enabled);
+	if (enabled === undefined) return c.json({ error: 'enabled must be a boolean' }, 400);
+
+	try {
+		const user = c.get('user')!;
+		const userService = c.get('userService')!;
+		const fastTrack = await userService.setFastTrackAccess(targetUserId, enabled, user.id);
+		return c.json({ success: true, fastTrack });
+	} catch (error) {
+		if (error instanceof HttpError) {
+			const status = error.status === 403 ? 403 : error.status === 404 ? 404 : 400;
+			return c.json({ error: error.message }, status);
+		}
+		console.error('Failed to update contributor fast-track access', error);
+		return c.json({ error: 'Failed to update fast-track access' }, 500);
 	}
 });
 
@@ -4557,6 +4623,9 @@ contributionsApp.get(
  *               generationHash:
  *                 type: string
  *                 description: Normalized draft hash returned by /supports/generate.
+ *               fastTrackRequested:
+ *                 type: boolean
+ *                 description: Opt in to fast-track publishing when the authenticated account is eligible. Defaults to false.
  *     responses:
  *       201:
  *         description: Contribution created
@@ -4592,6 +4661,7 @@ contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 			simulator: payload.simulator,
 			generationToken: payload.generationToken,
 			generationHash: payload.generationHash,
+			fastTrackRequested: payload.fastTrackRequested === true,
 		});
 
 		return c.json(result, 201);
@@ -4683,12 +4753,13 @@ contributionsApp.post('/:id/decision', async (c) => {
 	try {
 		const contributionId = c.req.param('id');
 		const contributions = ServicePool.getContributions(c.env);
-		// SAFETY: ContributionsService.processDecision validates the decision fields before applying the state transition.
-		const payload = (await c.req.json()) as ContributionDecisionPayload;
+		const payload = parseJsonObject(await c.req.json());
+		const approved = readBoolean(payload.approved);
+		if (approved === undefined) return c.json({ error: 'approved must be a boolean' }, 400);
 		const result = await contributions.processDecision(contributionId, user.vatsim_id, {
-			approved: payload.approved,
-			rejectionReason: payload.rejectionReason,
-			newPackageName: payload.newPackageName,
+			approved,
+			rejectionReason: readString(payload.rejectionReason),
+			newPackageName: readString(payload.newPackageName),
 		});
 
 		return c.json(result);
