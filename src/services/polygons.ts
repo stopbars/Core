@@ -3,6 +3,7 @@ import { processBarsPolygon, deduplicateTaxiwayPoints } from './bars/handlers';
 import { BarsPolygon, BarsDBRecord, ProcessedBarsObject, BarsLightPoint, LightProperties, GeoPoint } from './bars/types';
 import { calculateDistance } from './bars/geoUtils';
 import { PostHogService } from './posthog';
+import { parseDecimalNumber } from './parsing';
 
 import { DatabaseSessionService } from './database-session';
 
@@ -51,7 +52,7 @@ export class PolygonService {
 			// Check if this polygon has displayName starting with "BARS_"
 			const displayNameMatch = polygonAttributes.match(regex.displayName);
 			if (!displayNameMatch) {
-				continue; // Skip if not a BARS polygon
+				continue;
 			}
 
 			const id = displayNameMatch[1]; // This is the BARS_XXXX id
@@ -97,6 +98,7 @@ export class PolygonService {
 		try {
 			const results = await this.dbSession.executeReadBatch(statements);
 			for (const result of results) {
+				// SAFETY: Every statement uses this method's fixed SELECT list, whose D1 column names match PointRow.
 				for (const row of result.results as PointRow[]) {
 					records.set(row.id, this.mapBarsRecordFromDb(row));
 				}
@@ -152,17 +154,11 @@ export class PolygonService {
 					const converted: GeoPoint[] = [];
 					for (const item of parsed) {
 						if (!item) continue;
-						const rawLat =
-							typeof item.lat === 'number' ? item.lat : typeof item.lat === 'string' ? Number(item.lat) : undefined;
+						const rawLat = parseDecimalNumber(item.lat);
 						const rawLonCandidate = item.lon ?? item.lng;
-						const rawLon =
-							typeof rawLonCandidate === 'number'
-								? rawLonCandidate
-								: typeof rawLonCandidate === 'string'
-									? Number(rawLonCandidate)
-									: undefined;
+						const rawLon = parseDecimalNumber(rawLonCandidate);
 						if (Number.isFinite(rawLat) && Number.isFinite(rawLon)) {
-							converted.push({ lat: rawLat as number, lon: rawLon as number });
+							converted.push({ lat: rawLat, lon: rawLon });
 						}
 					}
 					if (converted.length >= 2) {
@@ -226,14 +222,12 @@ export class PolygonService {
 		out.push('<?xml version="1.0" encoding="utf-8"?>');
 		out.push('<BarsLights>');
 
-		// Add each object
 		for (const obj of processedObjects) {
 			const centerPoint = this.calculateObjectCenter(obj.points);
 			const centerAttributes = centerPoint ? ` centerLat="${centerPoint.lat}" centerLon="${centerPoint.lon}"` : '';
 			// stateId moved to per-light level (previously on BarsObject)
 			out.push(`\t<BarsObject id="${obj.id}" type="${obj.type}"${centerAttributes}>`);
 
-			// Add properties
 			const props = obj.properties;
 			out.push('\t\t<Properties>');
 			if (props.color) out.push(`\t\t\t<Color>${props.color}</Color>`);
@@ -242,7 +236,6 @@ export class PolygonService {
 			if (props.intensity !== undefined) out.push(`\t\t\t<Intensity>${props.intensity}</Intensity>`);
 			out.push('\t\t</Properties>');
 
-			// Add light points
 			for (const point of obj.points) {
 				const lightColor = (point.properties?.color || obj.properties.color || '').toLowerCase();
 				const isElevatedStopbar = obj.type === 'stopbar' && point.properties?.elevated === true;
@@ -436,7 +429,6 @@ export class PolygonService {
 	 */
 	async processBarsXML(inputXml: string, icao?: string): Promise<string> {
 		try {
-			// Parse BARS polygons from input XML
 			const polygons = this.parseBarsPolygonsFromXML(inputXml);
 
 			if (polygons.length === 0) {
@@ -455,7 +447,7 @@ export class PolygonService {
 					const airportLat = airportData.latitude;
 					const airportLon = airportData.longitude;
 
-					if (typeof airportLat === 'number' && typeof airportLon === 'number') {
+					if (airportLat !== null && airportLon !== null && Number.isFinite(airportLat) && Number.isFinite(airportLon)) {
 						let hasNearbyPoint = false;
 
 						for (const polygon of polygons) {
@@ -486,7 +478,6 @@ export class PolygonService {
 			const barsIds = polygons.map((polygon) => (polygon.id.startsWith('BARS_') ? polygon.id : `BARS_${polygon.id}`));
 			const barsRecords = await this.getBarsRecordsFromDB(barsIds);
 
-			// Process each polygon to generate BARS light locations
 			const processedObjects: ProcessedBarsObject[] = [];
 
 			for (const polygon of polygons) {
@@ -499,7 +490,6 @@ export class PolygonService {
 				const orderedPoints = this.alignPolygonPointOrder(polygon.points, dbRecord.coordinates);
 				const polygonForProcessing = orderedPoints === polygon.points ? polygon : { ...polygon, points: orderedPoints };
 
-				// Process the polygon based on its type
 				const processedObject = await processBarsPolygon(polygonForProcessing, dbRecord);
 
 				if (processedObject) {
@@ -549,12 +539,10 @@ export class PolygonService {
 
 		let xml = '<?xml version="1.0" encoding="utf-8"?>\n<Bars>\n';
 
-		// Add each polygon as an Object
 		for (const polygon of polygons) {
 			xml += '\t<Object>\n';
 			xml += `\t\t<ID>${polygon.id}</ID>\n`;
 
-			// Add each point
 			for (const point of polygon.points) {
 				xml += `\t\t<Point>${point.lat},${point.lon}</Point>\n`;
 			}

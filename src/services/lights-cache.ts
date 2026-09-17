@@ -1,15 +1,17 @@
 import { ServicePool } from './service-pool';
 
 export type RadarLight = { stateId: number | null; offStateId: number | null; position: [number, number]; heading: number };
+export interface LightsByObject {
+	[objectId: string]: RadarLight[];
+}
 
 const LIGHT_STATE_ID_PATTERN = /stateId\s*=\s*"(\d+)"/i;
 const LIGHT_OFF_STATE_ID_PATTERN = /offStateId\s*=\s*"(\d+)"/i;
 const LIGHT_POSITION_PATTERN = /<Position>\s*([^<]+)\s*<\/Position>/i;
 const LIGHT_HEADING_PATTERN = /<Heading>\s*([^<]+)\s*<\/Heading>/i;
 
-// Parse BARS Lights XML into objectId -> lights[] mapping
-export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
-	const result: Record<string, RadarLight[]> = {};
+export function parseBarsLightsXml(xml: string): LightsByObject {
+	const result: LightsByObject = {};
 	if (!xml) return result;
 
 	const objRegex = /<BarsObject[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/BarsObject>/gi;
@@ -46,15 +48,30 @@ export function parseBarsLightsXml(xml: string): Record<string, RadarLight[]> {
 }
 
 // Fetch and cache latest lights mapping for an airport (15 minutes TTL)
-export async function getLightsByObject(env: Env, icao: string): Promise<Record<string, RadarLight[]>> {
+export async function getLightsByObject(env: Env, icao: string): Promise<LightsByObject> {
 	const normalizedIcao = icao.toUpperCase();
 	const cache = ServicePool.getCache(env);
 	const cacheKey = `lights-map-${normalizedIcao}`;
-	const cached = await cache.get<Record<string, RadarLight[]>>(cacheKey, 'airports');
+	const cached = await cache.get<LightsByObject>(cacheKey, 'airports');
 	if (cached) return cached;
 
 	const storage = ServicePool.getStorage(env);
 	try {
+		const approved = await ServicePool.getContributions(env).listContributionMetadata({
+			status: 'approved',
+			airportIcao: normalizedIcao,
+		});
+		for (const contribution of approved.contributions) {
+			if (!contribution.barsArtifactKey) continue;
+			const published = await storage.getFile(contribution.barsArtifactKey);
+			if (!published) continue;
+			const mapping = parseBarsLightsXml(await published.text());
+			await cache.set(cacheKey, mapping, { ttl: 900, namespace: 'airports' });
+			return mapping;
+		}
+
+		// Backward compatibility for approved YSCB/YSSY rows published before
+		// immutable artifact keys were recorded on contributions.
 		const list = await storage.listFiles(`Maps/${normalizedIcao}_`, 50);
 		if (!list.objects || list.objects.length === 0) {
 			await cache.set(cacheKey, {}, { ttl: 300, namespace: 'airports' });

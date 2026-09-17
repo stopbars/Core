@@ -1,16 +1,37 @@
-import { ClientType, Packet, AirportState, AirportObject, MultiStateUpdateItem, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT } from '../types';
+import {
+	ClientType,
+	Packet,
+	AirportState,
+	AirportObject,
+	MultiStateUpdateItem,
+	HEARTBEAT_INTERVAL,
+	HEARTBEAT_TIMEOUT,
+	OnlinePilot,
+	type JsonObject,
+	type JsonValue,
+} from '../types';
 import { AuthService } from '../services/auth';
 import { VatsimService } from '../services/vatsim';
 import { PointsService } from '../services/points';
 import { IDService } from '../services/id';
 import { DivisionService } from '../services/divisions';
 import { DatabaseContextFactory } from '../services/database-context';
-import { PostHogService } from '../services/posthog';
+import { allowsLargeLightingPacket, isEuroScopeGraphPatch, MAX_LIGHTING_MESSAGE_BYTES, MAX_LIGHTING_UPDATES } from './euroscope-packets';
+import { PostHogService, type AnalyticsProperties, type AnalyticsPropertyValue } from '../services/posthog';
+import {
+	buildPointStateTemplate,
+	chunkStateUpdates,
+	getGeneratedAliasUpdates,
+	selectCanonicalEquivalentState,
+	type OfflineStateTemplate,
+} from './point-state-equivalence';
 
 const MAX_STATE_SIZE = 1000000; // 1MB limit for persisted payloads
-const MAX_MESSAGE_SIZE = 50000;
+const MAX_MESSAGE_SIZE = 64000;
 const MAX_SHARED_PATCH_SIZE = 10240;
 const MAX_MULTI_STATE_UPDATES = 200;
+const MAX_REJECTED_PACKET_LOG_CHARACTERS = 4096;
+const MAX_REJECTED_PACKET_TYPE_LOG_CHARACTERS = 256;
 const OBJECT_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 const STATE_FLUSH_DEBOUNCE_MS = 1500;
 const ACTIVE_OBJECT_TOUCH_INTERVAL_MS = 60_000;
@@ -21,8 +42,11 @@ const SEND_FAILURE_LIMIT = 3;
 const EFFECTIVE_HEARTBEAT_TIMEOUT = Math.max(HEARTBEAT_TIMEOUT, HEARTBEAT_INTERVAL * 3);
 const STALE_STATE_TIMEOUT_MS = 120_000;
 const PACKET_DECODER = new TextDecoder();
+const PACKET_ENCODER = new TextEncoder();
 const SERIALIZED_HEARTBEAT = JSON.stringify({ type: 'HEARTBEAT' });
-const VALID_PACKET_TYPES = new Set<Packet['type']>([
+const SENSITIVE_LOG_KEY_REGEX =
+	/^(?:authorization|proxy-authorization|cookie|set-cookie|key|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)$/i;
+const VALID_PACKET_TYPES = new Set<string>([
 	'HEARTBEAT',
 	'HEARTBEAT_ACK',
 	'STATE_UPDATE',
@@ -35,23 +59,126 @@ const VALID_PACKET_TYPES = new Set<Packet['type']>([
 	'ERROR',
 	'GET_STATE',
 	'STATE_SNAPSHOT',
+	'GET_ONLINE_PILOTS',
+	'ONLINE_PILOTS',
 	'STOPBAR_CROSSING',
 ]);
-const createNullObject = (): Record<string, unknown> => Object.create(null) as Record<string, unknown>;
+
+type StructuredValue = JsonValue;
+type StructuredObject = JsonObject;
+type RuntimeCandidate = StructuredValue | undefined | ArrayBuffer | MultiStateUpdateItem | NonNullable<Packet['data']>;
+type RejectedPacketLog = {
+	packet?: StructuredValue;
+	packetPreview?: string;
+	packetLogTruncated: boolean;
+};
+type WebSocketErrorDetails = {
+	eventType: string;
+	readyState: number;
+	controllerId?: string;
+	clientType?: ClientType;
+	airport?: string;
+	message?: string;
+	filename?: string;
+	lineno?: number;
+	colno?: number;
+	error?: AnalyticsProperties | string;
+};
+type SocketDebugDetails = {
+	connectionId?: string;
+	controllerId?: string;
+	callsign?: string;
+	clientType?: ClientType;
+	airport?: string;
+	readyState: number;
+	socketCount: number;
+	connectedForMs?: number;
+	lastMessageAgoMs?: number;
+	lastHeartbeatAgoMs?: number;
+	receivedPackets?: number;
+	sentPackets?: number;
+	receivedBytes?: number;
+	sentBytes?: number;
+	sendFailures?: number;
+};
+
+const createNullObject = (): StructuredObject => Object.create(null);
+const createAirportObjectDictionary = (): Record<string, AirportObject> => Object.create(null);
 const isDisallowedKey = (key: string): boolean => key === '__proto__' || key === 'constructor' || key === 'prototype';
 
+function isStructuredObject(value: RuntimeCandidate): value is StructuredObject {
+	return value !== null && value !== undefined && Object(value) === value && !Array.isArray(value);
+}
+
+function isMergeDictionary(value: RuntimeCandidate): value is StructuredObject {
+	if (!isStructuredObject(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+function isAnalyticsProperties(value: AnalyticsPropertyValue): value is AnalyticsProperties {
+	return value !== null && value !== undefined && Object(value) === value && !Array.isArray(value);
+}
+
+function isStringValue(value: RuntimeCandidate): value is string {
+	return value === String(value);
+}
+
+function isNumberValue(value: RuntimeCandidate): value is number {
+	return Object.prototype.toString.call(value) === '[object Number]' && (value === Number(value) || Number.isNaN(value));
+}
+
+function isBooleanValue(value: RuntimeCandidate): value is boolean {
+	return value === true || value === false;
+}
+
+function isSupportedPacketType(value: StructuredValue): value is Packet['type'] {
+	return isStringValue(value) && VALID_PACKET_TYPES.has(value);
+}
+
+function getStructuredValueKind(value: StructuredValue | undefined): string {
+	if (value === null) return 'null';
+	if (value === undefined) return 'undefined';
+	if (Array.isArray(value)) return 'array';
+	if (isStringValue(value)) return 'string';
+	if (isNumberValue(value)) return 'number';
+	if (isBooleanValue(value)) return 'boolean';
+	return 'object';
+}
+
 type SocketInfo = {
+	connectionId: string;
 	controllerId: string;
+	callsign: string;
 	type: ClientType;
 	airport: string;
+	connectedAt: number;
 	lastHeartbeat: number;
+	lastMessageAt: number;
 	lastStatusCheck: number;
 	statusCheckInFlight: boolean;
 	consecutiveVatsimFailures: number;
 	sendFailures: number;
+	receivedPackets: number;
+	sentPackets: number;
+	receivedBytes: number;
+	sentBytes: number;
 };
 
-type OfflineStateTemplate = Array<{ id: string; state: boolean }>;
+type SocketTerminationRecord = {
+	info: SocketInfo;
+	reason: string;
+	details: AnalyticsProperties;
+	clean: boolean;
+	startedAt: number;
+	completedAt?: number;
+	task?: Promise<void>;
+};
+
+type SocketTerminationOptions = {
+	clean?: boolean;
+	details?: AnalyticsProperties;
+};
 
 type ConnectionStatus = {
 	banned: boolean;
@@ -66,55 +193,100 @@ export type ConnectionStateSnapshot = {
 	offline: boolean;
 };
 
-function isSafeNestedValue(value: unknown, maxDepth = 20, maxProperties = 100): boolean {
+function isSafeNestedValue(value: StructuredValue, maxDepth = 20, maxProperties = 100): boolean {
 	const seen = new WeakSet<object>();
-	const walk = (current: unknown, depth: number): boolean => {
-		if (current === null || typeof current !== 'object') return true;
+	const walk = (current: StructuredValue, depth: number): boolean => {
+		if (!isStructuredObject(current) && !Array.isArray(current)) return true;
 		if (depth > maxDepth || seen.has(current)) return false;
 		seen.add(current);
 		if (Array.isArray(current)) {
 			return current.length <= 1000 && current.every((item) => walk(item, depth + 1));
 		}
-		const record = current as Record<string, unknown>;
-		const keys = Object.keys(record);
+		const keys = Object.keys(current);
 		return (
-			keys.length <= maxProperties &&
-			keys.every((key) => key.length <= 100 && !isDisallowedKey(key) && walk(record[key], depth + 1))
+			keys.length <= maxProperties && keys.every((key) => key.length <= 100 && !isDisallowedKey(key) && walk(current[key], depth + 1))
 		);
 	};
 	return walk(value, 0);
 }
 
-function describeErrorForLog(error: unknown): Record<string, unknown> | string {
-	if (error instanceof Error) {
+function describeErrorForLog(cause: unknown): AnalyticsProperties | string {
+	if (cause instanceof Error) {
 		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
+			name: cause.name,
+			message: cause.message,
+			stack: cause.stack,
 		};
 	}
 
-	if (error === null || error === undefined) {
-		return String(error);
+	if (cause === null || cause === undefined) {
+		return String(cause);
 	}
 
-	if (typeof error === 'object') {
+	if (cause instanceof Object) {
 		try {
-			return JSON.parse(JSON.stringify(error)) as Record<string, unknown>;
+			return JSON.parse(JSON.stringify(cause));
 		} catch {
-			return Object.prototype.toString.call(error);
+			return Object.prototype.toString.call(cause);
 		}
 	}
 
-	return String(error);
+	return String(cause);
+}
+
+function sanitizeForDebugLog(value: AnalyticsProperties, depth?: number, seen?: WeakSet<object>): AnalyticsProperties;
+function sanitizeForDebugLog(value: StructuredValue, depth?: number, seen?: WeakSet<object>): StructuredValue;
+function sanitizeForDebugLog(
+	value: AnalyticsPropertyValue,
+	depth?: number,
+	seen?: WeakSet<object>,
+): AnalyticsPropertyValue;
+function sanitizeForDebugLog(
+	value: AnalyticsPropertyValue,
+	depth = 0,
+	seen = new WeakSet<object>(),
+): AnalyticsPropertyValue {
+	if (depth > 20) return '[maximum depth reached]';
+	if (!isAnalyticsProperties(value) && !Array.isArray(value)) return value;
+	if (seen.has(value)) return '[circular]';
+	seen.add(value);
+
+	if (Array.isArray(value)) {
+		return value.map((item) => sanitizeForDebugLog(item, depth + 1, seen));
+	}
+
+	const sanitized: AnalyticsProperties = {};
+	for (const [key, nestedValue] of Object.entries(value)) {
+		sanitized[key] = SENSITIVE_LOG_KEY_REGEX.test(key) ? '[redacted]' : sanitizeForDebugLog(nestedValue, depth + 1, seen);
+	}
+	return sanitized;
+}
+
+function describeRejectedPacketForLog(packet: StructuredValue): RejectedPacketLog {
+	const sanitized = sanitizeForDebugLog(packet);
+	let serialized: string;
+	try {
+		serialized = JSON.stringify(sanitized) ?? String(sanitized);
+	} catch {
+		serialized = String(sanitized);
+	}
+
+	if (serialized.length <= MAX_REJECTED_PACKET_LOG_CHARACTERS) {
+		return { packet: sanitized, packetLogTruncated: false };
+	}
+
+	return {
+		packetPreview: serialized.slice(0, MAX_REJECTED_PACKET_LOG_CHARACTERS),
+		packetLogTruncated: true,
+	};
 }
 
 function describeWebSocketErrorEvent(
 	evt: ErrorEvent,
 	socket: WebSocket,
 	socketInfo?: { controllerId: string; type: ClientType; airport: string },
-): Record<string, unknown> {
-	const details: Record<string, unknown> = {
+): WebSocketErrorDetails {
+	const details: WebSocketErrorDetails = {
 		eventType: evt.type,
 		readyState: socket.readyState,
 	};
@@ -135,14 +307,14 @@ function describeWebSocketErrorEvent(
 }
 
 // Add recursive merge utility function with safety checks
-function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): unknown {
+function recursivelyMergeObjects(target: StructuredValue, source: StructuredValue, depth = 0, euroScopeGraph = false): StructuredValue {
 	// Prevent infinite recursion and overly deep nesting
 	const MAX_DEPTH = 20;
 	if (depth > MAX_DEPTH) {
 		throw new Error('Maximum recursion depth exceeded in merge operation');
 	}
 
-	if (source === null || typeof source !== 'object') {
+	if (!isStructuredObject(source) && !Array.isArray(source)) {
 		return source; // Return the source value if it's a primitive
 	}
 
@@ -155,17 +327,19 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 		}
 		return [...source];
 	}
+	if (!isMergeDictionary(source)) {
+		throw new Error('Merge source must be a plain or null-prototype object');
+	}
 
 	// Handle objects - lazily clone properties when needed
-	const MAX_PROPERTIES = 100;
+	const MAX_PROPERTIES = euroScopeGraph && depth === 1 ? MAX_LIGHTING_UPDATES : 100;
 	const sourceKeys = Object.keys(source);
 	if (sourceKeys.length > MAX_PROPERTIES) {
 		throw new Error(`Object has too many properties (${sourceKeys.length} > ${MAX_PROPERTIES})`);
 	}
 
-	const targetIsObject = target !== null && typeof target === 'object' && !Array.isArray(target);
-	const targetRecord = targetIsObject ? (target as Record<string, unknown>) : undefined;
-	let result: Record<string, unknown>;
+	const targetRecord = isMergeDictionary(target) ? target : undefined;
+	let result: StructuredObject;
 	let cloned = false;
 
 	if (targetRecord) {
@@ -183,7 +357,7 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 	};
 
 	for (const key of sourceKeys) {
-		if (typeof key !== 'string' || key.length > 100) {
+		if (key.length > 100) {
 			throw new Error('Invalid property key');
 		}
 
@@ -191,19 +365,19 @@ function recursivelyMergeObjects(target: unknown, source: unknown, depth = 0): u
 			throw new Error('Prototype pollution key rejected');
 		}
 
-		const sv = (source as Record<string, unknown>)[key];
-		const rv = targetRecord ? targetRecord[key] : undefined;
+		const sv = source[key];
+		const rv = targetRecord && Object.prototype.hasOwnProperty.call(targetRecord, key) ? targetRecord[key] : undefined;
 
-		if (sv && typeof sv === 'object' && !Array.isArray(sv)) {
-			if (rv && typeof rv === 'object' && !Array.isArray(rv)) {
-				const merged = recursivelyMergeObjects(rv, sv, depth + 1);
+		if (isMergeDictionary(sv)) {
+			if (isMergeDictionary(rv)) {
+				const merged = recursivelyMergeObjects(rv, sv, depth + 1, euroScopeGraph);
 				if (merged !== rv) {
 					ensureClone();
 					result[key] = merged;
 				}
 			} else {
 				ensureClone();
-				result[key] = recursivelyMergeObjects(createNullObject(), sv, depth + 1);
+				result[key] = recursivelyMergeObjects(createNullObject(), sv, depth + 1, euroScopeGraph);
 			}
 		} else if (sv !== rv) {
 			ensureClone();
@@ -218,7 +392,7 @@ export class Connection {
 	private sockets = new Map<WebSocket, SocketInfo>();
 
 	private airportStates = new Map<string, AirportState>();
-	private airportSharedStates = new Map<string, Record<string, unknown>>(); // New shared state storage
+	private airportSharedStates = new Map<string, StructuredObject>(); // New shared state storage
 	private objectId: string; // Store the DO's ID
 	private lastActiveObjectsUpdate = 0; // Throttle D1 updates
 	private activeObjectTouchInFlight = false;
@@ -227,25 +401,28 @@ export class Connection {
 	private dirtyAirportStates = new Set<string>();
 	private dirtySharedStates = new Set<string>();
 	private socketQueues = new Map<WebSocket, Promise<void>>();
+	private socketTerminations = new WeakMap<WebSocket, SocketTerminationRecord>();
 	private controllerSockets = new Map<string, Map<string, Set<WebSocket>>>();
-	private pilotConnectionCounts = new Map<string, Map<string, number>>();
+	private pilotConnectionCounts = new Map<string, Map<string, { count: number; callsign: string }>>();
 	private pendingConnectionStatusChecks = new Map<string, Promise<ConnectionStatus>>();
 	private offlineStateCache = new Map<
 		string,
 		{
 			template?: OfflineStateTemplate;
-			defaultStates?: ReadonlyMap<string, boolean>;
 			expiresAt: number;
 			inFlight?: Promise<OfflineStateTemplate>;
+			version: number;
 		}
 	>();
-	private connectionCounts: Record<'controllers' | 'pilots' | 'observers', number> = {
+	private offlineStateTemplateVersions = new Map<string, number>();
+	private connectionCounts = {
 		controllers: 0,
 		pilots: 0,
 		observers: 0,
 	};
 	private posthog: PostHogService;
 	private lastKnownAirport = 'unknown';
+	private readonly debugEnabled: boolean;
 
 	constructor(
 		private env: Env,
@@ -255,18 +432,65 @@ export class Connection {
 	) {
 		this.objectId = state.id.toString();
 		this.posthog = new PostHogService(env);
+		this.debugEnabled = env.DEBUG.trim().toLowerCase() === 'true';
+		this.debugLog('durable_object_initialized', {
+			debugEnabled: this.debugEnabled,
+		});
 		this.state.blockConcurrencyWhile(async () => {
 			await this.loadPersistedState();
 		});
 	}
 
-	private registerSocket(socket: WebSocket, info: { controllerId: string; type: ClientType; airport: string; lastHeartbeat: number }) {
+	private debugLog(event: string, details: AnalyticsProperties = {}) {
+		if (!this.debugEnabled) return;
+		console.log({
+			level: 'debug',
+			subsystem: 'websocket',
+			event,
+			timestamp: new Date().toISOString(),
+			durableObjectId: this.objectId,
+			...sanitizeForDebugLog(details),
+		});
+	}
+
+	private getSocketDebugDetails(socket: WebSocket, info = this.sockets.get(socket)): SocketDebugDetails {
+		return {
+			connectionId: info?.connectionId,
+			controllerId: info?.controllerId,
+			callsign: info?.callsign,
+			clientType: info?.type,
+			airport: info?.airport,
+			readyState: socket.readyState,
+			socketCount: this.sockets.size,
+			connectedForMs: info ? Date.now() - info.connectedAt : undefined,
+			lastMessageAgoMs: info ? Date.now() - info.lastMessageAt : undefined,
+			lastHeartbeatAgoMs: info ? Date.now() - info.lastHeartbeat : undefined,
+			receivedPackets: info?.receivedPackets,
+			sentPackets: info?.sentPackets,
+			receivedBytes: info?.receivedBytes,
+			sentBytes: info?.sentBytes,
+			sendFailures: info?.sendFailures,
+		};
+	}
+
+	private registerSocket(
+		socket: WebSocket,
+		info: { controllerId: string; callsign?: string; type: ClientType; airport: string; lastHeartbeat: number },
+	) {
 		const socketInfo: SocketInfo = {
 			...info,
+			connectionId: crypto.randomUUID(),
+			callsign: info.callsign ?? info.controllerId,
+			connectedAt: Date.now(),
+			lastMessageAt: info.lastHeartbeat,
 			lastStatusCheck: 0,
 			statusCheckInFlight: false,
 			consecutiveVatsimFailures: 0,
 			sendFailures: 0,
+			receivedPackets: 0,
+			sentPackets: 0,
+			receivedBytes: 0,
+			sentBytes: 0,
 		};
 		this.sockets.set(socket, socketInfo);
 		this.adjustConnectionCount(socketInfo.type, 1);
@@ -274,8 +498,9 @@ export class Connection {
 		if (socketInfo.type === 'controller') {
 			this.addControllerSocket(socket, socketInfo);
 		} else if (socketInfo.type === 'pilot') {
-			this.adjustPilotConnectionCount(socketInfo.airport, socketInfo.controllerId, 1);
+			this.adjustPilotConnectionCount(socketInfo.airport, socketInfo.controllerId, socketInfo.callsign, 1);
 		}
+		this.debugLog('socket_registered', this.getSocketDebugDetails(socket, socketInfo));
 	}
 
 	private unregisterSocket(socket: WebSocket) {
@@ -284,13 +509,14 @@ export class Connection {
 			return undefined;
 		}
 
+		this.debugLog('socket_unregistering', this.getSocketDebugDetails(socket, info));
 		this.adjustConnectionCount(info.type, -1);
 		this.sockets.delete(socket);
 		this.socketQueues.delete(socket);
 		if (info.type === 'controller') {
 			this.removeControllerSocket(socket, info);
 		} else if (info.type === 'pilot') {
-			this.adjustPilotConnectionCount(info.airport, info.controllerId, -1);
+			this.adjustPilotConnectionCount(info.airport, info.controllerId, info.callsign, -1);
 		}
 		if (this.sockets.size === 0) {
 			this.lastKnownAirport = 'unknown';
@@ -374,7 +600,7 @@ export class Connection {
 		return airportControllers ? Array.from(airportControllers.keys()) : [];
 	}
 
-	private adjustPilotConnectionCount(airport: string, pilotId: string, delta: number) {
+	private adjustPilotConnectionCount(airport: string, pilotId: string, callsign: string, delta: number) {
 		let airportPilots = this.pilotConnectionCounts.get(airport);
 		if (!airportPilots) {
 			if (delta <= 0) return;
@@ -382,8 +608,10 @@ export class Connection {
 			this.pilotConnectionCounts.set(airport, airportPilots);
 		}
 
-		const nextCount = (airportPilots.get(pilotId) ?? 0) + delta;
-		if (nextCount > 0) airportPilots.set(pilotId, nextCount);
+		const current = airportPilots.get(pilotId);
+		const nextCount = (current?.count ?? 0) + delta;
+		if (nextCount > 0)
+			airportPilots.set(pilotId, { count: nextCount, callsign: delta > 0 ? callsign : (current?.callsign ?? callsign) });
 		else airportPilots.delete(pilotId);
 		if (airportPilots.size === 0) this.pilotConnectionCounts.delete(airport);
 	}
@@ -393,7 +621,29 @@ export class Connection {
 		return airportPilots ? Array.from(airportPilots.keys()) : [];
 	}
 
-	private emitAnalytics(event: string, properties: Record<string, unknown>) {
+	private getLivePilots(airport: string): OnlinePilot[] {
+		const airportPilots = this.pilotConnectionCounts.get(airport);
+		return airportPilots ? Array.from(airportPilots, ([cid, pilot]) => ({ cid, callsign: pilot.callsign })) : [];
+	}
+
+	private updatePilotCallsign(airport: string, pilotId: string, callsign: string) {
+		const pilot = this.pilotConnectionCounts.get(airport)?.get(pilotId);
+		if (pilot) pilot.callsign = callsign;
+	}
+
+	private createOnlinePilotsPacket(airport: string, requestedAt: number, now = Date.now()): Packet {
+		return {
+			type: 'ONLINE_PILOTS',
+			airport,
+			data: {
+				pilots: this.getLivePilots(airport),
+				requestedAt,
+			},
+			timestamp: now,
+		};
+	}
+
+	private emitAnalytics(event: string, properties: AnalyticsProperties) {
 		const filtered = this.filterAnalyticsProperties(properties);
 		try {
 			this.posthog.track(event, filtered);
@@ -402,8 +652,8 @@ export class Connection {
 		}
 	}
 
-	private filterAnalyticsProperties(properties: Record<string, unknown>): Record<string, unknown> {
-		const filtered: Record<string, unknown> = {};
+	private filterAnalyticsProperties(properties: AnalyticsProperties): AnalyticsProperties {
+		const filtered: AnalyticsProperties = {};
 		for (const [key, value] of Object.entries(properties)) {
 			if (value !== undefined) {
 				filtered[key] = value;
@@ -412,7 +662,7 @@ export class Connection {
 		return filtered;
 	}
 
-	private emitAnalyticsBatch(events: readonly { event: string; properties: Record<string, unknown> }[]) {
+	private emitAnalyticsBatch(events: readonly { event: string; properties: AnalyticsProperties }[]) {
 		try {
 			this.posthog.trackBatch(
 				events.map((item) => ({
@@ -425,51 +675,52 @@ export class Connection {
 		}
 	}
 
-	private deserializeAirportState(airport: string, stored: unknown): AirportState {
-		const airportState = (stored || {}) as {
-			objects?: Record<string, { id: string; state: unknown; controllerId?: string; timestamp: number }>;
-			lastUpdate?: number;
-			controllers?: string[];
-		};
+	private deserializeAirportState(airport: string, stored: StructuredValue): AirportState {
+		const airportState = isStructuredObject(stored) ? stored : {};
+		const storedObjects = isStructuredObject(airportState.objects) ? airportState.objects : {};
+		const objects = new Map<string, AirportObject>();
+		for (const [id, storedObject] of Object.entries(storedObjects)) {
+			if (!isStructuredObject(storedObject)) continue;
+			const rawState = storedObject.state;
+			let normalizedState: boolean | StructuredObject;
+			if (isBooleanValue(rawState)) {
+				normalizedState = rawState;
+			} else if (isStructuredObject(rawState)) {
+				normalizedState = rawState;
+			} else {
+				normalizedState = {};
+			}
+
+			objects.set(id, {
+				id,
+				state: normalizedState,
+				controllerId: isStringValue(storedObject.controllerId) ? storedObject.controllerId : undefined,
+				timestamp: isNumberValue(storedObject.timestamp) ? storedObject.timestamp : Date.now(),
+			});
+		}
+
+		const controllers = Array.isArray(airportState.controllers)
+			? airportState.controllers.filter((controller): controller is string => isStringValue(controller))
+			: [];
 
 		return {
 			airport,
-			objects: new Map(
-				Object.entries(airportState.objects || {}).map(([id, obj]) => {
-					const rawState = obj.state;
-					let normalizedState: boolean | Record<string, unknown>;
-					if (typeof rawState === 'boolean') {
-						normalizedState = rawState;
-					} else if (rawState && typeof rawState === 'object' && !Array.isArray(rawState)) {
-						normalizedState = rawState as Record<string, unknown>;
-					} else {
-						normalizedState = {};
-					}
-
-					return [
-						id,
-						{
-							id,
-							state: normalizedState,
-							controllerId: obj.controllerId,
-							timestamp: typeof obj.timestamp === 'number' ? obj.timestamp : Date.now(),
-						},
-					];
-				}),
-			),
-			lastUpdate: typeof airportState.lastUpdate === 'number' ? airportState.lastUpdate : Date.now(),
-			controllers: new Set(Array.isArray(airportState.controllers) ? airportState.controllers : []),
+			objects,
+			lastUpdate: isNumberValue(airportState.lastUpdate) ? airportState.lastUpdate : Date.now(),
+			controllers: new Set(controllers),
 		};
 	}
 
 	private async loadPersistedState() {
 		const states = new Map<string, AirportState>();
-		const sharedStates = new Map<string, Record<string, unknown>>();
+		const sharedStates = new Map<string, StructuredObject>();
+		const startedAt = Date.now();
+		this.debugLog('persisted_state_load_started');
 
 		try {
 			const [stateEntries, sharedEntries] = await Promise.all([
-				this.state.storage.list<unknown>({ prefix: 'airport_state:' }),
-				this.state.storage.list<unknown>({ prefix: 'airport_shared_state:' }),
+				this.state.storage.list<StructuredValue>({ prefix: 'airport_state:' }),
+				this.state.storage.list<StructuredValue>({ prefix: 'airport_shared_state:' }),
 			]);
 
 			for (const [key, stored] of stateEntries) {
@@ -481,14 +732,24 @@ export class Connection {
 			for (const [key, stored] of sharedEntries) {
 				const airport = key.slice('airport_shared_state:'.length);
 				if (!airport) continue;
-				if (stored && typeof stored === 'object') {
-					sharedStates.set(airport, stored as Record<string, unknown>);
+				if (isStructuredObject(stored)) {
+					sharedStates.set(airport, stored);
 				}
 			}
 			this.airportStates = states;
 			this.airportSharedStates = sharedStates;
+			this.debugLog('persisted_state_load_completed', {
+				durationMs: Date.now() - startedAt,
+				airportStateCount: states.size,
+				sharedStateCount: sharedStates.size,
+				objectCount: Array.from(states.values()).reduce((total, airportState) => total + airportState.objects.size, 0),
+			});
 		} catch (error) {
 			console.error('Failed to load persisted state:', error);
+			this.debugLog('persisted_state_load_failed', {
+				durationMs: Date.now() - startedAt,
+				error: describeErrorForLog(error),
+			});
 		}
 	}
 
@@ -498,14 +759,17 @@ export class Connection {
 
 		if (!state) {
 			try {
+				this.debugLog('airport_state_delete_started', { airport, storageKey });
 				await this.state.storage.delete(storageKey);
+				this.debugLog('airport_state_delete_completed', { airport, storageKey });
 			} catch (error) {
 				console.error(`Failed to delete airport state for ${airport}:`, error);
+				this.debugLog('airport_state_delete_failed', { airport, storageKey, error: describeErrorForLog(error) });
 			}
 			return;
 		}
 
-		const objects: Record<string, AirportObject> = createNullObject() as Record<string, AirportObject>;
+		const objects = createAirportObjectDictionary();
 		for (const [id, object] of state.objects) {
 			objects[id] = {
 				id: object.id,
@@ -524,16 +788,46 @@ export class Connection {
 
 		try {
 			const serializedString = JSON.stringify(serialized);
+			const serializedBytes = PACKET_ENCODER.encode(serializedString).byteLength;
+			this.debugLog('airport_state_persist_started', {
+				airport,
+				storageKey,
+				objectCount: state.objects.size,
+				controllerCount: state.controllers.size,
+				serializedCharacters: serializedString.length,
+				serializedBytes,
+			});
 			if (serializedString.length > MAX_STATE_SIZE) {
 				console.warn(
 					`State size (${serializedString.length}) exceeds maximum (${MAX_STATE_SIZE}), skipping persistence for ${airport}`,
 				);
+				this.debugLog('airport_state_persist_skipped_size_limit', {
+					airport,
+					storageKey,
+					objectCount: state.objects.size,
+					serializedCharacters: serializedString.length,
+					serializedBytes,
+					maxCharacters: MAX_STATE_SIZE,
+				});
 				return;
 			}
 
 			await this.state.storage.put(storageKey, serialized);
+			this.debugLog('airport_state_persist_completed', {
+				airport,
+				storageKey,
+				objectCount: state.objects.size,
+				serializedCharacters: serializedString.length,
+				serializedBytes,
+			});
 		} catch (error) {
 			console.error(`Failed to persist airport state for ${airport}:`, error);
+			this.debugLog('airport_state_persist_failed', {
+				airport,
+				storageKey,
+				objectCount: state.objects.size,
+				error: describeErrorForLog(error),
+			});
 		}
 	}
 
@@ -587,8 +881,16 @@ export class Connection {
 			this.airportStateFlushTimers.delete(airport);
 		}
 		if (!this.dirtyAirportStates.has(airport)) return;
+		this.debugLog('airport_state_flush_started', {
+			airport,
+			dirtyAirportCount: this.dirtyAirportStates.size,
+		});
 		this.dirtyAirportStates.delete(airport);
 		await this.persistAirportState(airport);
+		this.debugLog('airport_state_flush_completed', {
+			airport,
+			becameDirtyDuringFlush: this.dirtyAirportStates.has(airport),
+		});
 		if (this.dirtyAirportStates.has(airport) && !this.airportStateFlushTimers.has(airport)) {
 			this.markAirportStateDirty(airport);
 		}
@@ -644,7 +946,42 @@ export class Connection {
 		}
 
 		if (trackAnalytics) this.trackBroadcast(packet.type, airport, recipients);
+		this.debugLog('packet_broadcast_completed', {
+			direction: 'outbound',
+			packetType: packet.type,
+			airport,
+			recipients,
+			senderConnectionId: sender ? this.sockets.get(sender)?.connectionId : undefined,
+		});
 		return recipients;
+	}
+
+	private createStateUpdatePackets(updates: readonly MultiStateUpdateItem[], airport: string, timestamp: number): Packet[] {
+		return chunkStateUpdates(updates, MAX_MULTI_STATE_UPDATES).map((chunk) =>
+			chunk.length === 1
+				? { type: 'STATE_UPDATE', airport, data: chunk[0], timestamp }
+				: { type: 'MULTI_STATE_UPDATE', airport, data: { updates: chunk }, timestamp },
+		);
+	}
+
+	private broadcastStateUpdates(updates: readonly MultiStateUpdateItem[], airport: string, timestamp: number, sender: WebSocket): number {
+		let recipients = 0;
+		for (const packet of this.createStateUpdatePackets(updates, airport, timestamp)) {
+			recipients = Math.max(recipients, this.broadcast(packet, sender, false));
+		}
+		return recipients;
+	}
+
+	private sendStateUpdatesToSocket(
+		socket: WebSocket,
+		updates: readonly MultiStateUpdateItem[],
+		airport: string,
+		timestamp: number,
+	): boolean {
+		if (updates.length === 0) return false;
+		return this.createStateUpdatePackets(updates, airport, timestamp).every((packet) =>
+			this.sendPacket(socket, packet, 'duplicate_state_alias'),
+		);
 	}
 
 	private getOrCreateAirportState(airport: string): AirportState {
@@ -662,18 +999,11 @@ export class Connection {
 	}
 	private applyStateUpdateToAirport(
 		state: AirportState,
-		update: Record<string, unknown>,
+		update: MultiStateUpdateItem,
 		controllerId: string,
 		now: number,
 	): MultiStateUpdateItem {
-		if (!update || typeof update !== 'object') {
-			throw new Error('Invalid update data structure');
-		}
-
-		const objectId = update['objectId'];
-		if (!objectId || typeof objectId !== 'string') {
-			throw new Error('Missing or invalid objectId');
-		}
+		const objectId = update.objectId;
 
 		if (!OBJECT_ID_REGEX.test(objectId)) {
 			throw new Error('Invalid objectId format');
@@ -686,7 +1016,7 @@ export class Connection {
 			throw new Error(`Missing both patch and state data for object ${objectId}`);
 		}
 
-		let newState: boolean | Record<string, unknown> | null;
+		let newState: boolean | StructuredObject | null;
 		let normalized: MultiStateUpdateItem = { objectId };
 
 		const existingObject = state.objects.get(objectId) || {
@@ -697,11 +1027,11 @@ export class Connection {
 		};
 
 		if (hasPatch) {
-			const patch = (update as { patch?: unknown }).patch;
+			const patch = update.patch;
 			if (patch === undefined) {
 				throw new Error(`Missing patch data for object ${objectId}`);
 			}
-			if (patch !== null && (typeof patch !== 'object' || Array.isArray(patch))) {
+			if (patch !== null && !isStructuredObject(patch)) {
 				throw new Error(`Patch data must be an object or null for object ${objectId}`);
 			}
 
@@ -711,16 +1041,19 @@ export class Connection {
 				return { objectId, patch: null };
 			}
 
-			const baseState = typeof existingObject.state === 'object' && existingObject.state !== null ? existingObject.state : {};
-			const merged = recursivelyMergeObjects(baseState, patch as Record<string, unknown>);
-			newState = merged as Record<string, unknown>;
-			normalized = { objectId, patch: patch as Record<string, unknown> | null };
+			const baseState = isStructuredObject(existingObject.state) ? existingObject.state : {};
+			const merged = recursivelyMergeObjects(baseState, patch);
+			if (!isStructuredObject(merged)) {
+				throw new Error(`Patch merge did not produce an object for object ${objectId}`);
+			}
+			newState = merged;
+			normalized = { objectId, patch };
 		} else {
-			const stateValue = (update as { state?: unknown }).state;
-			if (typeof stateValue === 'boolean') {
+			const stateValue = update.state;
+			if (isBooleanValue(stateValue)) {
 				newState = stateValue;
-			} else if (stateValue && typeof stateValue === 'object' && !Array.isArray(stateValue)) {
-				newState = stateValue as Record<string, unknown>;
+			} else if (isStructuredObject(stateValue)) {
+				newState = stateValue;
 			} else {
 				throw new Error('State data must be boolean or object');
 			}
@@ -729,7 +1062,7 @@ export class Connection {
 
 		state.objects.set(objectId, {
 			id: objectId,
-			state: newState as boolean | Record<string, unknown>,
+			state: newState,
 			controllerId: controllerId,
 			timestamp: now,
 		});
@@ -739,25 +1072,67 @@ export class Connection {
 		return normalized;
 	}
 
+	private applyStateUpdateToEquivalentObjects(
+		state: AirportState,
+		update: MultiStateUpdateItem,
+		controllerId: string,
+		now: number,
+		template: OfflineStateTemplate,
+	): MultiStateUpdateItem[] {
+		const objectId = update.objectId;
+
+		const equivalentIds = template.equivalentIdsById.get(objectId) ?? [objectId];
+		const normalized = this.applyStateUpdateToAirport(state, update, controllerId, now);
+		if (equivalentIds.length === 1) return [normalized];
+
+		if (normalized.patch === null) {
+			return equivalentIds.map((equivalentId) =>
+				equivalentId === objectId
+					? normalized
+					: this.applyStateUpdateToAirport(state, { objectId: equivalentId, patch: null }, controllerId, now),
+			);
+		}
+
+		const canonicalState = state.objects.get(objectId)?.state;
+		if (canonicalState === undefined) {
+			throw new Error(`State update did not produce a value for object ${objectId}`);
+		}
+
+		return equivalentIds.map((equivalentId) =>
+			this.applyStateUpdateToAirport(state, { objectId: equivalentId, state: canonicalState }, controllerId, now),
+		);
+	}
+
 	private async handleStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
 		try {
-			if (!packet?.data || typeof packet.data !== 'object' || Array.isArray(packet.data)) {
+			const update = this.parseStateUpdate(packet.data);
+			if (!update) {
 				throw new Error('Invalid packet data structure');
 			}
 
 			const airport = this.resolvePacketAirport(packet, connectionAirport);
-			if (!airport || typeof airport !== 'string' || airport.length === 0) {
+			if (!airport || airport.length === 0) {
 				throw new Error('Invalid airport identifier');
 			}
 
-			const defaultStates = await this.getOfflineDefaultStates(airport);
+			const template = await this.getOfflineStateTemplate(airport);
 			const now = Date.now();
 			const state = this.getOrCreateAirportState(airport);
-			const normalized = this.applyStateUpdateToAirport(state, packet.data as Record<string, unknown>, controllerId, now);
-			this.pruneDefaultStateOverride(state, normalized.objectId, defaultStates);
-
+			const normalizedUpdates = this.applyStateUpdateToEquivalentObjects(
+				state,
+				update,
+				controllerId,
+				now,
+				template,
+			);
 			this.markAirportStateDirty(airport);
-			return now;
+			const requestedObjectId = update.objectId;
+			return {
+				updates: normalizedUpdates,
+				senderUpdates: getGeneratedAliasUpdates(normalizedUpdates, new Set([requestedObjectId])),
+				timestamp: now,
+				airport,
+			};
 		} catch (error) {
 			console.error(`State update error for controller ${controllerId}`);
 			if (error instanceof Error) {
@@ -769,33 +1144,46 @@ export class Connection {
 
 	private async handleMultiStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
 		const airport = this.resolvePacketAirport(packet, connectionAirport);
-		if (!airport || typeof airport !== 'string' || airport.length === 0) {
+		if (!airport || airport.length === 0) {
 			throw new Error('Invalid airport identifier');
 		}
 
-		const updatesPayload = this.extractMultiStateUpdates(packet.data);
+		const updatesPayload = this.parseMultiStateUpdates(packet.data);
 
 		if (!updatesPayload || updatesPayload.length === 0) {
 			throw new Error('Missing updates array');
 		}
 
-		if (updatesPayload.length > MAX_MULTI_STATE_UPDATES) {
-			throw new Error(`Batch update exceeds maximum allowed size of ${MAX_MULTI_STATE_UPDATES}`);
+		const maximumUpdates = allowsLargeLightingPacket(packet) ? MAX_LIGHTING_UPDATES : MAX_MULTI_STATE_UPDATES;
+		if (updatesPayload.length > maximumUpdates) {
+			throw new Error(`Batch update exceeds maximum allowed size of ${maximumUpdates}`);
 		}
 
-		const updates: MultiStateUpdateItem[] = updatesPayload;
+		const updates = updatesPayload;
 
-		const defaultStates = await this.getOfflineDefaultStates(airport);
+		const template = await this.getOfflineStateTemplate(airport);
 		const now = Date.now();
 		const state = this.getOrCreateAirportState(airport);
 		const normalizedUpdates: MultiStateUpdateItem[] = [];
+		const senderUpdates = new Map<string, MultiStateUpdateItem>();
 
 		for (let index = 0; index < updates.length; index++) {
 			const update = updates[index];
 			try {
-				const normalized = this.applyStateUpdateToAirport(state, update as Record<string, unknown>, controllerId, now);
-				this.pruneDefaultStateOverride(state, normalized.objectId, defaultStates);
-				normalizedUpdates.push(normalized);
+				const expandedUpdates = this.applyStateUpdateToEquivalentObjects(
+					state,
+					update,
+					controllerId,
+					now,
+					template,
+				);
+				normalizedUpdates.push(...expandedUpdates);
+				for (const expanded of expandedUpdates) {
+					// An alias can overwrite an explicitly requested ID later in the same batch.
+					if (expanded.objectId !== update.objectId || senderUpdates.has(expanded.objectId)) {
+						senderUpdates.set(expanded.objectId, expanded);
+					}
+				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : 'Unknown error';
 				throw new Error(`Update ${index + 1} failed: ${message}`);
@@ -804,7 +1192,12 @@ export class Connection {
 
 		this.markAirportStateDirty(airport);
 
-		return { updates: normalizedUpdates, timestamp: now, airport };
+		return {
+			updates: normalizedUpdates,
+			senderUpdates: [...senderUpdates.values()],
+			timestamp: now,
+			airport,
+		};
 	}
 
 	private async handleControllerDisconnect(socket: WebSocket) {
@@ -844,6 +1237,7 @@ export class Connection {
 		const VATSIM_CHECK_FREQUENCY = 2; // Check VATSIM status every 2 heartbeats
 
 		const interval = setInterval(async () => {
+			this.debugLog('heartbeat_tick', this.getSocketDebugDetails(socket));
 			if (socket.readyState !== WebSocket.OPEN) {
 				clearInterval(interval);
 				return;
@@ -859,6 +1253,10 @@ export class Connection {
 				// Check if we haven't received a heartbeat in too long
 				const now = Date.now();
 				if (now - socketInfo.lastHeartbeat > EFFECTIVE_HEARTBEAT_TIMEOUT) {
+					this.debugLog('heartbeat_timeout', {
+						...this.getSocketDebugDetails(socket, socketInfo),
+						effectiveTimeoutMs: EFFECTIVE_HEARTBEAT_TIMEOUT,
+					});
 					socket.close(1000, 'Heartbeat timeout');
 					clearInterval(interval);
 					return;
@@ -877,25 +1275,36 @@ export class Connection {
 					this.sendSerializedPacket(socket, SERIALIZED_HEARTBEAT, 'heartbeat');
 				} catch (sendError) {
 					console.error(`Failed to send heartbeat to ${socketInfo.controllerId}:`, sendError);
+					this.debugLog('heartbeat_send_failed', {
+						...this.getSocketDebugDetails(socket, socketInfo),
+						error: describeErrorForLog(sendError),
+					});
 					socket.close(1011, 'Failed to send heartbeat');
 					clearInterval(interval);
 					return;
 				}
 			} catch (e) {
 				console.error('Error in heartbeat:', e);
+				this.debugLog('heartbeat_internal_error', {
+					...this.getSocketDebugDetails(socket),
+					error: describeErrorForLog(e),
+				});
 				socket.close(1011, 'Internal error in heartbeat');
 				clearInterval(interval);
 			}
 		}, HEARTBEAT_INTERVAL);
 
 		// Clean up interval on socket close
-		socket.addEventListener('close', () => {
+		socket.addEventListener('close', (event) => {
+			const termination = this.socketTerminations.get(socket);
+			const socketInfo = this.sockets.get(socket) ?? termination?.info;
+			this.debugLog('heartbeat_stopped_on_close', {
+				...this.getSocketDebugDetails(socket, socketInfo),
+				code: event.code,
+				reason: event.reason,
+				wasClean: event.wasClean,
+			});
 			clearInterval(interval);
-		});
-
-		// Add error handler
-		socket.addEventListener('error', (evt) => {
-			console.error('WebSocket error:', describeWebSocketErrorEvent(evt, socket, this.sockets.get(socket)));
 		});
 	}
 
@@ -928,8 +1337,18 @@ export class Connection {
 	}
 
 	private async runSocketStatusCheck(socket: WebSocket, socketInfo: SocketInfo, now: number) {
+		const startedAt = Date.now();
+		this.debugLog('vatsim_status_check_started', this.getSocketDebugDetails(socket, socketInfo));
 		try {
 			const connectionStatus = await this.getConnectionStatus(socketInfo.controllerId);
+			this.debugLog('vatsim_status_check_result', {
+				...this.getSocketDebugDetails(socket, socketInfo),
+				durationMs: Date.now() - startedAt,
+				banned: connectionStatus.banned,
+				connected: connectionStatus.status !== null,
+				vatsimType: connectionStatus.status?.type,
+				vatsimCallsign: connectionStatus.status?.callsign,
+			});
 			if (connectionStatus.banned) {
 				this.sendPacket(socket, {
 					type: 'ERROR',
@@ -957,6 +1376,10 @@ export class Connection {
 			}
 
 			socketInfo.consecutiveVatsimFailures = 0;
+			if (socketInfo.type === 'pilot' && status.callsign !== socketInfo.callsign) {
+				socketInfo.callsign = status.callsign;
+				this.updatePilotCallsign(socketInfo.airport, socketInfo.controllerId, status.callsign);
+			}
 			const isController = this.vatsim.isController(status);
 			const isPilot = this.vatsim.isPilot(status);
 			const isObserver = this.vatsim.isObserver(status);
@@ -976,6 +1399,11 @@ export class Connection {
 			}
 		} catch (error) {
 			console.warn('Socket status check failed (non-fatal):', error);
+			this.debugLog('vatsim_status_check_failed', {
+				...this.getSocketDebugDetails(socket, socketInfo),
+				durationMs: Date.now() - startedAt,
+				error: describeErrorForLog(error),
+			});
 		} finally {
 			socketInfo.statusCheckInFlight = false;
 		}
@@ -1012,60 +1440,73 @@ export class Connection {
 
 	private async getOfflineStateTemplate(airport: string): Promise<OfflineStateTemplate> {
 		const normalizedAirport = airport.toUpperCase();
+		const version = this.offlineStateTemplateVersions.get(normalizedAirport) ?? 0;
 		const cached = this.offlineStateCache.get(normalizedAirport);
 		const now = Date.now();
-		if (cached?.template && cached.expiresAt > now) {
+		if (cached?.version === version && cached.template && cached.expiresAt > now) {
 			return cached.template;
 		}
-		if (cached?.inFlight) {
-			return await cached.inFlight;
+		if (cached?.version === version && cached.inFlight) {
+			const template = await cached.inFlight;
+			if ((this.offlineStateTemplateVersions.get(normalizedAirport) ?? 0) !== version) {
+				return this.getOfflineStateTemplate(normalizedAirport);
+			}
+			return template;
 		}
 
 		const inFlight = this.loadOfflineStateTemplate(normalizedAirport);
-		this.offlineStateCache.set(normalizedAirport, { expiresAt: now + OFFLINE_STATE_CACHE_TTL_MS, inFlight });
+		this.offlineStateCache.set(normalizedAirport, {
+			expiresAt: now + OFFLINE_STATE_CACHE_TTL_MS,
+			inFlight,
+			version,
+		});
 		try {
 			const template = await inFlight;
+			if ((this.offlineStateTemplateVersions.get(normalizedAirport) ?? 0) !== version) {
+				return this.getOfflineStateTemplate(normalizedAirport);
+			}
 			this.offlineStateCache.set(normalizedAirport, {
 				template,
-				defaultStates: new Map(template.map((point) => [point.id, point.state])),
 				expiresAt: Date.now() + OFFLINE_STATE_CACHE_TTL_MS,
+				version,
 			});
 			return template;
 		} catch (error) {
 			console.error(`Error fetching offline state for ${airport}:`, error);
-			this.offlineStateCache.delete(normalizedAirport);
-			return [];
+			if (this.offlineStateCache.get(normalizedAirport)?.inFlight === inFlight) {
+				this.offlineStateCache.delete(normalizedAirport);
+			}
+			return { points: [], equivalentIdsById: new Map() };
 		}
 	}
 
-	private async getOfflineDefaultStates(airport: string): Promise<ReadonlyMap<string, boolean>> {
+	async invalidatePointStateTemplate(airport: string, removedPointIds: readonly string[] = []): Promise<void> {
 		const normalizedAirport = airport.toUpperCase();
+		const version = (this.offlineStateTemplateVersions.get(normalizedAirport) ?? 0) + 1;
+		this.offlineStateTemplateVersions.set(normalizedAirport, version);
+		this.offlineStateCache.delete(normalizedAirport);
+
 		const template = await this.getOfflineStateTemplate(normalizedAirport);
-		const cached = this.offlineStateCache.get(normalizedAirport);
-		if (cached?.template === template && cached.defaultStates) {
-			return cached.defaultStates;
-		}
-		return new Map(template.map((point) => [point.id, point.state]));
+		const state = this.airportStates.get(normalizedAirport) ?? this.airportStates.get(airport);
+		if (!state) return;
+
+		let removedState = false;
+		for (const pointId of removedPointIds) removedState = state.objects.delete(pointId) || removedState;
+		if (removedState) this.markAirportStateDirty(normalizedAirport);
+		this.synchronizeEquivalentStateOverrides(state, template, normalizedAirport);
 	}
 
 	private async loadOfflineStateTemplate(airport: string): Promise<OfflineStateTemplate> {
-		// Create the necessary services to fetch points
 		const idService = new IDService();
 		const divisions = new DivisionService(this.env.DB);
 		const pointsService = new PointsService(this.env.DB, idService, divisions);
 
-		// Fetch all points for this airport
-		const airportPoints = await pointsService.getAirportPoints(airport);
-
-		return airportPoints.map((point) => ({
-			id: point.id,
-			state: point.type === 'taxiway' || point.type === 'lead_on' || point.type === 'stand',
-		}));
+		return buildPointStateTemplate(await pointsService.getAirportPoints(airport));
 	}
 
 	private buildOfflineObjectsFromTemplate(template: OfflineStateTemplate): AirportObject[] {
 		const timestamp = Date.now();
-		return template.map((point) => ({
+		return template.points.map((point) => ({
 			id: point.id,
 			state: point.state,
 			timestamp,
@@ -1073,40 +1514,37 @@ export class Connection {
 	}
 
 	private async getOnlineStateObjects(airport: string, state: AirportState): Promise<AirportObject[]> {
-		const defaultStates = await this.getOfflineDefaultStates(airport);
-		this.pruneDefaultStateOverrides(state, defaultStates, airport);
+		const template = await this.getOfflineStateTemplate(airport);
+		this.synchronizeEquivalentStateOverrides(state, template, airport);
 		return Array.from(state.objects.values());
 	}
 
-	private pruneDefaultStateOverride(state: AirportState, objectId: string, defaultStates: ReadonlyMap<string, boolean>) {
-		const object = state.objects.get(objectId);
-		if (!object || typeof object.state !== 'boolean') {
-			return;
-		}
+	private synchronizeEquivalentStateOverrides(state: AirportState, template: OfflineStateTemplate, airport: string) {
+		const visited = new Set<readonly string[]>();
+		let changed = false;
 
-		if (defaultStates.get(objectId) === object.state) {
-			state.objects.delete(objectId);
-		}
-	}
+		for (const ids of template.equivalentIdsById.values()) {
+			if (visited.has(ids)) continue;
+			visited.add(ids);
 
-	private pruneDefaultStateOverrides(state: AirportState, defaultStates: ReadonlyMap<string, boolean>, airport: string) {
-		let pruned = false;
+			const latest = selectCanonicalEquivalentState(ids, state.objects);
+			if (!latest) continue;
 
-		for (const object of state.objects.values()) {
-			if (typeof object.state !== 'boolean') {
-				continue;
+			for (const id of ids) {
+				const existing = state.objects.get(id);
+				if (
+					existing?.timestamp === latest.timestamp &&
+					existing.controllerId === latest.controllerId &&
+					JSON.stringify(existing.state) === JSON.stringify(latest.state)
+				) {
+					continue;
+				}
+				state.objects.set(id, { ...latest, id });
+				changed = true;
 			}
-
-			const defaultState = defaultStates.get(object.id);
-			if (defaultState === object.state) {
-				state.objects.delete(object.id);
-				pruned = true;
-			}
 		}
 
-		if (pruned) {
-			this.markAirportStateDirty(airport);
-		}
+		if (changed) this.markAirportStateDirty(airport);
 	}
 
 	async handleWebSocket(request: Request) {
@@ -1121,25 +1559,37 @@ export class Connection {
 			}
 		}
 
-		const deny = async () => {
+		this.debugLog('connection_attempt', {
+			airport,
+			hasCredential: Boolean(apiKey),
+			credentialSource: url.searchParams.has('key') ? 'query' : apiKey ? 'authorization_header' : 'none',
+			userAgent: request.headers.get('User-Agent'),
+			cfRay: request.headers.get('CF-Ray'),
+			cfCountry: request.headers.get('CF-IPCountry'),
+		});
+
+		const deny = async (reason: string) => {
+			this.debugLog('connection_denied', { airport, reason });
 			const jitter = Math.floor(Math.random() * 30) + 20;
 			await new Promise((r) => setTimeout(r, jitter));
 			return new Response('Unauthorized', { status: 401 });
 		};
 
-		if (!apiKey) return await deny();
-		if (!airport) return await deny();
+		if (!apiKey) return await deny('missing_credential');
+		if (!airport) return await deny('missing_airport');
 
 		const { user, banned } = await this.auth.getConnectionPrincipalByApiKey(apiKey);
-		if (!user) return await deny();
+		if (!user) return await deny('invalid_credential');
 
 		// Ban enforcement: deny connection if banned
 		if (banned) {
+			this.debugLog('connection_denied', { airport, controllerId: user.vatsim_id, reason: 'banned' });
 			return new Response('Banned', { status: 403 });
 		}
 
 		const status = await this.vatsim.getUserStatus(user.vatsim_id);
 		if (!status) {
+			this.debugLog('connection_denied', { airport, controllerId: user.vatsim_id, reason: 'not_connected_to_vatsim' });
 			return new Response('User not connected to VATSIM', { status: 403 });
 		}
 		// Auto-determine client type based on VATSIM status
@@ -1157,9 +1607,14 @@ export class Connection {
 		// Initialize socket info with the airport and heartbeat
 		this.registerSocket(server, {
 			controllerId: user.vatsim_id,
+			callsign: status.callsign,
 			type: clientType,
 			airport: airport,
 			lastHeartbeat: Date.now(),
+		});
+		this.debugLog('connection_accepted', {
+			...this.getSocketDebugDetails(server),
+			vatsimType: status.type,
 		});
 
 		// Start heartbeat mechanism
@@ -1223,6 +1678,7 @@ export class Connection {
 		}
 
 		server.addEventListener('message', (event) => {
+			const receivedAt = Date.now();
 			this.state.waitUntil(
 				this.enqueueSocketTask(server, async () => {
 					const socketInfo = this.sockets.get(server);
@@ -1234,49 +1690,93 @@ export class Connection {
 					try {
 						// Parse and validate message data
 						let rawData: string;
-						if (typeof event.data === 'string') {
+						let rawBytes: number;
+						if (isStringValue(event.data)) {
 							rawData = event.data;
+							rawBytes = PACKET_ENCODER.encode(rawData).byteLength;
 						} else {
-							if (event.data.byteLength > MAX_MESSAGE_SIZE) {
-								throw new Error(`Message size exceeds maximum allowed size of ${MAX_MESSAGE_SIZE} characters`);
+							if (event.data.byteLength > MAX_LIGHTING_MESSAGE_BYTES) {
+								throw new Error(`Message size exceeds maximum allowed size of ${MAX_LIGHTING_MESSAGE_BYTES} bytes`);
 							}
 							try {
 								rawData = PACKET_DECODER.decode(event.data);
+								rawBytes = event.data.byteLength;
 							} catch {
 								throw new Error('Failed to decode message data');
 							}
 						}
 
 						// Validate message size
-						if (rawData.length > MAX_MESSAGE_SIZE) {
-							throw new Error(`Message size exceeds maximum allowed size of ${MAX_MESSAGE_SIZE} characters`);
+						if (rawBytes > MAX_LIGHTING_MESSAGE_BYTES) {
+							throw new Error(`Message size exceeds maximum allowed size of ${MAX_LIGHTING_MESSAGE_BYTES} bytes`);
 						}
 
 						// Parse JSON with error handling
-						let packet: unknown;
+						let parsedPacket: StructuredValue;
 						try {
-							packet = JSON.parse(rawData);
+							parsedPacket = JSON.parse(rawData);
 						} catch {
 							throw new Error('Invalid JSON format');
 						}
 
 						// Validate packet structure
-						if (!this.validatePacket(packet)) {
+						if (rawBytes > MAX_MESSAGE_SIZE && !allowsLargeLightingPacket(parsedPacket)) {
+							throw new Error(`Message size exceeds maximum allowed size of ${MAX_MESSAGE_SIZE} bytes`);
+						}
+						const validationFailure = this.getPacketValidationFailure(parsedPacket);
+						if (validationFailure) {
+							const packetTypeValue = isStructuredObject(parsedPacket) ? parsedPacket.type : undefined;
+							const packetType =
+								isStringValue(packetTypeValue)
+									? packetTypeValue.slice(0, MAX_REJECTED_PACKET_TYPE_LOG_CHARACTERS)
+									: undefined;
+							console.warn({
+								level: 'warn',
+								subsystem: 'websocket',
+								event: 'packet_rejected',
+								timestamp: new Date().toISOString(),
+								durableObjectId: this.objectId,
+								...this.getSocketDebugDetails(server, socketInfo),
+								direction: 'inbound',
+								validationFailure,
+								packetType,
+								packetTypeKind: getStructuredValueKind(packetTypeValue),
+								packetTypeLogTruncated:
+									isStringValue(packetTypeValue) && packetTypeValue.length > MAX_REJECTED_PACKET_TYPE_LOG_CHARACTERS,
+								bytes: rawBytes,
+								characters: rawData.length,
+								queuedForMs: Date.now() - receivedAt,
+								...describeRejectedPacketForLog(parsedPacket),
+							});
 							throw new Error('Invalid packet structure or type');
 						}
+						// The same JSON text was validated above before it is decoded into the domain packet contract.
+						const packet: Packet = JSON.parse(rawData);
 
 						const now = Date.now();
+						socketInfo.receivedPackets++;
+						socketInfo.receivedBytes += rawBytes;
+						socketInfo.lastMessageAt = now;
 						// Update last heartbeat time for any message received
 						socketInfo.lastHeartbeat = now;
+						this.debugLog('packet_received', {
+							...this.getSocketDebugDetails(server, socketInfo),
+							direction: 'inbound',
+							sequence: socketInfo.receivedPackets,
+							bytes: rawBytes,
+							characters: rawData.length,
+							queuedForMs: now - receivedAt,
+							packetType: packet.type,
+							packet: parsedPacket,
+						});
 
 						// Update object status on each message to keep last_updated current (non-fatal on failure)
 						this.touchActiveObjectStatus();
 						const statusCheck = this.checkSocketStatus(server, socketInfo, now);
 						if (statusCheck) this.state.waitUntil(statusCheck);
 
-						const packetAirport = this.resolvePacketAirport(packet as Packet, socketInfo.airport);
-						// Handle different packet types
-						switch ((packet as Packet).type) {
+						const packetAirport = this.resolvePacketAirport(packet, socketInfo.airport);
+						switch (packet.type) {
 							case 'HEARTBEAT':
 								// Respond to heartbeat with acknowledgment, adding server timestamp
 								this.sendPacket(server, {
@@ -1295,13 +1795,12 @@ export class Connection {
 									throw new Error('Only pilot clients can send STOPBAR_CROSSING');
 								}
 
-								const p = packet as Packet;
 								const airport = socketInfo.airport;
-								if (!p.data || typeof p.data !== 'object' || Array.isArray(p.data)) {
+								if (!packet.data || !isStructuredObject(packet.data)) {
 									throw new Error('Invalid payload for STOPBAR_CROSSING');
 								}
-								const objectId = (p.data as { objectId?: string }).objectId;
-								if (!objectId) {
+								const objectId = packet.data.objectId;
+								if (!isStringValue(objectId)) {
 									throw new Error('objectId is required');
 								}
 
@@ -1317,14 +1816,17 @@ export class Connection {
 								};
 
 								const recipients = this.broadcastToControllers(broadcastPacket, server, false);
-								this.trackMessage({
-									clientType,
-									messageType: 'STOPBAR_CROSSING',
-									airport,
-									meta: {
-										objectId,
+								this.trackMessage(
+									{
+										clientType,
+										messageType: 'STOPBAR_CROSSING',
+										airport,
+										meta: {
+											objectId,
+										},
 									},
-								}, recipients);
+									recipients,
+								);
 								break;
 							}
 
@@ -1354,11 +1856,20 @@ export class Connection {
 										sharedState: this.getSharedStateSnapshot(airport),
 										controllers: this.getLiveControllerIds(airport),
 										offline,
-										requestedAt: (packet as Packet).timestamp || now,
+									requestedAt: packet.timestamp || now,
 									},
 									timestamp: Date.now(),
 								};
 								this.sendPacket(server, snapshot, 'state_snapshot');
+								break;
+							}
+
+							case 'GET_ONLINE_PILOTS': {
+								this.sendPacket(
+									server,
+									this.createOnlinePilotsPacket(packetAirport, packet.timestamp ?? now, now),
+									'online_pilots',
+								);
 								break;
 							}
 
@@ -1371,24 +1882,22 @@ export class Connection {
 								}
 
 								try {
-									const { updates, timestamp, airport } = await this.handleMultiStateUpdate(
-										packet as Packet,
+									const { updates, senderUpdates, timestamp, airport } = await this.handleMultiStateUpdate(
+										packet,
 										user.vatsim_id,
 										packetAirport,
 									);
-									const broadcastPacket: Packet = {
-										type: 'MULTI_STATE_UPDATE',
-										airport,
-										data: { updates },
-										timestamp,
-									};
-									const recipients = this.broadcast(broadcastPacket, server, false);
-									this.trackMessage({
-										clientType,
-										messageType: 'MULTI_STATE_UPDATE',
-										airport: socketInfo.airport,
-										meta: { count: updates.length },
-									}, recipients);
+									let recipients = this.broadcastStateUpdates(updates, airport, timestamp, server);
+									if (this.sendStateUpdatesToSocket(server, senderUpdates, airport, timestamp)) recipients += 1;
+									this.trackMessage(
+										{
+											clientType,
+											messageType: 'MULTI_STATE_UPDATE',
+											airport: socketInfo.airport,
+											meta: { count: updates.length },
+										},
+										recipients,
+									);
 								} catch (updateError) {
 									throw new Error(
 										`State batch update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
@@ -1405,28 +1914,31 @@ export class Connection {
 								}
 
 								try {
-									const timestamp = await this.handleStateUpdate(packet as Packet, user.vatsim_id, packetAirport);
-									const broadcastPacket = {
-										...(packet as Packet),
-										airport: packetAirport,
-										timestamp,
-									};
-									const recipients = this.broadcast(broadcastPacket, server, false);
-									const data = ((packet as Packet).data || {}) as Record<string, unknown>;
-									const patchValue = data.patch as unknown;
-									const meta: Record<string, unknown> = {
-										objectId: typeof data.objectId === 'string' ? data.objectId : undefined,
+									const { updates, senderUpdates, timestamp, airport } = await this.handleStateUpdate(
+										packet,
+										user.vatsim_id,
+										packetAirport,
+									);
+									let recipients = this.broadcastStateUpdates(updates, airport, timestamp, server);
+									if (this.sendStateUpdatesToSocket(server, senderUpdates, airport, timestamp)) recipients += 1;
+									const data = isStructuredObject(packet.data) ? packet.data : {};
+									const patchValue = data.patch;
+									const meta: AnalyticsProperties = {
+										objectId: isStringValue(data.objectId) ? data.objectId : undefined,
 										updateMode: patchValue !== undefined ? 'patch' : 'state',
 									};
-									if (patchValue && typeof patchValue === 'object' && !Array.isArray(patchValue)) {
-										meta.patchKeys = Object.keys(patchValue as Record<string, unknown>).length;
+									if (isStructuredObject(patchValue)) {
+										meta.patchKeys = Object.keys(patchValue).length;
 									}
-									this.trackMessage({
-										clientType,
-										messageType: 'STATE_UPDATE',
-										airport: socketInfo.airport,
-										meta,
-									}, recipients);
+									this.trackMessage(
+										{
+											clientType,
+											messageType: updates.length === 1 ? 'STATE_UPDATE' : 'MULTI_STATE_UPDATE',
+											airport: socketInfo.airport,
+											meta: { ...meta, equivalentObjectCount: updates.length },
+										},
+										recipients,
+									);
 								} catch (updateError) {
 									throw new Error(
 										`State update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
@@ -1436,13 +1948,14 @@ export class Connection {
 
 							case 'CLOSE': {
 								// Handle graceful disconnection
-								if (clientType === 'controller') {
-									await this.handleControllerDisconnect(server);
-								}
-								const removed = this.unregisterSocket(server);
-								if (removed) {
-									await this.trackDisconnection(removed, 'client_close');
-								}
+								await this.cleanupSocket(server, 'client_close', {
+									clean: true,
+									details: {
+										code: 1000,
+										reason: 'Client requested disconnection',
+										initiatedBy: 'client_packet',
+									},
+								});
 								server.close(1000, 'Client requested disconnection');
 								break;
 							}
@@ -1454,7 +1967,7 @@ export class Connection {
 								}
 
 								try {
-									await this.handleSharedStateUpdate(packet as Packet, user.vatsim_id, packetAirport);
+									await this.handleSharedStateUpdate(packet, user.vatsim_id, packetAirport);
 								} catch (updateError) {
 									throw new Error(
 										`Shared state update failed: ${updateError instanceof Error ? updateError.message : String(updateError)}`,
@@ -1466,9 +1979,23 @@ export class Connection {
 								// Reject unknown packet types
 								throw new Error(`Unknown packet type: ${packet.type}`);
 						}
+						this.debugLog('packet_handled', {
+							...this.getSocketDebugDetails(server, socketInfo),
+							direction: 'inbound',
+							sequence: socketInfo.receivedPackets,
+							packetType: packet.type,
+							processingMs: Date.now() - now,
+							totalLatencyMs: Date.now() - receivedAt,
+						});
 					} catch (err) {
 						const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
 						console.error(`Message handling error for ${socketInfo.controllerId}:`, errorMessage);
+						this.debugLog('packet_handling_failed', {
+							...this.getSocketDebugDetails(server, socketInfo),
+							direction: 'inbound',
+							queuedForMs: Date.now() - receivedAt,
+							error: describeErrorForLog(err),
+						});
 
 						// Send error response to client
 						if (
@@ -1485,12 +2012,50 @@ export class Connection {
 			);
 		});
 
-		server.addEventListener('close', () => {
-			this.state.waitUntil(this.handleSocketTermination(server, 'close_event'));
+		server.addEventListener('close', (event) => {
+			const termination = this.socketTerminations.get(server);
+			const socketInfo = this.sockets.get(server) ?? termination?.info;
+			this.debugLog('socket_close_event', {
+				...this.getSocketDebugDetails(server, socketInfo),
+				code: event.code,
+				reason: event.reason,
+				wasClean: event.wasClean,
+			});
+			this.state.waitUntil(
+				this.handleSocketTermination(server, 'close_event', {
+					clean: event.wasClean,
+					details: {
+						code: event.code,
+						reason: event.reason,
+						wasClean: event.wasClean,
+					},
+				}),
+			);
 		});
 
-		server.addEventListener('error', () => {
-			this.state.waitUntil(this.handleSocketTermination(server, 'socket_error'));
+		server.addEventListener('error', (event) => {
+			const termination = this.socketTerminations.get(server);
+			const socketInfo = this.sockets.get(server);
+			const errorDetails = describeWebSocketErrorEvent(event, server, socketInfo ?? termination?.info);
+			if (termination || !socketInfo) {
+				this.debugLog('socket_error_after_termination_ignored', {
+					...this.getSocketDebugDetails(server, termination?.info),
+					originalReason: termination?.reason,
+					terminationCompleted: termination?.completedAt !== undefined,
+					error: errorDetails,
+				});
+				return;
+			}
+			console.error('WebSocket error:', errorDetails);
+			this.debugLog('socket_error_event', {
+				...this.getSocketDebugDetails(server, socketInfo),
+				error: errorDetails,
+			});
+			this.state.waitUntil(
+				this.handleSocketTermination(server, 'socket_error', {
+					details: { error: errorDetails },
+				}),
+			);
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
@@ -1506,6 +2071,10 @@ export class Connection {
 			})
 			.catch((error) => {
 				console.error('Queued socket task failed:', error instanceof Error ? error.message : error);
+				this.debugLog('socket_queue_task_failed', {
+					...this.getSocketDebugDetails(socket),
+					error: describeErrorForLog(error),
+				});
 			})
 			.finally(() => {
 				if (this.socketQueues.get(socket) === next) {
@@ -1528,6 +2097,12 @@ export class Connection {
 
 	private sendSerializedPacket(socket: WebSocket, packetString: string, context: string): boolean {
 		if (socket.readyState !== WebSocket.OPEN) {
+			this.debugLog('packet_send_skipped_socket_not_open', {
+				...this.getSocketDebugDetails(socket),
+				direction: 'outbound',
+				context,
+				bytes: PACKET_ENCODER.encode(packetString).byteLength,
+			});
 			return false;
 		}
 		try {
@@ -1535,6 +2110,27 @@ export class Connection {
 			const info = this.sockets.get(socket);
 			if (info) {
 				info.sendFailures = 0;
+				info.sentPackets++;
+				const bytes = PACKET_ENCODER.encode(packetString).byteLength;
+				info.sentBytes += bytes;
+				let packet: StructuredValue = packetString;
+				if (this.debugEnabled) {
+					try {
+						packet = JSON.parse(packetString);
+					} catch {
+						// Keep the serialized value for diagnostics if a non-JSON frame is ever sent.
+					}
+				}
+				this.debugLog('packet_sent', {
+					...this.getSocketDebugDetails(socket, info),
+					direction: 'outbound',
+					context,
+					sequence: info.sentPackets,
+					bytes,
+					characters: packetString.length,
+					packetType: isStructuredObject(packet) ? packet.type : undefined,
+					packet,
+				});
 			}
 			return true;
 		} catch (error) {
@@ -1543,9 +2139,15 @@ export class Connection {
 		}
 	}
 
-	private handleSendFailure(socket: WebSocket, context: string, error: unknown) {
+	private handleSendFailure(socket: WebSocket, context: string, cause: unknown) {
 		const info = this.sockets.get(socket);
-		console.error(`Failed to send WebSocket packet during ${context}:`, error);
+		console.error(`Failed to send WebSocket packet during ${context}:`, cause);
+		this.debugLog('packet_send_failed', {
+			...this.getSocketDebugDetails(socket, info),
+			direction: 'outbound',
+			context,
+			error: describeErrorForLog(cause),
+		});
 		if (!info) return;
 
 		info.sendFailures++;
@@ -1555,44 +2157,105 @@ export class Connection {
 		}
 	}
 
-	private async cleanupSocket(socket: WebSocket, reason: string) {
+	private async cleanupSocket(socket: WebSocket, reason: string, options: SocketTerminationOptions = {}) {
+		await this.terminateSocket(socket, reason, options);
+	}
+
+	private async handleSocketTermination(
+		socket: WebSocket,
+		reason: 'close_event' | 'socket_error',
+		options: SocketTerminationOptions = {},
+	) {
+		await this.terminateSocket(socket, reason, options);
+	}
+
+	private async terminateSocket(socket: WebSocket, reason: string, options: SocketTerminationOptions = {}) {
+		const existing = this.socketTerminations.get(socket);
+		if (existing) {
+			existing.clean ||= options.clean ?? false;
+			existing.details = { ...existing.details, ...options.details };
+			this.debugLog(
+				existing.completedAt === undefined ? 'socket_termination_already_in_progress' : 'socket_termination_already_handled',
+				{
+					...this.getSocketDebugDetails(socket, existing.info),
+					originalReason: existing.reason,
+					repeatedReason: reason,
+					clean: existing.clean,
+					...existing.details,
+				},
+			);
+			if (existing.task) await existing.task;
+			return;
+		}
+
 		const info = this.sockets.get(socket);
-		if (!info) return;
+		if (!info) {
+			this.debugLog('socket_termination_ignored_unregistered', {
+				...this.getSocketDebugDetails(socket),
+				reason,
+				clean: options.clean ?? false,
+				...options.details,
+			});
+			return;
+		}
+
+		const record: SocketTerminationRecord = {
+			info,
+			reason,
+			details: options.details ?? {},
+			clean: options.clean ?? false,
+			startedAt: Date.now(),
+		};
+		this.socketTerminations.set(socket, record);
+		record.task = this.performSocketTermination(socket, record);
+		await record.task;
+	}
+
+	private async performSocketTermination(socket: WebSocket, record: SocketTerminationRecord) {
+		const { info } = record;
+		this.debugLog('socket_termination_started', {
+			...this.getSocketDebugDetails(socket, info),
+			reason: record.reason,
+			clean: record.clean,
+			...record.details,
+		});
 
 		if (info.type === 'controller') {
 			try {
 				await this.handleControllerDisconnect(socket);
 			} catch (error) {
-				console.warn('handleControllerDisconnect failed during cleanup (non-fatal):', error);
-			}
-		}
-
-		const removed = this.unregisterSocket(socket);
-		if (!removed) return;
-
-		try {
-			await this.trackDisconnection(removed, reason);
-		} catch (error) {
-			console.warn('trackDisconnection failed during cleanup (non-fatal):', error);
-		}
-	}
-
-	private async handleSocketTermination(socket: WebSocket, reason: 'close_event' | 'socket_error') {
-		const info = this.sockets.get(socket);
-		if (info?.type === 'controller') {
-			try {
-				await this.handleControllerDisconnect(socket);
-			} catch (error) {
 				console.warn('handleControllerDisconnect failed during socket termination (non-fatal):', error);
+				this.debugLog('controller_disconnect_cleanup_failed', {
+					...this.getSocketDebugDetails(socket, info),
+					reason: record.reason,
+					error: describeErrorForLog(error),
+				});
 			}
 		}
+
 		const removed = this.unregisterSocket(socket);
-		if (!removed) return;
-		try {
-			await this.trackDisconnection(removed, reason);
-		} catch (error) {
-			console.warn('trackDisconnection failed during socket termination (non-fatal):', error);
+		if (removed) {
+			try {
+				await this.trackDisconnection(removed, record.reason);
+			} catch (error) {
+				console.warn('trackDisconnection failed during socket termination (non-fatal):', error);
+				this.debugLog('disconnection_tracking_failed', {
+					...this.getSocketDebugDetails(socket, removed),
+					reason: record.reason,
+					error: describeErrorForLog(error),
+				});
+			}
 		}
+
+		record.completedAt = Date.now();
+		this.debugLog('socket_termination_completed', {
+			...this.getSocketDebugDetails(socket, info),
+			reason: record.reason,
+			clean: record.clean,
+			...record.details,
+			durationMs: record.completedAt - record.startedAt,
+			socketCount: this.sockets.size,
+		});
 	}
 
 	private touchActiveObjectStatus() {
@@ -1699,13 +2362,16 @@ export class Connection {
 		}
 	}
 
-	private trackMessage(details: {
-		clientType: ClientType;
-		messageType: Packet['type'];
-		airport: string;
-		meta?: Record<string, unknown>;
-	}, broadcastRecipients = 0) {
-		const props: Record<string, unknown> = {
+	private trackMessage(
+		details: {
+			clientType: ClientType;
+			messageType: Packet['type'];
+			airport: string;
+			meta?: StructuredObject;
+		},
+		broadcastRecipients = 0,
+	) {
+		const props = {
 			airport: details.airport,
 			clientType: details.clientType,
 			messageType: details.messageType,
@@ -1791,7 +2457,7 @@ export class Connection {
 		return recipients;
 	}
 
-	private getOrCreateSharedState(airport: string): Record<string, unknown> {
+	private getOrCreateSharedState(airport: string): StructuredObject {
 		let sharedState = this.airportSharedStates.get(airport);
 		if (!sharedState) {
 			sharedState = {}; // Initialize as empty object as per requirements
@@ -1802,21 +2468,24 @@ export class Connection {
 	private async handleSharedStateUpdate(packet: Packet, controllerId: string, connectionAirport: string) {
 		try {
 			// Validate required fields
-			if (!packet?.data || typeof packet.data !== 'object' || Array.isArray(packet.data)) {
+			if (!packet?.data || !isStructuredObject(packet.data)) {
 				throw new Error('Invalid packet data structure');
 			}
 
-			if (!packet.data.sharedStatePatch || typeof packet.data.sharedStatePatch !== 'object' || Array.isArray(packet.data.sharedStatePatch)) {
+			if (
+				!packet.data.sharedStatePatch ||
+				!isStructuredObject(packet.data.sharedStatePatch)
+			) {
 				throw new Error('Missing or invalid sharedStatePatch');
 			}
 
 			// Validate airport parameter
 			const airport = this.resolvePacketAirport(packet, connectionAirport);
-			if (!airport || typeof airport !== 'string' || airport.length === 0) {
+			if (!airport || airport.length === 0) {
 				throw new Error('Invalid airport identifier');
 			}
 
-			const patch = packet.data.sharedStatePatch as Record<string, unknown>;
+			const patch = packet.data.sharedStatePatch;
 			const patchKeyCount = Object.keys(patch).length;
 			let patchSize = 0;
 			let serializedPatch = '';
@@ -1824,9 +2493,10 @@ export class Connection {
 			// Validate patch structure and size
 			try {
 				serializedPatch = JSON.stringify(patch);
-				patchSize = serializedPatch.length;
-				if (patchSize > MAX_SHARED_PATCH_SIZE) {
-					throw new Error(`Patch size exceeds maximum allowed size of ${MAX_SHARED_PATCH_SIZE} characters`);
+				patchSize = PACKET_ENCODER.encode(serializedPatch).byteLength;
+				const sizeLimit = isEuroScopeGraphPatch(patch) ? MAX_LIGHTING_MESSAGE_BYTES : MAX_SHARED_PATCH_SIZE;
+				if (patchSize > sizeLimit) {
+					throw new Error(`Patch size exceeds maximum allowed size of ${sizeLimit} bytes`);
 				}
 			} catch {
 				throw new Error('Patch data is not serializable');
@@ -1836,25 +2506,34 @@ export class Connection {
 			const currentState = this.getOrCreateSharedState(airport);
 
 			// Apply recursive merge with error handling
-			const updatedState = recursivelyMergeObjects(currentState, patch);
+			const updatedState = recursivelyMergeObjects(currentState, patch, 0, isEuroScopeGraphPatch(patch));
 
 			// Update the stored state
-			this.airportSharedStates.set(airport, updatedState as Record<string, unknown>);
+			if (!isStructuredObject(updatedState)) {
+				throw new Error('Shared-state merge did not produce an object');
+			}
+			if (PACKET_ENCODER.encode(JSON.stringify(updatedState)).byteLength > MAX_STATE_SIZE) {
+				throw new Error('Merged shared state exceeds the supported persistence size.');
+			}
+			this.airportSharedStates.set(airport, updatedState);
 
 			this.markSharedStateDirty(airport);
 
 			// Broadcast to all clients (including sender)
 			const recipients = this.broadcastSharedState(airport, serializedPatch, controllerId);
 
-			this.trackMessage({
-				clientType: 'controller',
-				messageType: 'SHARED_STATE_UPDATE',
-				airport,
-				meta: {
-					patchKeys: patchKeyCount,
-					patchSize,
+			this.trackMessage(
+				{
+					clientType: 'controller',
+					messageType: 'SHARED_STATE_UPDATE',
+					airport,
+					meta: {
+						patchKeys: patchKeyCount,
+						patchSize,
+					},
 				},
-			}, recipients);
+				recipients,
+			);
 
 			return updatedState;
 		} catch (error) {
@@ -1877,172 +2556,134 @@ export class Connection {
 		return recipients;
 	}
 
-	private getSharedStateSnapshot(airport: string): Record<string, unknown> {
+	private getSharedStateSnapshot(airport: string): StructuredObject {
 		return this.getOrCreateSharedState(airport);
 	}
 
-	private validatePacket(packet: unknown): packet is Packet {
+	private getPacketValidationFailure(packet: StructuredValue): string | null {
 		// Basic structure validation
-		if (!packet || typeof packet !== 'object') {
-			return false;
+		if (!isStructuredObject(packet)) {
+			return 'packet_not_object';
 		}
 
-		const obj = packet as Record<string, unknown>;
-		const type = obj['type'];
+		const type = packet.type;
 		// Required type field
-		if (typeof type !== 'string') {
-			return false;
+		if (!isStringValue(type)) {
+			return 'missing_or_non_string_type';
 		}
 
-		if (!VALID_PACKET_TYPES.has(type as Packet['type'])) {
-			return false;
+		if (!isSupportedPacketType(type)) {
+			return 'unsupported_type';
 		}
 
 		// Optional airport field validation
-		const airport = obj['airport'];
-		if (airport !== undefined && (typeof airport !== 'string' || airport.length === 0)) {
-			return false;
+		const airport = packet.airport;
+		if (airport !== undefined && (!isStringValue(airport) || airport.length === 0)) {
+			return 'invalid_airport';
 		}
 
 		// Optional timestamp validation
-		const timestamp = obj['timestamp'];
-		if (timestamp !== undefined && (typeof timestamp !== 'number' || timestamp < 0)) {
-			return false;
+		const timestamp = packet.timestamp;
+		if (timestamp !== undefined && (!isNumberValue(timestamp) || timestamp < 0)) {
+			return 'invalid_timestamp';
 		}
 
 		// The raw message length and JSON parse are checked before this method.
 		switch (type) {
 			case 'STATE_UPDATE':
-				return this.validateStateUpdatePacket(packet);
+				return this.validateStateUpdatePacket(packet) ? null : 'invalid_state_update_payload';
 			case 'MULTI_STATE_UPDATE':
-				return this.validateMultiStateUpdatePacket(packet);
+				return this.validateMultiStateUpdatePacket(packet) ? null : 'invalid_multi_state_update_payload';
 			case 'SHARED_STATE_UPDATE':
-				return this.validateSharedStateUpdatePacket(packet);
+				return this.validateSharedStateUpdatePacket(packet) ? null : 'invalid_shared_state_update_payload';
 			case 'STOPBAR_CROSSING':
-				return this.validateStopbarCrossingPacket(packet);
+				return this.validateStopbarCrossingPacket(packet) ? null : 'invalid_stopbar_crossing_payload';
 			default:
-				return true; // Other types are valid if they pass basic checks
+				return null; // Other types are valid if they pass basic checks
 		}
 	}
 
-	private validateStateUpdatePacket(packet: unknown): boolean {
-		const obj = packet as { data?: unknown };
-		if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
-			return false;
-		}
-
-		const data = obj.data as Record<string, unknown>;
-		// Must have objectId
-		if (!data.objectId || typeof data.objectId !== 'string' || !OBJECT_ID_REGEX.test(data.objectId)) {
-			return false;
-		}
-
-		// Must have either patch or state
-		if (data.patch === undefined && data.state === undefined) {
-			return false;
-		}
-
-		if (
-			data.patch !== undefined &&
-			(data.patch === null || (typeof data.patch === 'object' && !Array.isArray(data.patch))) &&
-			!isSafeNestedValue(data.patch)
-		) {
-			return false;
-		}
-		if (data.patch !== undefined && data.patch !== null && (typeof data.patch !== 'object' || Array.isArray(data.patch))) {
-			return false;
-		}
-		if (
-			data.state !== undefined &&
-			typeof data.state !== 'boolean' &&
-			(typeof data.state !== 'object' || data.state === null || Array.isArray(data.state))
-		) {
-			return false;
-		}
-		if (data.state !== undefined && !isSafeNestedValue(data.state)) return false;
-
-		return true;
+	private validateStateUpdatePacket(packet: StructuredValue): boolean {
+		return isStructuredObject(packet) && this.parseStateUpdate(packet.data) !== null;
 	}
 
-	private validateMultiStateUpdatePacket(packet: unknown): boolean {
-		const obj = packet as { data?: unknown };
-		const updates = this.extractMultiStateUpdates(obj.data);
+	private validateMultiStateUpdatePacket(packet: StructuredValue): boolean {
+		if (!isStructuredObject(packet)) return false;
+		const updates = this.parseMultiStateUpdates(packet.data);
 
 		if (!updates || updates.length === 0) {
 			return false;
 		}
 
-		if (updates.length > MAX_MULTI_STATE_UPDATES) {
+		const maximumUpdates = allowsLargeLightingPacket(packet) ? MAX_LIGHTING_UPDATES : MAX_MULTI_STATE_UPDATES;
+		if (updates.length > maximumUpdates) {
 			return false;
-		}
-
-		const typedUpdates: MultiStateUpdateItem[] = updates;
-
-		for (const update of typedUpdates) {
-			if (!update || typeof update !== 'object') return false;
-			const data = update as Record<string, unknown>;
-			if (!data.objectId || typeof data.objectId !== 'string') return false;
-			if (!OBJECT_ID_REGEX.test(data.objectId)) return false;
-			if (data.patch === undefined && data.state === undefined) return false;
-			if (data.patch !== undefined && data.patch !== null && (typeof data.patch !== 'object' || Array.isArray(data.patch))) {
-				return false;
-			}
-			if (
-				data.state !== undefined &&
-				typeof data.state !== 'boolean' &&
-				(typeof data.state !== 'object' || data.state === null || Array.isArray(data.state))
-			) {
-				return false;
-			}
-			if (data.patch !== undefined && !isSafeNestedValue(data.patch)) return false;
-			if (data.state !== undefined && !isSafeNestedValue(data.state)) return false;
 		}
 
 		return true;
 	}
 
-	private validateSharedStateUpdatePacket(packet: unknown): boolean {
-		const obj = packet as { data?: unknown };
-		if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
-			return false;
-		}
-
-		const data = obj.data as Record<string, unknown>;
+	private validateSharedStateUpdatePacket(packet: StructuredValue): boolean {
+		if (!isStructuredObject(packet) || !isStructuredObject(packet.data)) return false;
 		// Must have sharedStatePatch
-		if (!data.sharedStatePatch || typeof data.sharedStatePatch !== 'object' || Array.isArray(data.sharedStatePatch)) {
+		if (!isStructuredObject(packet.data.sharedStatePatch)) {
 			return false;
 		}
 
-		if (!isSafeNestedValue(data.sharedStatePatch)) return false;
+		if (!isSafeNestedValue(packet.data.sharedStatePatch) && !isEuroScopeGraphPatch(packet.data.sharedStatePatch)) return false;
 		return true;
 	}
 
-	private validateStopbarCrossingPacket(packet: unknown): boolean {
-		const obj = packet as { data?: unknown };
-		if (!obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
-			return false;
-		}
-
-		const data = obj.data as Record<string, unknown>;
+	private validateStopbarCrossingPacket(packet: StructuredValue): boolean {
+		if (!isStructuredObject(packet) || !isStructuredObject(packet.data)) return false;
 		// Must have objectId
-		if (!data.objectId || typeof data.objectId !== 'string' || !OBJECT_ID_REGEX.test(data.objectId)) {
+		if (!isStringValue(packet.data.objectId) || !OBJECT_ID_REGEX.test(packet.data.objectId)) {
 			return false;
 		}
 
 		return true;
 	}
 
-	// Extracts a typed updates array from either a bare array payload or an object with `updates`
-	private extractMultiStateUpdates(data: unknown): MultiStateUpdateItem[] | null {
-		if (Array.isArray(data)) {
-			return data as MultiStateUpdateItem[];
+	private parseStateUpdate(data: RuntimeCandidate): MultiStateUpdateItem | null {
+		if (!isStructuredObject(data)) return null;
+
+		const objectId = data.objectId;
+		if (!isStringValue(objectId) || !OBJECT_ID_REGEX.test(objectId)) return null;
+
+		const hasPatch = data.patch !== undefined;
+		const hasState = data.state !== undefined;
+		if (!hasPatch && !hasState) return null;
+
+		const parsed: MultiStateUpdateItem = { objectId };
+		if (hasPatch) {
+			const patch = data.patch;
+			if (patch !== null && !isStructuredObject(patch)) return null;
+			if (!isSafeNestedValue(patch)) return null;
+			parsed.patch = patch;
 		}
-		if (data && typeof data === 'object' && !Array.isArray(data)) {
-			const maybeUpdates = (data as { updates?: unknown }).updates;
-			if (Array.isArray(maybeUpdates)) {
-				return maybeUpdates as MultiStateUpdateItem[];
-			}
+
+		if (hasState) {
+			const state = data.state;
+			if (!isBooleanValue(state) && !isStructuredObject(state)) return null;
+			if (!isSafeNestedValue(state)) return null;
+			parsed.state = state;
 		}
-		return null;
+
+		return parsed;
+	}
+
+	// Parses updates from either the legacy bare array payload or an object with `updates`.
+	private parseMultiStateUpdates(data: RuntimeCandidate): MultiStateUpdateItem[] | null {
+		const embeddedUpdates = isStructuredObject(data) && 'updates' in data ? data.updates : undefined;
+		const rawUpdates = Array.isArray(data) ? data : Array.isArray(embeddedUpdates) ? embeddedUpdates : null;
+		if (!rawUpdates) return null;
+
+		const updates: MultiStateUpdateItem[] = [];
+		for (const rawUpdate of rawUpdates) {
+			const update = this.parseStateUpdate(rawUpdate);
+			if (!update) return null;
+			updates.push(update);
+		}
+		return updates;
 	}
 }

@@ -33,10 +33,8 @@ export class VatSysProfilesService {
 	}
 
 	/** Basic XML safety checks (rejects DOCTYPE/ENTITY and enforces declaration) */
-	private static validateXml(xml: ArrayBuffer | string): void {
-		let text: string;
-		if (typeof xml === 'string') text = xml;
-		else text = new TextDecoder().decode(xml);
+	private static validateXml(xml: ArrayBuffer): void {
+		const text = new TextDecoder().decode(xml);
 		if (!text || text.length === 0) throw new Error('Empty XML');
 		if (text.length > VatSysProfilesService.MAX_XML_BYTES) throw new Error('XML too large');
 		const trimmed = text.trim();
@@ -74,7 +72,7 @@ export class VatSysProfilesService {
 				// Derive ICAO as first 4 alphanumeric chars of the base name
 				const icaoCandidate = (base.substring(0, 4) || '').toUpperCase();
 				const derivedIcao = /^[A-Z0-9]{4}$/.test(icaoCandidate) ? icaoCandidate : '';
-				return { icao: derivedIcao, name: file, key: o.key } as VatSysProfileItem;
+				return { icao: derivedIcao, name: file, key: o.key };
 			});
 		return all;
 	}

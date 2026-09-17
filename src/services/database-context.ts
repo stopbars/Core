@@ -26,13 +26,13 @@ export class BookmarkManager {
 	/**
 	 * Create a new Response with bookmark header set
 	 */
-	public static responseWithBookmark(body: unknown, bookmark: string | null, init: ResponseInit = {}): Response {
+	public static responseWithBookmark(body: string, bookmark: string | null, init: ResponseInit = {}): Response {
 		const headers = new Headers(init.headers);
 		if (bookmark) {
 			headers.set(BookmarkManager.BOOKMARK_HEADER, bookmark);
 		}
 
-		return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+		return new Response(body, {
 			...init,
 			headers,
 		});
@@ -58,7 +58,7 @@ export class RequestDatabaseContext {
 	 */
 	public startSession(options: Omit<SessionOptions, 'bookmark'> = {}): void {
 		if (this.isStarted) {
-			return; // Already started
+			return;
 		}
 
 		const bookmark = BookmarkManager.getBookmarkFromRequest(this.request);

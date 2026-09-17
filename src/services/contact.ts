@@ -39,7 +39,9 @@ export class ContactService {
 			 RETURNING id, email, topic, message, ip_address, status, handled_by, handled_at, created_at`,
 			[id, email, topic, message, ipHash],
 		);
-		const created = (result.results as unknown as ContactMessageRecord[] | null)?.[0];
+		// SAFETY: The INSERT RETURNING list exactly matches ContactMessageRecord and supplies one row on success.
+		const rows = result.results as ContactMessageRecord[] | null;
+		const created = rows?.[0];
 		if (!created) throw new Error('Failed to create contact message');
 		return created;
 	}
@@ -67,12 +69,16 @@ export class ContactService {
 			 RETURNING id, email, topic, message, ip_address, status, handled_by, handled_at, created_at`,
 			[status, status, handlerVatsimId, status, id],
 		);
-		return (result.results as unknown as ContactMessageRecord[] | null)?.[0] ?? null;
+		// SAFETY: The UPDATE RETURNING list exactly matches ContactMessageRecord.
+		const rows = result.results as ContactMessageRecord[] | null;
+		return rows?.[0] ?? null;
 	}
 
 	async deleteMessage(id: string): Promise<boolean> {
 		const result = await this.dbSession.executeWrite(`DELETE FROM contact_messages WHERE id = ? RETURNING id`, [id]);
-		return Boolean((result.results as unknown as Array<{ id: string }> | null)?.[0]);
+		// SAFETY: The DELETE statement explicitly returns the string contact_messages.id column.
+		const rows = result.results as Array<{ id: string }> | null;
+		return Boolean(rows?.[0]);
 	}
 
 	async hasRecentSubmissionFromIp(ip: string, withinHours = 24): Promise<boolean> {

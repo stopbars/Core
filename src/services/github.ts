@@ -4,6 +4,10 @@
 
 import { cancelResponseBody } from './http';
 
+interface GitHubRequestHeaders {
+	[name: string]: string;
+}
+
 interface GitHubContributor {
 	id: number;
 	login: string;
@@ -105,8 +109,8 @@ export class GitHubService {
 	/**
 	 * Get common headers for GitHub API requests
 	 */
-	private getHeaders(): Record<string, string> {
-		const headers: Record<string, string> = {
+	private getHeaders(): GitHubRequestHeaders {
+		const headers: GitHubRequestHeaders = {
 			'User-Agent': 'BARS-API',
 			Accept: 'application/vnd.github.v3+json',
 		};
@@ -149,7 +153,6 @@ export class GitHubService {
 		const allContributors = new Map<number, GitHubContributor>();
 		const repoData: ContributorsData['repositories'] = [];
 
-		// Get all organization repositories
 		const orgRepos = await this.getOrganizationRepositories();
 		const publicRepos = orgRepos.filter((repo) => !repo.private);
 		const concurrency = 10;
@@ -215,10 +218,8 @@ export class GitHubService {
 			});
 		}
 
-		// Convert Map to Array and sort by contributions
 		const contributorList = Array.from(allContributors.values()).sort((a, b) => b.contributions - a.contributions);
 
-		// Sort repositories by stars
 		repoData.sort((a, b) => b.stars - a.stars);
 
 		const totalContributions = contributorList.reduce((sum, contributor) => sum + contributor.contributions, 0);

@@ -10,13 +10,20 @@ interface DownloadRow {
 	updated_at: string;
 }
 
+interface DownloadBatchRow {
+	id?: number;
+	should_increment?: number;
+	version?: string;
+	total_count?: number;
+}
+
 export interface VersionDownloadStats {
 	version: string;
 	count: number;
 }
 
-export interface ProductDownloadStats {
-	product: InstallerProduct;
+export interface ProductDownloadStats<TProduct extends string = InstallerProduct> {
+	product: TProduct;
 	total: number;
 	versions: VersionDownloadStats[];
 }
@@ -51,7 +58,7 @@ export class DownloadsService {
 		ip: string,
 	): Promise<{ versionCount: number; productTotal: number; versions: VersionDownloadStats[] }> {
 		const ipHash = await this.hashIp(ip || '0.0.0.0');
-		const initial = await this.dbSession.executeBatch([
+		const initial = await this.dbSession.executeBatch<DownloadBatchRow>([
 			{
 				query: `INSERT INTO downloads (product, version, total_count)
 					VALUES (?, ?, 0)
@@ -75,12 +82,17 @@ export class DownloadsService {
 				params: [product],
 			},
 		]);
-		const shouldIncrement = Boolean((initial[1]?.results as Array<{ should_increment: number }> | undefined)?.[0]);
-		const initialVersions = (initial[2]?.results as Array<{ version: string; total_count: number }> | undefined) ?? [];
-		const mapVersions = (rows: Array<{ version: string; total_count: number }>): VersionDownloadStats[] =>
-			rows.map((row) => ({ version: row.version, count: row.total_count }));
+		const shouldIncrement = Boolean(initial[1]?.results?.[0]?.should_increment);
+		const mapVersions = (rows: DownloadBatchRow[]): VersionDownloadStats[] =>
+			rows.map((row) => {
+				if (row.version === undefined || row.total_count === undefined) {
+					throw new Error('Database returned an invalid download statistics row');
+				}
+				return { version: row.version, count: row.total_count };
+			});
+		const initialVersions = mapVersions(initial[2]?.results ?? []);
 		if (!shouldIncrement) {
-			const versions = mapVersions(initialVersions);
+			const versions = initialVersions;
 			return {
 				versionCount: versions.find((item) => item.version === version)?.count ?? 0,
 				productTotal: versions.reduce((sum, item) => sum + item.count, 0),
@@ -88,7 +100,7 @@ export class DownloadsService {
 			};
 		}
 
-		const [, , updatedVersionRows] = await this.dbSession.executeBatch([
+		const [, , updatedVersionRows] = await this.dbSession.executeBatch<DownloadBatchRow>([
 			{
 				query: `UPDATE downloads
 					SET total_count = total_count + 1, updated_at = CURRENT_TIMESTAMP
@@ -108,9 +120,7 @@ export class DownloadsService {
 				params: [product],
 			},
 		]);
-		const versions = mapVersions(
-			(updatedVersionRows.results as Array<{ version: string; total_count: number }> | undefined) ?? initialVersions,
-		);
+		const versions = updatedVersionRows.results ? mapVersions(updatedVersionRows.results) : initialVersions;
 		return {
 			versionCount: versions.find((item) => item.version === version)?.count ?? 0,
 			productTotal: versions.reduce((sum, item) => sum + item.count, 0),
@@ -131,18 +141,18 @@ export class DownloadsService {
 	/**
 	 * Returns download stats for all products.
 	 */
-	async getAllStats(): Promise<ProductDownloadStats[]> {
+	async getAllStats(): Promise<ProductDownloadStats<string>[]> {
 		const rowsRes = await this.dbSession.executeRead<DownloadRow>(
 			'SELECT product, version, total_count FROM downloads ORDER BY product, created_at DESC',
 		);
-		const byProduct = new Map<InstallerProduct, VersionDownloadStats[]>();
+		const byProduct = new Map<string, VersionDownloadStats[]>();
 		for (const r of rowsRes.results) {
-			const prod = r.product as InstallerProduct;
+			const prod = r.product;
 			const list = byProduct.get(prod) || [];
 			list.push({ version: r.version, count: r.total_count });
 			byProduct.set(prod, list);
 		}
-		const all: ProductDownloadStats[] = [];
+		const all: ProductDownloadStats<string>[] = [];
 		for (const [product, versions] of byProduct.entries()) {
 			const total = versions.reduce((a, b) => a + b.count, 0);
 			all.push({ product, total, versions });

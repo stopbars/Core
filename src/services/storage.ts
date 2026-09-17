@@ -27,6 +27,7 @@ export class StorageService {
 		data: ReadableStream | ArrayBuffer | string,
 		contentType: string,
 		metadata: Record<string, string> = {},
+		options: { onlyIfAbsent?: boolean } = {},
 	): Promise<{ key: string; etag: string }> {
 		// Normalize key to avoid any issues
 		const normalizedKey = this.normalizeKey(key);
@@ -37,16 +38,20 @@ export class StorageService {
 			fileType: contentType.split('/')[0] || 'application',
 		};
 
-		// Upload to R2
-		const uploaded = await this.bucket.put(normalizedKey, data, {
+		const putOptions: R2PutOptions = {
 			httpMetadata: {
 				contentType,
 				cacheControl: `public, max-age=${this.MAX_AGE_DEFAULT}`,
 			},
 			customMetadata: fileMetadata,
-		});
+		};
+		if (options.onlyIfAbsent) {
+			putOptions.onlyIf = { etagDoesNotMatch: '*' };
+		}
+		const uploaded = await this.bucket.put(normalizedKey, data, putOptions);
 
 		if (!uploaded) {
+			if (options.onlyIfAbsent) throw new Error('Storage object already exists');
 			throw new Error('Failed to upload file to storage');
 		}
 
@@ -73,7 +78,6 @@ export class StorageService {
 			return null;
 		}
 
-		// Create headers
 		const headers = new Headers();
 		object.writeHttpMetadata(headers);
 		headers.set('etag', object.httpEtag);
@@ -81,14 +85,13 @@ export class StorageService {
 
 		let status = 200;
 		if (object.range) {
-			// Miniflare may expose all union members with undefined values, so narrow
-			// by value rather than using the `in` operator.
-			const suffix = 'suffix' in object.range && typeof object.range.suffix === 'number' ? object.range.suffix : undefined;
-			const rangeOffset = 'offset' in object.range && typeof object.range.offset === 'number' ? object.range.offset : 0;
+			// Miniflare may expose union members with undefined values, so preserve
+			// the same undefined fallbacks after discriminating the range shape.
+			const suffix = 'suffix' in object.range ? object.range.suffix : undefined;
+			const rangeOffset = ('offset' in object.range ? object.range.offset : undefined) ?? 0;
 			const offset = suffix === undefined ? rangeOffset : Math.max(0, object.size - suffix);
-			const rangeLength = 'length' in object.range && typeof object.range.length === 'number' ? object.range.length : undefined;
-			const length =
-				suffix === undefined ? (rangeLength ?? Math.max(0, object.size - offset)) : Math.min(object.size, suffix);
+			const rangeLength = 'length' in object.range ? object.range.length : undefined;
+			const length = suffix === undefined ? (rangeLength ?? Math.max(0, object.size - offset)) : Math.min(object.size, suffix);
 			headers.set('Content-Range', `bytes ${offset}-${offset + length - 1}/${object.size}`);
 			headers.set('Content-Length', String(length));
 			status = 206;

@@ -29,6 +29,19 @@ CREATE TABLE IF NOT EXISTS staff (
   )
 );
 
+CREATE TABLE IF NOT EXISTS contributor_fast_track (
+  user_id INTEGER PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  granted_by INTEGER,
+  granted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  updated_by INTEGER,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  FOREIGN KEY (granted_by) REFERENCES users (id) ON DELETE SET NULL,
+  FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS points (
   id TEXT PRIMARY KEY,
   airport_id TEXT NOT NULL,
@@ -180,7 +193,8 @@ CREATE TABLE IF NOT EXISTS contributions (
   simulator TEXT CHECK (
     simulator IN (
       'msfs2020',
-      'msfs2024'
+      'msfs2024',
+      'xplane'
     )
   ) NOT NULL DEFAULT 'msfs2024',
   submission_date DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -193,7 +207,20 @@ CREATE TABLE IF NOT EXISTS contributions (
     )
   ) NOT NULL DEFAULT 'pending',
   rejection_reason TEXT,
-  decision_date DATETIME
+  decision_date DATETIME,
+  generation_token TEXT,
+  generation_hash TEXT,
+  artifact_identity TEXT,
+  artifact_generation_id TEXT,
+  removal_artifact_key TEXT,
+  bars_artifact_key TEXT,
+  decision_source TEXT CHECK (
+    decision_source IN (
+      'staff',
+      'fast_track'
+    )
+  ),
+  decided_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS notams (
@@ -260,6 +287,8 @@ CREATE TABLE IF NOT EXISTS contribution_generations (
   icao TEXT NOT NULL,
   supports_key TEXT NOT NULL,
   bars_key TEXT NOT NULL,
+  simulator TEXT,
+  generation_hash TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   expires_at DATETIME NOT NULL DEFAULT (datetime('now', '+1 day'))
 );
@@ -332,6 +361,12 @@ CREATE INDEX IF NOT EXISTS idx_staff_created_at ON staff (
   created_at DESC
 );
 
+CREATE INDEX IF NOT EXISTS idx_contributor_fast_track_active ON contributor_fast_track (
+  user_id,
+  enabled,
+  expires_at
+);
+
 CREATE INDEX IF NOT EXISTS idx_active_objects_name ON active_objects (
   name
 );
@@ -379,6 +414,19 @@ CREATE INDEX IF NOT EXISTS idx_contributions_airport_lowerpkg_status_decision ON
   airport_icao,
   lower(package_name),
   status,
+  decision_date DESC
+);
+
+CREATE INDEX IF NOT EXISTS idx_contributions_artifact_identity ON contributions (
+  airport_icao,
+  artifact_identity,
+  simulator,
+  status
+);
+
+CREATE INDEX IF NOT EXISTS idx_contributions_fast_track_limit ON contributions (
+  user_id,
+  decision_source,
   decision_date DESC
 );
 

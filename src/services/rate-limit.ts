@@ -31,7 +31,7 @@ export class RateLimiter extends DurableObject<Env> {
 	async fetch(request: Request): Promise<Response> {
 		try {
 			type RLBody = Partial<{ key: string; maxRequests: number; intervalMs: number }>;
-			const body = await request.json<RLBody>().catch(() => ({}) as RLBody);
+			const body = await request.json<RLBody>().catch((): RLBody => ({}));
 			const { key, maxRequests, intervalMs } = body;
 			if (!key) return new Response('Missing key', { status: 400 });
 			return Response.json({

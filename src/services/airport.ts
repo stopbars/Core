@@ -3,6 +3,8 @@ import { PostHogService } from './posthog';
 import { calculateDistance } from './bars/geoUtils';
 import { HttpError } from './errors';
 import { cancelResponseBody } from './http';
+import { parseDecimalNumber } from './parsing';
+import type { JsonObject, JsonValue } from '../types';
 
 interface AirportData {
 	latitude_deg?: number;
@@ -114,43 +116,45 @@ const RUNWAY_FIELDS = new Set([
 	'he_longitude_deg',
 ]);
 
-const requireObject = (value: unknown): Record<string, unknown> => {
-	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+const requireObject = (value: JsonValue): JsonObject => {
+	if (value === null || Array.isArray(value) || !(value instanceof Object)) {
 		throw new HttpError(400, 'Request body must be a JSON object');
-	}
-	return value as Record<string, unknown>;
-};
-
-const requireNumber = (value: unknown, field: string, min: number, max: number): number => {
-	if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
-		throw new HttpError(400, `${field} must be a number between ${min} and ${max}`);
 	}
 	return value;
 };
 
-const requireString = (value: unknown, field: string, maxLength: number): string => {
-	if (typeof value !== 'string') throw new HttpError(400, `${field} must be a string`);
-	const normalized = value.trim();
+const requireNumber = (value: JsonValue, field: string, min: number, max: number): number => {
+	const parsed = Number(value);
+	if (value?.constructor !== Number || !Number.isFinite(parsed) || parsed < min || parsed > max) {
+		throw new HttpError(400, `${field} must be a number between ${min} and ${max}`);
+	}
+	return parsed;
+};
+
+const requireString = (value: JsonValue, field: string, maxLength: number): string => {
+	if (value?.constructor !== String) throw new HttpError(400, `${field} must be a string`);
+	const normalized = String(value).trim();
 	if (!normalized || normalized.length > maxLength) {
 		throw new HttpError(400, `${field} must contain 1-${maxLength} characters`);
 	}
 	return normalized;
 };
 
-const optionalString = (value: unknown, field: string, maxLength: number): string | null => {
+const optionalString = (value: JsonValue, field: string, maxLength: number): string | null => {
 	if (value === null) return null;
 	return requireString(value, field, maxLength);
 };
 
-const numericString = (value: unknown, field: string, min: number, max: number): string => {
-	const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
+const numericString = (value: JsonValue, field: string, min: number, max: number): string => {
+	const decimalInput = value?.constructor === String ? String(value) : value?.constructor === Number ? Number(value) : null;
+	const parsed = parseDecimalNumber(decimalInput);
 	if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
 		throw new HttpError(400, `${field} must be a number between ${min} and ${max}`);
 	}
 	return String(parsed);
 };
 
-const parseRunways = (value: unknown): RunwayRecord[] => {
+const parseRunways = (value: JsonValue): RunwayRecord[] => {
 	if (!Array.isArray(value)) throw new HttpError(400, 'runways must be an array');
 	if (value.length > 100) throw new HttpError(400, 'runways cannot contain more than 100 entries');
 
@@ -178,7 +182,7 @@ const parseRunways = (value: unknown): RunwayRecord[] => {
 	});
 };
 
-const validateKnownFields = (body: Record<string, unknown>, allowIcao: boolean) => {
+const validateKnownFields = (body: JsonObject, allowIcao: boolean) => {
 	for (const field of Object.keys(body)) {
 		if (!AIRPORT_FIELDS.has(field) || (!allowIcao && field === 'icao')) {
 			throw new HttpError(400, `Unknown or immutable field: ${field}`);
@@ -186,7 +190,7 @@ const validateKnownFields = (body: Record<string, unknown>, allowIcao: boolean) 
 	}
 };
 
-const parseOptionalFields = (body: Record<string, unknown>, target: AirportUpdateInput) => {
+const parseOptionalFields = (body: JsonObject, target: AirportUpdateInput) => {
 	if ('latitude' in body) target.latitude = requireNumber(body.latitude, 'latitude', -90, 90);
 	if ('longitude' in body) target.longitude = requireNumber(body.longitude, 'longitude', -180, 180);
 	if ('name' in body) target.name = requireString(body.name, 'name', 200);
@@ -245,7 +249,7 @@ const parseOptionalFields = (body: Record<string, unknown>, target: AirportUpdat
 	if ('runways' in body) target.runways = parseRunways(body.runways);
 };
 
-export const parseAirportCreateInput = (value: unknown): AirportCreateInput => {
+export const parseAirportCreateInput = (value: JsonValue): AirportCreateInput => {
 	const body = requireObject(value);
 	validateKnownFields(body, true);
 	const icao = requireString(body.icao, 'icao', 4).toUpperCase();
@@ -275,7 +279,7 @@ export const parseAirportCreateInput = (value: unknown): AirportCreateInput => {
 	};
 };
 
-export const parseAirportUpdateInput = (value: unknown): AirportUpdateInput => {
+export const parseAirportUpdateInput = (value: JsonValue): AirportUpdateInput => {
 	const body = requireObject(value);
 	validateKnownFields(body, false);
 	const parsed: AirportUpdateInput = {};
@@ -356,6 +360,7 @@ export class AirportService {
 			];
 			try {
 				const results = await dbSession.executeBatch(statements);
+				// SAFETY: The first statement returns the airports columns that exactly define AirportRecord.
 				const airport = (results[0]?.results as AirportRecord[] | undefined)?.[0];
 				if (!airport) throw new Error('Airport insert returned no record');
 				try {
@@ -379,10 +384,26 @@ export class AirportService {
 		return this.withDbSession(async (dbSession) => {
 			const assignments: string[] = [];
 			const params: Array<string | number | null> = [];
-			for (const [field, value] of Object.entries(input)) {
-				if (field === 'runways') continue;
+			const editableFields = [
+				'latitude',
+				'longitude',
+				'name',
+				'continent',
+				'country_code',
+				'country_name',
+				'region_name',
+				'elevation_ft',
+				'elevation_m',
+				'bbox_min_lat',
+				'bbox_min_lon',
+				'bbox_max_lat',
+				'bbox_max_lon',
+			] as const;
+			for (const field of editableFields) {
+				const value = input[field];
+				if (value === undefined) continue;
 				assignments.push(`${field} = ?`);
-				params.push(value as string | number | null);
+				params.push(value);
 			}
 
 			const updateQuery =
@@ -402,8 +423,10 @@ export class AirportService {
 			});
 
 			const results = await dbSession.executeBatch(statements);
+			// SAFETY: The update statement uses RETURNING * from airports, whose selected row matches AirportRecord.
 			const airport = (results[0]?.results as AirportRecord[] | undefined)?.[0];
 			if (!airport) throw new HttpError(404, `Airport ${normalizedIcao} not found`);
+			// SAFETY: The final statement selects exactly the eight string columns required by RunwayRecord.
 			const runways = (results[results.length - 1]?.results as RunwayRecord[] | undefined) ?? [];
 			try {
 				this.posthog?.track('Airport Manually Updated', {
@@ -447,8 +470,11 @@ export class AirportService {
 					params: [uppercaseIcao],
 				},
 			]);
+			// SAFETY: Each assertion corresponds to the explicitly selected columns in its immediately preceding query.
 			const airportFromDb = (airportResult.results as AirportRecord[])[0];
+			// SAFETY: The runway query selects exactly the eight string columns required by RunwayRecord.
 			const cachedRunways = runwayResult.results as RunwayRecord[];
+			// SAFETY: The division-airport query selects only the numeric id column.
 			const divisionAirportId = (divisionAirportResult.results as Array<{ id: number }>)[0]?.id ?? null;
 
 			if (airportFromDb) {
@@ -499,10 +525,11 @@ export class AirportService {
 					if (response.status === 404) return null;
 					throw new HttpError(503, 'Bounding box unavailable');
 				}
-				const airportData = (await response.json()) as AirportData;
+				const airportData: AirportData = await response.json();
 
-				const hasCoords = Number.isFinite(airportData.latitude_deg) && Number.isFinite(airportData.longitude_deg);
-				if (!hasCoords) {
+				const latitude = airportData.latitude_deg;
+				const longitude = airportData.longitude_deg;
+				if (latitude === undefined || longitude === undefined || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
 					try {
 						this.posthog?.track('Airport External Fetch MissingCoords', { icao: uppercaseIcao });
 					} catch {
@@ -521,8 +548,8 @@ export class AirportService {
 
 				const airport = {
 					icao: uppercaseIcao,
-					latitude: airportData.latitude_deg!,
-					longitude: airportData.longitude_deg!,
+					latitude,
+					longitude,
 					name: airportData.name || '',
 					continent: airportData.continent || 'UNKNOWN',
 					country_code,
@@ -637,7 +664,10 @@ export class AirportService {
 				return { ...mergedAirport, id: divisionAirportId };
 			} catch (e) {
 				try {
-					this.posthog?.track('Airport External Fetch Failed', { icao: uppercaseIcao, error: (e as Error).message });
+					this.posthog?.track('Airport External Fetch Failed', {
+						icao: uppercaseIcao,
+						error: e instanceof Error ? e.message : String(e),
+					});
 				} catch {
 					/* ignore */
 				}
@@ -686,7 +716,9 @@ export class AirportService {
 
 			const batchResults = await dbSession.executeReadBatch(statements);
 			for (let index = 0; index < batchResults.length; index += 2) {
+				// SAFETY: The first query in each pair explicitly selects every AirportReadRecord field.
 				for (const airport of batchResults[index].results as AirportReadRecord[]) cachedAirports.set(airport.icao, airport);
+				// SAFETY: The second query in each pair selects every RunwayRecord field plus airport_icao.
 				for (const runway of batchResults[index + 1].results as Array<RunwayRecord & { airport_icao: string }>) {
 					const list = cachedRunways.get(runway.airport_icao) ?? [];
 					list.push({
@@ -873,7 +905,7 @@ export class AirportService {
 					}
 					throw new HttpError(503, 'Bounding box unavailable');
 				}
-				const json = (await res.json()) as OverpassResponse;
+				const json: OverpassResponse = await res.json();
 				if (!json.elements || json.elements.length === 0) throw new HttpError(503, 'Bounding box unavailable');
 
 				const sorted = [...json.elements].sort((a, b) => {
@@ -899,9 +931,15 @@ export class AirportService {
 							if (minLat !== Infinity) {
 								bounds = { minlat: minLat, minlon: minLon, maxlat: maxLat, maxlon: maxLon };
 							}
-						} else if (el.type === 'node' && Number.isFinite(el.lat) && Number.isFinite(el.lon)) {
+						} else if (
+							el.type === 'node' &&
+							el.lat !== undefined &&
+							el.lon !== undefined &&
+							Number.isFinite(el.lat) &&
+							Number.isFinite(el.lon)
+						) {
 							const pad = 0.002;
-							bounds = { minlat: el.lat! - pad, minlon: el.lon! - pad, maxlat: el.lat! + pad, maxlon: el.lon! + pad };
+							bounds = { minlat: el.lat - pad, minlon: el.lon - pad, maxlat: el.lat + pad, maxlon: el.lon + pad };
 						}
 					}
 					if (bounds) {
@@ -930,7 +968,10 @@ export class AirportService {
 					continue;
 				}
 				try {
-					this.posthog?.track('Airport Bounding Box Fetch Failed', { icao, error: (e as Error).message });
+					this.posthog?.track('Airport Bounding Box Fetch Failed', {
+						icao,
+						error: e instanceof Error ? e.message : String(e),
+					});
 				} catch {
 					/* ignore analytics errors */
 				}
@@ -954,7 +995,7 @@ export class AirportService {
 				await cancelResponseBody(response);
 				return null;
 			}
-			const data = (await response.json()) as AirportData;
+			const data: AirportData = await response.json();
 			const updates: Partial<AirportRecord> = {};
 			const setFragments: string[] = [];
 			const params: Array<string | number | null> = [];

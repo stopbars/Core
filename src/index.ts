@@ -1,4 +1,4 @@
-import type { Context } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { DurableObject } from 'cloudflare:workers';
@@ -8,16 +8,19 @@ import { CacheKeys, withCache } from './services/cache';
 import { DatabaseContextFactory } from './services/database-context';
 import { HttpError } from './services/errors';
 import { cancelResponseBody, getClientIp } from './services/http';
-import { getLightsByObject, type RadarLight } from './services/lights-cache';
+import { getLightsByObject } from './services/lights-cache';
 import { rateLimit } from './services/rate-limit';
 import { InstallerProduct } from './services/releases';
 import { StaffRole } from './services/roles';
 import { ServicePool } from './services/service-pool';
 import { UserService } from './services/users';
 import { VatsimService } from './services/vatsim';
-import { deriveContributionGenerationTokenFromMsfsXml } from './services/contributions';
+import { deriveContributionGenerationHash, deriveContributionGenerationToken, type Simulator } from './services/contributions';
 import { parseAirportCreateInput, parseAirportUpdateInput } from './services/airport';
 import { MAX_CONTRIBUTION_XML_BYTES, sanitizeContributionXml } from './services/xml-sanitizer';
+import { generateXPlaneRemovalsJson } from './services/xplane-removals';
+import { DIVISION_DATA_ACTOR_ID, isDivisionDataAutomationRequest } from './services/division-data-auth';
+import { normalizeIsoDateTime, parseDecimalNumber } from './services/parsing';
 import { AirportObject, PointChangeset, PointData, UserRecord, VatsimUser } from './types';
 export { RateLimiter } from './services/rate-limit';
 const POINT_ID_REGEX = /^[A-Z0-9-_]+$/;
@@ -33,7 +36,10 @@ const INSTALLER_PRODUCTS: readonly InstallerProduct[] = [
 	'Installer',
 	'SimConnect.NET',
 ];
+const parseInstallerProduct = (value: string | undefined): InstallerProduct | undefined =>
+	INSTALLER_PRODUCTS.find((product) => product === value);
 const CACHE_NAMESPACES = ['airports', 'points', 'divisions', 'auth', 'state', 'health', 'installer', 'github', 'faq'] as const;
+const CONTRIBUTION_STATUSES = ['pending', 'approved', 'rejected', 'outdated'] as const;
 const STATE_ID_INFO = [
 	{ type: 'Uni-Directional', code: 0, direction2: 'OFF', direction1: 'OFF' },
 	{ type: 'Uni-Directional', code: 1, direction2: 'OFF', direction1: 'Red' },
@@ -53,8 +59,36 @@ const STATE_ID_INFO = [
 	{ type: 'Bi-Directional', code: 27, direction2: 'Green', direction1: 'Orange' },
 ] as const;
 
-const getHighResTime =
-	typeof performance !== 'undefined' && typeof performance.now === 'function' ? () => performance.now() : () => Date.now();
+type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
+interface JsonObject {
+	[key: string]: JsonValue;
+}
+
+const parseJsonObject = (value: JsonValue | undefined): JsonObject => {
+	if (value === null || value !== Object(value) || Array.isArray(value)) return {};
+	// SAFETY: JSON objects contain only JSON values, and the object/array/null cases were distinguished above.
+	return value as JsonObject;
+};
+
+const readString = (value: JsonValue | undefined): string | undefined => {
+	if (String(value) !== value) return undefined;
+	// SAFETY: strict equality with String(value) establishes that value is a primitive string.
+	return value as string;
+};
+
+const readNumber = (value: JsonValue | undefined): number | undefined => {
+	if (Number(value) !== value) return undefined;
+	// SAFETY: strict equality with Number(value) establishes that value is a primitive number.
+	return value as number;
+};
+
+const readBoolean = (value: JsonValue | undefined): boolean | undefined => {
+	if (Boolean(value) !== value) return undefined;
+	// SAFETY: strict equality with Boolean(value) establishes that value is a primitive boolean.
+	return value as boolean;
+};
+
+const getHighResTime = () => performance.now();
 
 const formatServerTiming = (durationMs: number): string => {
 	const normalized = durationMs < 0 ? 0 : durationMs;
@@ -195,34 +229,58 @@ interface ApproveAirportPayload {
 	approved: boolean;
 }
 
-interface UpdateAirportContributionsPayload {
-	contributionsEnabled: boolean;
-}
-
 interface ContributionSubmissionPayload {
 	airportIcao: string;
 	packageName: string;
 	submittedXml: string;
 	notes?: string;
-	simulator: 'msfs2020' | 'msfs2024';
+	simulator: Simulator;
+	generationToken: string;
+	generationHash: string;
+	fastTrackRequested?: boolean;
 }
 
-interface ContributionDecisionPayload {
-	approved: boolean;
-	rejectionReason?: string;
-	newPackageName?: string;
+interface AuthNetworkStatusPayload {
+	cid: string;
+	offline: boolean;
+	vatsim_status?: VatsimConnectionStatus | null;
+	vatsim_status_raw?: string;
+}
+
+interface UploadedBarsPackage {
+	type: string;
+	key: string;
+	size: number;
+	sha256: string;
+	etag: string;
+	url: string;
+	version?: string;
+	protocol?: string;
 }
 
 interface ContributionGenerationCacheEntry {
 	icao: string;
+	simulator: Simulator;
+	generationHash: string;
 	expiresAt: string;
-	supportsXml: string;
+	removalArtifact: string;
 	barsXml: string;
 }
 
 const CONTRIBUTION_GENERATION_CACHE_NAMESPACE = 'generation';
 const CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS = 86400;
 const MIN_CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS = 1;
+
+const summarizeContributionStatuses = (items: Array<{ status: string }>, total: number) =>
+	items.reduce(
+		(summary, item) => {
+			if (item.status === 'approved' || item.status === 'pending' || item.status === 'rejected' || item.status === 'outdated') {
+				summary[item.status] += 1;
+			}
+			return summary;
+		},
+		{ total, approved: 0, pending: 0, rejected: 0, outdated: 0 },
+	);
 
 type VatsimConnectionStatus = {
 	callsign: string;
@@ -251,7 +309,28 @@ export class BARS extends DurableObject<Env> {
 	async getState(airport: string, forceOffline = false) {
 		return this.connection.getState(airport, forceOffline);
 	}
+
+	async invalidatePointStateTemplate(airport: string, removedPointIds: string[] = []) {
+		await this.connection.invalidatePointStateTemplate(airport, removedPointIds);
+	}
 }
+
+const invalidateAirportPointStateCaches = async (env: Env, airport: string, removedPointIds: string[] = []): Promise<void> => {
+	const normalizedAirport = airport.toUpperCase();
+	const results = await Promise.allSettled([
+		ServicePool.getCache(env).delete(`offline-template-${normalizedAirport}`, OFFLINE_TEMPLATE_NAMESPACE),
+		env.BARS.getByName(normalizedAirport).invalidatePointStateTemplate(normalizedAirport, removedPointIds),
+	]);
+
+	for (const [index, result] of results.entries()) {
+		if (result.status === 'fulfilled') continue;
+		console.warn('Point state cache invalidation failed after a successful point mutation', {
+			airport: normalizedAirport,
+			cache: index === 0 ? 'worker-offline-template' : 'durable-object-point-template',
+			error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+		});
+	}
+};
 
 const app = new Hono<{
 	Bindings: Env;
@@ -266,7 +345,13 @@ const app = new Hono<{
 	};
 }>();
 
-const parseVatsimStatusCsv = (csv: string): { offline: boolean; status: VatsimConnectionStatus | null; raw: string } => {
+interface ParsedVatsimStatusCsv {
+	offline: boolean;
+	status: VatsimConnectionStatus | null;
+	raw: string;
+}
+
+const parseVatsimStatusCsv = (csv: string): ParsedVatsimStatusCsv => {
 	const trimmed = (csv || '').trim();
 	if (!trimmed) {
 		return { offline: true, status: null, raw: '' };
@@ -302,7 +387,8 @@ const parseVatsimStatusCsv = (csv: string): { offline: boolean; status: VatsimCo
 
 	const status: VatsimConnectionStatus = {
 		callsign,
-		facility_type: (facilityType as VatsimConnectionStatus['facility_type']) || 'unknown',
+		// SAFETY: VATSIM supplies facility_type as the third CSV field; the contract permits its string codes.
+		facility_type: facilityType as VatsimConnectionStatus['facility_type'],
 		frequency: numberOrNull(freq),
 		visual_range: numberOrNull(visRange),
 		latitude: numberOrNull(lat),
@@ -337,7 +423,7 @@ app.onError((err, c) => {
 	}
 
 	const start = c?.get('serverTimingStart');
-	if (typeof start === 'number') {
+	if (start !== undefined) {
 		applyServerTimingHeader(response.headers, getHighResTime() - start);
 	}
 
@@ -365,6 +451,7 @@ app.use('*', async (c, next) => {
 		if (c.req.method === 'OPTIONS') return;
 		if (path === '/favicon.ico') return;
 		if (path.includes('/health')) return;
+		// SAFETY: ANALYTICS_IGNORE is an optional text binding supplied by the Worker environment.
 		const ignoreRaw = (c.env as { ANALYTICS_IGNORE?: string }).ANALYTICS_IGNORE;
 		if (ignoreRaw) {
 			const ignores = ignoreRaw
@@ -415,26 +502,25 @@ app.get('/favicon.ico', () => {
 	});
 });
 
-async function resolveUserFromVatsimOrApi(
-	c: Context<{ Bindings: Env; Variables: { vatsimUser?: VatsimUser; user?: UserRecord } }>,
+export async function resolveUserFromCredentials(
+	vatsimToken: string | undefined,
+	authz: string,
+	vatsim: Pick<VatsimService, 'getUser'>,
+	auth: Pick<AuthService, 'getUserByVatsimId' | 'getUserByApiKey'>,
 ): Promise<{ user: UserRecord | null; vatsimUser?: VatsimUser }> {
-	const vatsimToken = c.req.header('X-Vatsim-Token');
-	const authz = c.req.header('Authorization') || '';
-	const vatsim = ServicePool.getVatsim(c.env);
-	const auth = ServicePool.getAuth(c.env);
-
 	if (vatsimToken) {
 		try {
 			const vUser = await vatsim.getUser(vatsimToken);
 			const user = await auth.getUserByVatsimId(vUser.id);
 			return { user, vatsimUser: vUser };
 		} catch {
-			return { user: null };
+			// A stale browser session must not prevent a valid API key from
+			// authenticating the same request.
 		}
 	}
 
 	if (authz.toLowerCase().startsWith('bearer ')) {
-		const apiKey = authz.slice(7);
+		const apiKey = authz.slice(7).trim();
 		try {
 			const user = await auth.getUserByApiKey(apiKey);
 			if (user) {
@@ -446,6 +532,17 @@ async function resolveUserFromVatsimOrApi(
 	}
 
 	return { user: null };
+}
+
+async function resolveUserFromVatsimOrApi(
+	c: Context<{ Bindings: Env; Variables: { vatsimUser?: VatsimUser; user?: UserRecord } }>,
+): Promise<{ user: UserRecord | null; vatsimUser?: VatsimUser }> {
+	return resolveUserFromCredentials(
+		c.req.header('X-Vatsim-Token'),
+		c.req.header('Authorization') || '',
+		ServicePool.getVatsim(c.env),
+		ServicePool.getAuth(c.env),
+	);
 }
 
 /**
@@ -482,16 +579,16 @@ async function resolveUserFromVatsimOrApi(
 app.post('/contact', async (c) => {
 	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 	try {
-		let body: unknown;
+		let body: JsonValue;
 		try {
 			body = await c.req.json();
 		} catch {
 			return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 });
 		}
-		const b = (body ?? {}) as Record<string, unknown>;
-		const email = typeof b.email === 'string' ? b.email.trim() : '';
-		const topic = typeof b.topic === 'string' ? b.topic.trim() : '';
-		const message = typeof b.message === 'string' ? b.message.trim() : '';
+		const contactInput = parseJsonObject(body);
+		const email = readString(contactInput.email)?.trim() ?? '';
+		const topic = readString(contactInput.topic)?.trim() ?? '';
+		const message = readString(contactInput.message)?.trim() ?? '';
 		const ip = getClientIp(c.req.raw);
 
 		const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -611,13 +708,13 @@ app.patch('/contact/:id/status', async (c) => {
 	const id = c.req.param('id');
 	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 	try {
-		let body: unknown;
+		let body: JsonValue;
 		try {
 			body = await c.req.json();
 		} catch {
 			return dbContext.jsonResponse({ error: 'Invalid JSON body' }, { status: 400 });
 		}
-		const status = (body as Record<string, unknown>)?.status;
+		const status = parseJsonObject(body).status;
 		if (status !== 'pending' && status !== 'handling' && status !== 'handled') {
 			return dbContext.jsonResponse({ error: 'Invalid status' }, { status: 400 });
 		}
@@ -732,6 +829,7 @@ app.delete('/contact/:id', async (c) => {
  *         | --- | --- | --- |
  *         | `HEARTBEAT` | controller, pilot, observer | Server replies with `HEARTBEAT_ACK` |
  *         | `GET_STATE` | controller, pilot, observer | Server replies with `STATE_SNAPSHOT` |
+ *         | `GET_ONLINE_PILOTS` | controller, pilot, observer | Server replies with `ONLINE_PILOTS` for the connected airport |
  *         | `STATE_UPDATE` | controller only | Broadcast to same-airport clients (except sender) |
  *         | `MULTI_STATE_UPDATE` | controller only | Broadcast to same-airport clients (except sender) |
  *         | `SHARED_STATE_UPDATE` | controller only | Broadcast to same-airport clients (including sender) |
@@ -747,6 +845,11 @@ app.delete('/contact/:id', async (c) => {
  *         ### GET_STATE
  *         ```json
  *         { "type": "GET_STATE" }
+ *         ```
+ *
+ *         ### GET_ONLINE_PILOTS
+ *         ```json
+ *         { "type": "GET_ONLINE_PILOTS" }
  *         ```
  *
  *         ### STATE_UPDATE (controller only)
@@ -815,6 +918,21 @@ app.delete('/contact/:id', async (c) => {
  *         - `HEARTBEAT` every 60 seconds
  *         - `HEARTBEAT_ACK` in response to client `HEARTBEAT`
  *         - `STATE_SNAPSHOT` in response to `GET_STATE`
+ *         - `ONLINE_PILOTS` in response to `GET_ONLINE_PILOTS`:
+ *           ```json
+ *           {
+ *             "type": "ONLINE_PILOTS",
+ *             "airport": "YSSY",
+ *             "data": {
+ *               "pilots": [
+ *                 { "cid": "1234567", "callsign": "QFA12" },
+ *                 { "cid": "7654321", "callsign": "VOZ456" }
+ *               ],
+ *               "requestedAt": 1739400000000
+ *             },
+ *             "timestamp": 1739400000123
+ *           }
+ *           ```
  *         - `STATE_UPDATE` when a controller changes one object state
  *         - `MULTI_STATE_UPDATE` when a controller sends a batch state change
  *         - `CONTROLLER_CONNECT` / `CONTROLLER_DISCONNECT` for controller presence changes
@@ -893,7 +1011,6 @@ app.get('/connect', rateLimit({ maxRequests: 30 }), async (c) => {
 	return c.env.BARS.getByName(airportId).fetch(c.req.raw);
 });
 
-// State endpoint
 /**
  * @openapi
  * /state:
@@ -962,7 +1079,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 					const airportIcaoRaw = metadata?.airport ?? obj.name.split('/')[0] ?? '';
 					const airportIcao = airportIcaoRaw.toUpperCase();
 					if (!ICAO_REGEX.test(airportIcao)) {
-						return null as null;
+						return null;
 					}
 
 					const controllerCountFromMetadata = metadata?.controllers ?? 0;
@@ -971,7 +1088,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 					if (controllerCountFromMetadata === 0 && pilotCountFromMetadata === 0 && observerCountFromMetadata === 0) {
 						if (isVatsimRadar) {
-							return null as null;
+							return null;
 						}
 						const offlineSnapshot = await getOfflineStateSnapshot(c.env, airportIcao);
 						if (offlineSnapshot) {
@@ -999,7 +1116,17 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 							objects: DOObject[];
 							offline?: boolean;
 						};
-						const state = (await durableObj.getState(airportIcao)) as DOState;
+						const stateUrl = new URL(c.req.url);
+						stateUrl.searchParams.set('airport', airportIcao);
+						const stateResponse = await durableObj.fetch(
+							new Request(stateUrl, { headers: { 'X-Request-Type': 'get_state' } }),
+						);
+						if (!stateResponse.ok) {
+							await cancelResponseBody(stateResponse);
+							throw new Error(`Durable Object state request failed with status ${stateResponse.status}`);
+						}
+						// SAFETY: BARS.fetch handles get_state by serializing Connection.getState, which owns the DOState contract.
+						const state = JSON.parse(await stateResponse.text()) as DOState;
 
 						// Determine online/offline status consistently
 						const controllerCount = Array.isArray(state.controllers) ? state.controllers.length : 0;
@@ -1007,7 +1134,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 
 						if (isVatsimRadar) {
 							// For VATSIM Radar, mirror 'all' behavior by excluding offline airports entirely
-							if (isOffline) return null as null;
+							if (isOffline) return null;
 
 							const lightsByObject = await getLightsByObject(c.env, airportIcao);
 							const allowedIds = new Set(Object.keys(lightsByObject));
@@ -1019,7 +1146,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 											id: o.id,
 											state: o.state,
 											timestamp: o.timestamp,
-											lights: (lightsByObject as Record<string, RadarLight[]>)[o.id] || [],
+											lights: lightsByObject[o.id] || [],
 										}))
 								: [];
 
@@ -1049,7 +1176,7 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 						};
 					} catch {
 						// If a DO fails to respond, skip this entry
-						return null as null;
+						return null;
 					}
 				}),
 			);
@@ -1085,7 +1212,17 @@ app.get('/state', withCache(CacheKeys.fromUrl, 1, 'state'), async (c) => {
 		);
 	}
 
-	return c.json(await c.env.BARS.getByName(airport).getState(airport, offlineRequested));
+	const stateUrl = new URL(c.req.url);
+	stateUrl.searchParams.set('airport', airport);
+	stateUrl.searchParams.set('offline', String(offlineRequested));
+	const stateResponse = await c.env.BARS.getByName(airport).fetch(
+		new Request(stateUrl, { headers: { 'X-Request-Type': 'get_state' } }),
+	);
+	const serializedState = await stateResponse.text();
+	return new Response(serializedState, {
+		status: stateResponse.status,
+		headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+	});
 });
 
 // VATSIM auth callback
@@ -1118,7 +1255,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 	const auth = ServicePool.getAuth(c.env);
 	try {
 		const { vatsimToken } = await auth.handleCallback(code, c.executionCtx);
-		return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
+		return Response.redirect(`https://stopbars.com/auth/callback?token=${vatsimToken}`, 302);
 	} catch {
 		return Response.redirect('https://v2.stopbars.com/auth?error=oauth_failed', 302);
 	}
@@ -1150,7 +1287,6 @@ app.get('/auth/account', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	// Create database context for this request
 	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 
 	try {
@@ -1170,6 +1306,14 @@ app.get('/auth/account', async (c) => {
 		if (!user) {
 			return dbContext.textResponse('User not found', { status: 404 });
 		}
+		const fastTrack = await dbContext.db.executeLatest<{ expires_at: string }>(
+			`SELECT ft.expires_at
+			 FROM contributor_fast_track ft
+			 WHERE ft.user_id = ? AND ft.enabled = 1 AND ft.expires_at > CURRENT_TIMESTAMP
+			 LIMIT 1`,
+			[user.id],
+		);
+		const fastTrackExpiry = fastTrack.results[0]?.expires_at ?? null;
 
 		// Fire-and-forget background maintenance so it doesn't block response
 		try {
@@ -1214,6 +1358,10 @@ app.get('/auth/account', async (c) => {
 					: (vatsimUser.subdivision ?? null),
 			created_at: user.created_at,
 			last_login: user.last_login,
+			fast_track: {
+				enabled: fastTrackExpiry !== null,
+				expires_at: fastTrackExpiry,
+			},
 		});
 	} finally {
 		dbContext.close();
@@ -1262,7 +1410,7 @@ app.get('/auth/network-status', async (c) => {
 	}
 
 	const { offline, status, raw } = parseVatsimStatusCsv(vatsimStatusCsv ?? '');
-	const payload: Record<string, unknown> = { cid: user.vatsim_id, offline };
+	const payload: AuthNetworkStatusPayload = { cid: user.vatsim_id, offline };
 	if (!offline) {
 		payload.vatsim_status = status;
 		payload.vatsim_status_raw = raw;
@@ -1299,13 +1447,13 @@ app.put('/auth/display-mode', rateLimit({ maxRequests: 5 }), async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) return c.text('Unauthorized', 401);
 
-	let body: unknown;
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: 'Invalid JSON body' }, 400);
 	}
-	const rawMode = (body as Record<string, unknown>)?.mode as unknown;
+	const rawMode = parseJsonObject(body).mode;
 	const mode = Number(rawMode);
 	if (!Number.isInteger(mode) || ![0, 1, 2].includes(mode)) {
 		return c.json({ error: 'Invalid mode', message: 'mode must be integer 0,1,2' }, 400);
@@ -1355,7 +1503,6 @@ app.post('/auth/regenerate-api-key', async (c) => {
 		return c.text('Unauthorized', 401);
 	}
 
-	// Create database context for this request
 	const dbContext = DatabaseContextFactory.createRequestContext(c.env.DB, c.req.raw);
 
 	try {
@@ -1571,25 +1718,29 @@ app.get('/bans', async (c) => {
 app.post('/bans', async (c) => {
 	const token = c.req.header('X-Vatsim-Token');
 	if (!token) return c.text('Unauthorized', 401);
-	let body: unknown;
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: 'Invalid JSON body' }, 400);
 	}
-	const b = (body ?? {}) as Record<string, unknown>;
-	const vatsimId = typeof b.vatsimId === 'string' || typeof b.vatsimId === 'number' ? String(b.vatsimId) : '';
-	const reason = typeof b.reason === 'string' ? b.reason : null;
-	const expiresAtRaw = b.expiresAt;
-	const expiresAt =
-		expiresAtRaw === null || expiresAtRaw === undefined
-			? null
-			: typeof expiresAtRaw === 'string'
-				? expiresAtRaw
-				: typeof expiresAtRaw === 'number'
-					? new Date(expiresAtRaw).toISOString()
-					: null;
+	const banInput = parseJsonObject(body);
+	const vatsimIdValue = readString(banInput.vatsimId) ?? readNumber(banInput.vatsimId);
+	const vatsimId = vatsimIdValue === undefined ? '' : String(vatsimIdValue);
+	const reason = readString(banInput.reason) ?? null;
+	const expiresAtRaw = banInput.expiresAt;
 	if (!vatsimId) return c.json({ error: 'vatsimId required' }, 400);
+	let expiresAt: string | null = null;
+	if (expiresAtRaw !== null && expiresAtRaw !== undefined) {
+		const expiresAtValue = readString(expiresAtRaw) ?? readNumber(expiresAtRaw);
+		if (expiresAtValue === undefined) {
+			return c.json({ error: 'expiresAt must be an ISO 8601 date-time with a timezone or null' }, 400);
+		}
+		expiresAt = normalizeIsoDateTime(expiresAtValue);
+		if (expiresAt === null) {
+			return c.json({ error: 'expiresAt must be an ISO 8601 date-time with a timezone or null' }, 400);
+		}
+	}
 	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
 	const roles = ServicePool.getRoles(c.env);
@@ -1692,7 +1843,6 @@ app.get(
 			if (icao) {
 				// Helper to sanitize ICAO: remove non-alphanumerics and uppercase
 				const sanitizeIcao = (code: string) => code.toUpperCase().replace(/[^A-Z0-9]/g, '');
-				// Handle batch requests
 				if (icao.includes(',')) {
 					const icaos = icao
 						.split(',')
@@ -1703,7 +1853,6 @@ app.get(
 					}
 					data = await airports.getAirports(icaos);
 				} else {
-					// Single airport request
 					const cleanIcao = sanitizeIcao(icao);
 					if (!ICAO_REGEX.test(cleanIcao)) {
 						return c.text('Invalid ICAO format', 400);
@@ -1728,11 +1877,7 @@ app.get(
 
 const airportMutationApp = new Hono<{ Bindings: Env }>();
 
-airportMutationApp.use('*', async (c, next) => {
-	if (c.req.method !== 'POST' && c.req.method !== 'PATCH') {
-		await next();
-		return;
-	}
+const requireLeadDeveloperForAirportMutation: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) return c.text('Unauthorized', 401);
 
@@ -1747,7 +1892,7 @@ airportMutationApp.use('*', async (c, next) => {
 	if (!staff) return c.text('Unauthorized', 401);
 	if (staff.role !== StaffRole.LEAD_DEVELOPER) return c.text('Forbidden', 403);
 	await next();
-});
+};
 
 /**
  * @openapi
@@ -1791,8 +1936,8 @@ airportMutationApp.use('*', async (c, next) => {
  *       403: { description: Lead developer role required }
  *       409: { description: Airport already exists }
  */
-airportMutationApp.post('/', async (c) => {
-	let body: unknown;
+airportMutationApp.post('/', requireLeadDeveloperForAirportMutation, async (c) => {
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
@@ -1832,10 +1977,10 @@ airportMutationApp.post('/', async (c) => {
  *       403: { description: Lead developer role required }
  *       404: { description: Airport not found }
  */
-airportMutationApp.patch('/:icao', async (c) => {
+airportMutationApp.patch('/:icao', requireLeadDeveloperForAirportMutation, async (c) => {
 	const icao = c.req.param('icao').trim().toUpperCase();
 	if (!ICAO_REGEX.test(icao)) return c.json({ error: 'Invalid airport ICAO format' }, 400);
-	let body: unknown;
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
@@ -1917,12 +2062,12 @@ app.get(
 		(req) => {
 			// Bucket cache key by ~5NM (~9.26km). 1 degree lat ~111km => bucket size deg ≈ 9.26/111 ≈ 0.083
 			const url = new URL(req.url);
-			const lat = parseFloat(url.searchParams.get('lat') || '0');
-			const lon = parseFloat(url.searchParams.get('lon') || '0');
+			const lat = parseDecimalNumber(url.searchParams.get('lat') || '0');
+			const lon = parseDecimalNumber(url.searchParams.get('lon') || '0');
 			const bucketDeg = 0.083; // ~5NM
 			const bucketLat = Math.round(lat / bucketDeg);
 			const bucketLon = Math.round(lon / bucketDeg);
-			return `/airports/nearest/${bucketLat}_${bucketLon}`;
+			return `/airports/nearest/v2/${bucketLat}_${bucketLon}`;
 		},
 		600,
 		'airports',
@@ -1934,9 +2079,9 @@ app.get(
 		if (!latStr || !lonStr) {
 			return c.text('Missing lat/lon', 400);
 		}
-		const lat = parseFloat(latStr);
-		const lon = parseFloat(lonStr);
-		if (Number.isNaN(lat) || Number.isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+		const lat = parseDecimalNumber(latStr);
+		const lon = parseDecimalNumber(lonStr);
+		if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
 			return c.text('Invalid lat/lon', 400);
 		}
 
@@ -2028,6 +2173,7 @@ divisionsApp.post('/', async (c) => {
 	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 	if (!allowed) return c.text('Forbidden', 403);
 
+	// SAFETY: DivisionService owns validation and persistence of the documented create-division payload.
 	const { name, headVatsimId } = (await c.req.json()) as CreateDivisionPayload;
 	const division = await divisions.createDivision(name, headVatsimId);
 	return c.json(division);
@@ -2086,6 +2232,7 @@ divisionsApp.put('/:id', async (c) => {
 	const existing = await divisions.getDivision(id);
 	if (!existing) return c.text('Division not found', 404);
 
+	// SAFETY: name is checked for presence and normalized before it reaches DivisionService.
 	const body = (await c.req.json()) as { name: string };
 	if (!body.name || !body.name.trim()) return c.text('Invalid name', 400);
 
@@ -2291,6 +2438,7 @@ divisionsApp.post('/:id/members', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
+	// SAFETY: DivisionService.addMember enforces the member identity and role domain contract before persistence.
 	const { vatsimId, role } = (await c.req.json()) as AddMemberPayload;
 	const member = await divisions.addMember(divisionId, vatsimId, role);
 	return c.json(member);
@@ -2449,6 +2597,7 @@ divisionsApp.post('/:id/airports', async (c) => {
 	const user = await auth.getUserByVatsimId(vatsimUser.id);
 	const isPM = user ? await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER) : false;
 
+	// SAFETY: the DivisionService request methods normalize and validate the ICAO before persistence.
 	const { icao } = (await c.req.json()) as RequestAirportPayload;
 	const airport = isPM
 		? await divisions.requestAirportAsStaff(divisionId, icao, vatsimUser.id)
@@ -2576,6 +2725,7 @@ divisionsApp.post('/:id/airports/:airportId/approve', async (c) => {
 	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 	if (!allowed) return c.text('Forbidden', 403);
 
+	// SAFETY: DivisionService.approveAirport owns validation of the documented approval payload.
 	const { approved } = (await c.req.json()) as ApproveAirportPayload;
 	const airport = await divisions.approveAirport(airportId, vatsimUser.id, approved);
 	// Airport GET responses include the approved division_airports ID. Invalidate
@@ -2635,12 +2785,12 @@ divisionsApp.patch('/:id/airports/:airportId/contributions', async (c) => {
 	}
 
 	const vatsimUser = await vatsim.getUser(vatsimToken);
-	const payload = (await c.req.json()) as UpdateAirportContributionsPayload;
-	if (typeof payload.contributionsEnabled !== 'boolean') {
+	const contributionsEnabled = readBoolean(parseJsonObject(await c.req.json()).contributionsEnabled);
+	if (contributionsEnabled === undefined) {
 		return c.json({ error: 'contributionsEnabled must be a boolean' }, 400);
 	}
 
-	const airport = await divisions.updateAirportContributionsEnabled(divisionId, airportId, vatsimUser.id, payload.contributionsEnabled);
+	const airport = await divisions.updateAirportContributionsEnabled(divisionId, airportId, vatsimUser.id, contributionsEnabled);
 	return c.json(airport);
 });
 
@@ -2722,8 +2872,10 @@ app.post('/airports/:icao/points', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
+	// SAFETY: PointsService.createPoint validates every PointData field before inserting it.
 	const pointData = (await c.req.json()) as PointData;
 	const newPoint = await points.createPoint(airportId, user.vatsim_id, pointData);
+	await invalidateAirportPointStateCaches(c.env, newPoint.airportId);
 	return c.json(newPoint, 201);
 });
 
@@ -2766,15 +2918,27 @@ app.post('/airports/:icao/points/batch', async (c) => {
 		return c.text('Invalid airport ICAO format', 400);
 	}
 
-	const { user } = await resolveUserFromVatsimOrApi(c);
-	if (!user) {
-		return c.text('Unauthorized', 401);
+	const isDivisionDataAutomation = isDivisionDataAutomationRequest(c.req.header('Authorization') || '', c.env.DIVISION_DATA_API_KEY);
+	let actorId = DIVISION_DATA_ACTOR_ID;
+	if (!isDivisionDataAutomation) {
+		const { user } = await resolveUserFromVatsimOrApi(c);
+		if (!user) {
+			return c.text('Unauthorized', 401);
+		}
+		actorId = user.vatsim_id;
 	}
 
 	const points = ServicePool.getPoints(c.env);
 
+	// SAFETY: PointsService.applyChangeset validates each create, update, and delete operation before the transaction.
 	const changeset = (await c.req.json()) as PointChangeset;
-	const newPoints = await points.applyChangeset(airportId, user.vatsim_id, changeset);
+	const newPoints = await points.applyChangeset(
+		airportId,
+		actorId,
+		changeset,
+		isDivisionDataAutomation ? { kind: 'division-data-automation' } : { kind: 'division-member' },
+	);
+	await invalidateAirportPointStateCaches(c.env, airportId, changeset.delete ?? []);
 	return c.json(newPoints, 201);
 });
 
@@ -2829,8 +2993,10 @@ app.put('/airports/:icao/points/:id', async (c) => {
 
 	const points = ServicePool.getPoints(c.env);
 
+	// SAFETY: PointsService.updatePoint validates its supported update fields before writing them.
 	const updates = (await c.req.json()) as Partial<PointData>;
 	const updatedPoint = await points.updatePoint(pointId, user.vatsim_id, updates);
+	await invalidateAirportPointStateCaches(c.env, updatedPoint.airportId);
 	return c.json(updatedPoint);
 });
 
@@ -2880,7 +3046,8 @@ app.delete('/airports/:icao/points/:id', async (c) => {
 	const points = ServicePool.getPoints(c.env);
 
 	try {
-		await points.deletePoint(pointId, user.vatsim_id);
+		const pointAirportId = await points.deletePoint(pointId, user.vatsim_id);
+		await invalidateAirportPointStateCaches(c.env, pointAirportId, [pointId]);
 		return c.body(null, 204);
 	} catch (error) {
 		if (error instanceof HttpError) {
@@ -3361,19 +3528,24 @@ const getStoredContributionGenerationResponse = async (c: Context): Promise<Resp
 			return c.json({ error: 'Generation not found or expired' }, 404);
 		case 'payload-not-found':
 			return c.json({ error: 'Generation payload not found' }, 404);
-		case 'ok':
+		case 'ok': {
 			c.header('X-Cache-Gen', 'TOKEN');
+			const isXPlane = result.supportsXml.trimStart().startsWith('{');
 			return c.json({
 				token: result.token,
 				icao: result.icao,
-				supportsXml: result.supportsXml,
+				simulator: result.simulator,
+				generationHash: result.generationHash,
+				supportsXml: isXPlane ? undefined : result.supportsXml,
+				removalsJson: isXPlane ? result.supportsXml : undefined,
 				barsXml: result.barsXml,
 				expiresAt: result.expiresAt,
 			});
+		}
 	}
 };
 
-const getContributionGenerationCacheKey = (token: string): string => `supports-gen:${token}`;
+const getContributionGenerationCacheKey = (token: string): string => `supports-gen:v2:${token}`;
 
 const getContributionGenerationExpiresAt = (): string =>
 	new Date(Date.now() + CONTRIBUTION_GENERATION_CACHE_TTL_SECONDS * 1000).toISOString();
@@ -3412,10 +3584,10 @@ const cacheContributionGeneration = (c: Context, token: string, entry: Contribut
  * @openapi
  * /supports/generate:
  *   post:
- *     summary: Generate Light Supports and BARS XML
+ *     summary: Generate simulator removals and BARS XML
  *     tags:
  *       - Generation
- *     description: Upload raw XML and generate both light supports XML and processed BARS XML.
+ *     description: Upload a draft and generate processed BARS XML plus MSFS light-support XML or compact X-Plane removal JSON.
  *     parameters:
  *       - in: query
  *         name: token
@@ -3436,6 +3608,9 @@ const cacheContributionGeneration = (c: Context, token: string, entry: Contribut
  *                 format: binary
  *               icao:
  *                 type: string
+ *               simulator:
+ *                 type: string
+ *                 enum: [msfs2020, msfs2024, xplane]
  *     responses:
  *       200:
  *         description: Generated XML returned
@@ -3464,6 +3639,7 @@ app.post(
 			const formData = await c.req.formData();
 			const xmlFile = formData.get('xmlFile');
 			const icao = formData.get('icao')?.toString();
+			const requestedSimulator = formData.get('simulator')?.toString().trim().toLowerCase();
 
 			if (!xmlFile || !(xmlFile instanceof File)) {
 				return c.json({ error: 'XML file is required' }, 400);
@@ -3471,10 +3647,13 @@ app.post(
 			if (!icao) {
 				return c.json({ error: 'ICAO code is required' }, 400);
 			}
+			if (requestedSimulator && !['msfs2020', 'msfs2024', 'xplane'].includes(requestedSimulator)) {
+				return c.json({ error: 'Invalid simulator' }, 400);
+			}
 
 			// Enforce XML content type or .xml extension for safety
-			const fileType = (xmlFile as File).type?.toLowerCase() || '';
-			const fileName = (xmlFile as File).name || '';
+			const fileType = xmlFile.type?.toLowerCase() || '';
+			const fileName = xmlFile.name || '';
 			const looksXml =
 				fileType === 'application/xml' || fileType === 'text/xml' || fileType === 'application/x-xml' || /\.xml$/i.test(fileName);
 			if (!looksXml) {
@@ -3496,8 +3675,22 @@ app.post(
 				return c.json({ error: msg }, 400);
 			}
 
+			const embeddedXPlane = /<FSData\b[^>]*\bsimulator\s*=\s*["']xplane["']/i.test(sanitized);
+			const simulator = requestedSimulator || (embeddedXPlane ? 'xplane' : 'msfs2024');
+			if ((simulator === 'xplane') !== embeddedXPlane) {
+				return c.json({ error: 'Draft simulator metadata does not match the selected simulator' }, 400);
+			}
+
 			const icaoUpper = icao.trim().toUpperCase();
-			const contentToken = await deriveContributionGenerationTokenFromMsfsXml(sanitized, icaoUpper);
+			if (!ICAO_REGEX.test(icaoUpper)) {
+				return c.json({ error: 'ICAO code must be exactly 4 letters or digits' }, 400);
+			}
+			// SAFETY: requestedSimulator was checked against every Simulator value, and the fallback is also a Simulator.
+			const simulatorTyped = simulator as Simulator;
+			const [contentToken, generationHash] = await Promise.all([
+				deriveContributionGenerationToken(sanitized, icaoUpper, simulatorTyped),
+				deriveContributionGenerationHash(sanitized),
+			]);
 
 			const cacheService = ServicePool.getCache(c.env);
 			const cacheKey = getContributionGenerationCacheKey(contentToken);
@@ -3510,8 +3703,11 @@ app.post(
 				return c.json({
 					token: contentToken,
 					icao: cachedEdge.icao,
+					simulator: cachedEdge.simulator,
+					generationHash: cachedEdge.generationHash,
 					expiresAt: cachedEdge.expiresAt,
-					supportsXml: cachedEdge.supportsXml,
+					supportsXml: simulator === 'xplane' ? undefined : cachedEdge.removalArtifact,
+					removalsJson: simulator === 'xplane' ? cachedEdge.removalArtifact : undefined,
 					barsXml: cachedEdge.barsXml,
 				});
 			}
@@ -3526,8 +3722,10 @@ app.post(
 					storedGen.token,
 					{
 						icao: storedGen.icao,
+						simulator: storedGen.simulator ?? simulatorTyped,
+						generationHash: storedGen.generationHash ?? generationHash,
 						expiresAt: storedGen.expiresAt,
-						supportsXml: storedGen.supportsXml,
+						removalArtifact: storedGen.supportsXml,
 						barsXml: storedGen.barsXml,
 					},
 					cacheTtlSeconds,
@@ -3535,8 +3733,11 @@ app.post(
 				return c.json({
 					token: storedGen.token,
 					icao: storedGen.icao,
+					simulator: storedGen.simulator ?? simulatorTyped,
+					generationHash: storedGen.generationHash ?? generationHash,
 					expiresAt: storedGen.expiresAt,
-					supportsXml: storedGen.supportsXml,
+					supportsXml: simulator === 'xplane' ? undefined : storedGen.supportsXml,
+					removalsJson: simulator === 'xplane' ? storedGen.supportsXml : undefined,
 					barsXml: storedGen.barsXml,
 				});
 			}
@@ -3548,9 +3749,12 @@ app.post(
 			let supportsDuration = 0;
 			let barsDuration = 0;
 
-			const supportsPromise = (async () => {
+			const removalPromise = (async () => {
 				const start = performance.now();
-				const result = await supportService.generateLightSupportsXML(sanitized, icaoUpper);
+				const result =
+					simulator === 'xplane'
+						? generateXPlaneRemovalsJson(sanitized, icaoUpper)
+						: await supportService.generateLightSupportsXML(sanitized, icaoUpper, simulatorTyped);
 				supportsDuration = performance.now() - start;
 				return result;
 			})();
@@ -3562,7 +3766,7 @@ app.post(
 				return result;
 			})();
 
-			const [supportsXml, barsXml] = await Promise.all([supportsPromise, barsPromise]);
+			const [removalArtifact, barsXml] = await Promise.all([removalPromise, barsPromise]);
 			const totalDuration = performance.now() - totalStart;
 
 			const serverTiming: string[] = [];
@@ -3571,15 +3775,25 @@ app.post(
 			serverTiming.push(`total;dur=${totalDuration.toFixed(2)}`);
 			c.header('Server-Timing', serverTiming.join(', '));
 
-			await contributionsService.storeGeneration(icaoUpper, supportsXml, barsXml, contentToken);
+			await contributionsService.storeGeneration(icaoUpper, removalArtifact, barsXml, contentToken, simulatorTyped, generationHash);
 			const expiresAt = getContributionGenerationExpiresAt();
-			cacheContributionGeneration(c, contentToken, { icao: icaoUpper, expiresAt, supportsXml, barsXml });
+			cacheContributionGeneration(c, contentToken, {
+				icao: icaoUpper,
+				simulator: simulatorTyped,
+				generationHash,
+				expiresAt,
+				removalArtifact,
+				barsXml,
+			});
 			c.header('X-Cache-Gen', 'MISS');
 			return c.json({
 				token: contentToken,
 				icao: icaoUpper,
+				simulator: simulatorTyped,
+				generationHash,
 				expiresAt,
-				supportsXml,
+				supportsXml: simulator === 'xplane' ? undefined : removalArtifact,
+				removalsJson: simulator === 'xplane' ? removalArtifact : undefined,
 				barsXml,
 			});
 		} catch (error) {
@@ -3596,6 +3810,9 @@ app.post(
 				'no bars points found within',
 				'airport with icao',
 				'invalid xml',
+				'invalid x-plane',
+				'x-plane draft',
+				'x-plane light selector',
 			];
 			const matchesUserError = userFacingPatterns.some((pattern) => normalized.includes(pattern));
 			if (matchesUserError) {
@@ -3709,8 +3926,9 @@ app.put('/notam', async (c) => {
 		return c.text('Forbidden', 403);
 	}
 
-	// Update the NOTAM
-	const { content, type } = (await c.req.json()) as { content: string; type?: string };
+	const notamInput = parseJsonObject(await c.req.json());
+	const content = readString(notamInput.content) ?? '';
+	const type = readString(notamInput.type);
 	const notamService = ServicePool.getNotam(c.env);
 	const updated = await notamService.updateGlobalNotam(content, type, user.vatsim_id);
 
@@ -3748,7 +3966,7 @@ staffUsersApp.use('*', async (c, next) => {
 	}
 
 	c.set('user', user);
-	c.set('userService', new UserService(c.env.DB, roles, auth));
+	c.set('userService', new UserService(c.env.DB, roles, auth, ServicePool.getPostHog(c.env)));
 	await next();
 });
 
@@ -3781,7 +3999,7 @@ staffUsersApp.get('/', async (c) => {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
 		const status = error instanceof Error && error.message.includes('Unauthorized') ? 403 : 500;
-		c.status(status as 403 | 500);
+		c.status(status === 403 ? 403 : 500);
 		return c.json({ error: message });
 	}
 });
@@ -3827,7 +4045,7 @@ staffUsersApp.get('/search', async (c) => {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
 		const status = error instanceof Error && error.message.includes('Unauthorized') ? 403 : 500;
-		c.status(status as 403 | 500);
+		c.status(status === 403 ? 403 : 500);
 		return c.json({ error: message });
 	}
 });
@@ -3858,7 +4076,7 @@ staffUsersApp.get('/search', async (c) => {
  */
 staffUsersApp.post('/refresh-api-token', async (c) => {
 	try {
-		const { vatsimId } = (await c.req.json()) as { vatsimId: string };
+		const vatsimId = readString(parseJsonObject(await c.req.json()).vatsimId) ?? '';
 
 		if (!vatsimId) {
 			return c.json(
@@ -3891,8 +4109,67 @@ staffUsersApp.post('/refresh-api-token', async (c) => {
 			}
 		}
 
-		c.status(status as 403 | 404 | 500);
+		c.status(status === 403 ? 403 : status === 404 ? 404 : 500);
 		return c.json({ error: message });
+	}
+});
+
+/**
+ * @openapi
+ * /staff/users/{id}/fast-track:
+ *   put:
+ *     x-hidden: true
+ *     summary: Update contributor fast-track access
+ *     tags: [Staff]
+ *     security:
+ *       - VatsimToken: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled]
+ *             properties:
+ *               enabled: { type: boolean }
+ *     responses:
+ *       200: { description: Fast-track access updated }
+ *       400: { description: Invalid request }
+ *       403: { description: Forbidden }
+ *       404: { description: User not found }
+ */
+staffUsersApp.put('/:id/fast-track', async (c) => {
+	const targetUserId = Number(c.req.param('id'));
+	if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+		return c.json({ error: 'User ID must be a positive integer' }, 400);
+	}
+
+	let body: JsonValue;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: 'Invalid JSON' }, 400);
+	}
+	const enabled = readBoolean(parseJsonObject(body).enabled);
+	if (enabled === undefined) return c.json({ error: 'enabled must be a boolean' }, 400);
+
+	try {
+		const user = c.get('user')!;
+		const userService = c.get('userService')!;
+		const fastTrack = await userService.setFastTrackAccess(targetUserId, enabled, user.id);
+		return c.json({ success: true, fastTrack });
+	} catch (error) {
+		if (error instanceof HttpError) {
+			const status = error.status === 403 ? 403 : error.status === 404 ? 404 : 400;
+			return c.json({ error: error.message }, status);
+		}
+		console.error('Failed to update contributor fast-track access', error);
+		return c.json({ error: 'Failed to update fast-track access' }, 500);
 	}
 });
 
@@ -3927,7 +4204,7 @@ staffUsersApp.delete('/:id', async (c) => {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'An unknown error occurred';
 		const status = error instanceof Error && error.message.includes('Unauthorized') ? 403 : 500;
-		c.status(status as 403 | 500);
+		c.status(status === 403 ? 403 : 500);
 		return c.json({ error: message });
 	}
 });
@@ -3991,15 +4268,15 @@ staffManageApp.get('/', async (c) => {
 staffManageApp.post('/', async (c) => {
 	const vatsimToken = c.req.header('X-Vatsim-Token');
 	if (!vatsimToken) return c.text('Unauthorized', 401);
-	let body: unknown;
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: 'Invalid JSON' }, 400);
 	}
-	const b = (body ?? {}) as Record<string, unknown>;
-	const vatsimId = typeof b.vatsimId === 'string' ? b.vatsimId : '';
-	const role = typeof b.role === 'string' ? b.role : '';
+	const staffInput = parseJsonObject(body);
+	const vatsimId = readString(staffInput.vatsimId) ?? '';
+	const role = readString(staffInput.role) ?? '';
 	if (!vatsimId || !role || !(role in StaffRole)) return c.json({ error: 'vatsimId and valid role required' }, 400);
 	const vatsim = ServicePool.getVatsim(c.env);
 	const auth = ServicePool.getAuth(c.env);
@@ -4012,6 +4289,7 @@ staffManageApp.post('/', async (c) => {
 	const targetUser = await auth.getUserByVatsimId(vatsimId);
 	if (!targetUser) return c.json({ error: 'Target user not found' }, 404);
 	try {
+		// SAFETY: membership in StaffRole was established before authorization and persistence.
 		const staff = await roles.addStaff(targetUser.id, role as StaffRole);
 		return c.json({ success: true, staff });
 	} catch (e) {
@@ -4110,7 +4388,7 @@ staffDivisionsApp.use('*', async (c, next) => {
 staffDivisionsApp.get('/airports', async (c) => {
 	const divisions = ServicePool.getDivisions(c.env);
 	const airports = await divisions.getAllDivisionAirports();
-	const shaped = airports.map((airport) => ({
+	const airportSummaries = airports.map((airport) => ({
 		division_id: airport.division_id,
 		division_name: airport.division_name,
 		airport_request_id: airport.id,
@@ -4120,7 +4398,7 @@ staffDivisionsApp.get('/airports', async (c) => {
 		approved_by: airport.approved_by ?? null,
 		contributions_enabled: airport.contributions_enabled,
 	}));
-	return c.json({ airports: shaped });
+	return c.json({ airports: airportSummaries });
 });
 
 app.route('/staff/divisions', staffDivisionsApp);
@@ -4151,6 +4429,12 @@ const contributionsApp = new Hono<{ Bindings: Env }>();
  *           type: boolean
  *         description: When true, returns only contribution id, airport ICAO, package name, and simulator.
  *       - in: query
+ *         name: projection
+ *         schema:
+ *           type: string
+ *           enum: [metadata]
+ *         description: Bounded contribution metadata including artifact keys, without submitted XML or generation proof.
+ *       - in: query
  *         name: summary
  *         schema:
  *           type: boolean
@@ -4176,10 +4460,12 @@ contributionsApp.get(
 		const contributions = ServicePool.getContributions(c.env);
 
 		// Parse query parameters for filtering
-		const status = (c.req.query('status') as 'pending' | 'approved' | 'rejected' | 'outdated' | 'all') || 'all';
+		const requestedStatus = c.req.query('status');
+		const status = CONTRIBUTION_STATUSES.find((candidate) => candidate === requestedStatus) ?? 'all';
 		const airportIcao = c.req.query('airport') || undefined;
 		const requestedUserId = c.req.query('user') || undefined;
 		const simple = (c.req.query('simple') || 'false').toLowerCase() === 'true';
+		const projection = c.req.query('projection')?.trim().toLowerCase();
 		const authz = c.req.header('Authorization') || '';
 		let authenticatedUserId: string | undefined;
 
@@ -4201,6 +4487,12 @@ contributionsApp.get(
 		const userId = authenticatedUserId ?? requestedUserId;
 		const includeSummary = authenticatedUserId !== undefined || (c.req.query('summary') || 'false').toLowerCase() === 'true';
 
+		if (projection !== undefined && projection !== 'metadata') {
+			return c.json({ error: 'projection must be metadata when provided' }, 400);
+		}
+		if (simple && projection) {
+			return c.json({ error: 'simple cannot be combined with projection' }, 400);
+		}
 		if (simple && includeSummary) {
 			return c.json({ error: 'summary cannot be combined with simple view' }, 400);
 		}
@@ -4218,6 +4510,15 @@ contributionsApp.get(
 			});
 		}
 
+		if (projection === 'metadata') {
+			const result = await contributions.listContributionMetadata({ status, airportIcao, userId });
+			if (!includeSummary) {
+				return c.json({ ...result, projection: 'metadata' as const });
+			}
+			const summary = summarizeContributionStatuses(result.contributions, result.total);
+			return c.json({ ...result, projection: 'metadata' as const, summary });
+		}
+
 		const result = await contributions.listContributions({
 			status,
 			airportIcao,
@@ -4228,28 +4529,7 @@ contributionsApp.get(
 			return c.json(result);
 		}
 
-		const summary = result.contributions.reduce(
-			(acc, item) => {
-				switch (item.status) {
-					case 'approved':
-						acc.approved += 1;
-						break;
-					case 'pending':
-						acc.pending += 1;
-						break;
-					case 'rejected':
-						acc.rejected += 1;
-						break;
-					case 'outdated':
-						acc.outdated += 1;
-						break;
-					default:
-						break;
-				}
-				return acc;
-			},
-			{ total: result.total, approved: 0, pending: 0, rejected: 0, outdated: 0 },
-		);
+		const summary = summarizeContributionStatuses(result.contributions, result.total);
 
 		return c.json({ ...result, summary });
 	},
@@ -4322,7 +4602,7 @@ contributionsApp.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [airportIcao, packageName, submittedXml, simulator]
+ *             required: [airportIcao, packageName, submittedXml, simulator, generationToken, generationHash]
  *             properties:
  *               airportIcao:
  *                 type: string
@@ -4335,8 +4615,17 @@ contributionsApp.get(
  *               notes: { type: string, maxLength: 1000 }
  *               simulator:
  *                 type: string
- *                 enum: [msfs2020, msfs2024]
+ *                 enum: [msfs2020, msfs2024, xplane]
  *                 description: Target flight simulator for this contribution
+ *               generationToken:
+ *                 type: string
+ *                 description: Token returned by testing this exact normalized draft through /supports/generate.
+ *               generationHash:
+ *                 type: string
+ *                 description: Normalized draft hash returned by /supports/generate.
+ *               fastTrackRequested:
+ *                 type: boolean
+ *                 description: Opt in to fast-track publishing when the authenticated account is eligible. Defaults to false.
  *     responses:
  *       201:
  *         description: Contribution created
@@ -4361,6 +4650,7 @@ contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 
 	try {
 		const contributions = ServicePool.getContributions(c.env);
+		// SAFETY: ContributionsService.createContribution validates the complete submission contract before persistence or storage writes.
 		const payload = (await c.req.json()) as ContributionSubmissionPayload;
 		const result = await contributions.createContribution({
 			userId: user.vatsim_id,
@@ -4369,6 +4659,9 @@ contributionsApp.post('/', rateLimit({ maxRequests: 1 }), async (c) => {
 			submittedXml: payload.submittedXml,
 			notes: payload.notes,
 			simulator: payload.simulator,
+			generationToken: payload.generationToken,
+			generationHash: payload.generationHash,
+			fastTrackRequested: payload.fastTrackRequested === true,
 		});
 
 		return c.json(result, 201);
@@ -4460,11 +4753,13 @@ contributionsApp.post('/:id/decision', async (c) => {
 	try {
 		const contributionId = c.req.param('id');
 		const contributions = ServicePool.getContributions(c.env);
-		const payload = (await c.req.json()) as ContributionDecisionPayload;
+		const payload = parseJsonObject(await c.req.json());
+		const approved = readBoolean(payload.approved);
+		if (approved === undefined) return c.json({ error: 'approved must be a boolean' }, 400);
 		const result = await contributions.processDecision(contributionId, user.vatsim_id, {
-			approved: payload.approved,
-			rejectionReason: payload.rejectionReason,
-			newPackageName: payload.newPackageName,
+			approved,
+			rejectionReason: readString(payload.rejectionReason),
+			newPackageName: readString(payload.newPackageName),
 		});
 
 		return c.json(result);
@@ -4613,7 +4908,7 @@ const cdnApp = new Hono<{ Bindings: Env }>();
  *         required: false
  *         schema:
  *           type: string
- *           enum: [msfs2020, msfs2024]
+ *           enum: [msfs2020, msfs2024, xplane]
  *         description: Filter by simulator (optional - returns latest across all simulators if not specified)
  *     responses:
  *       200:
@@ -4624,7 +4919,8 @@ const cdnApp = new Hono<{ Bindings: Env }>();
 app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900, 'airports'), async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const pkg = c.req.param('package');
-	const simulatorParam = c.req.query('simulator') as 'msfs2020' | 'msfs2024' | undefined;
+	const requestedSimulator = c.req.query('simulator');
+	const simulatorParam = ['msfs2020', 'msfs2024', 'xplane'].find((simulator): simulator is Simulator => simulator === requestedSimulator);
 	const contributions = ServicePool.getContributions(c.env);
 	const storage = ServicePool.getStorage(c.env);
 
@@ -4633,8 +4929,8 @@ app.get('/maps/:icao/packages/:package/latest', withCache(CacheKeys.fromUrl, 900
 		return c.text('No approved map found', 404);
 	}
 
-	const safePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
-	const fileKey = `Maps/${icao}_${safePackageName}_${latest.simulator}_bars.xml`;
+	const legacySafePackageName = latest.packageName.replace(/[^a-zA-Z0-9.-]/g, '-');
+	const fileKey = latest.barsArtifactKey ?? `Maps/${icao}_${legacySafePackageName}_${latest.simulator}_bars.xml`;
 
 	const stored = await storage.getFile(fileKey);
 	if (!stored) {
@@ -4837,7 +5133,6 @@ cdnApp.get('/files', async (c) => {
 		const prefix = c.req.query('prefix') || undefined;
 		const limit = Number.MAX_SAFE_INTEGER;
 
-		// Get list of files
 		const storage = ServicePool.getStorage(c.env);
 		const result = await storage.listFiles(prefix, limit);
 
@@ -4918,7 +5213,6 @@ cdnApp.delete('/files/:fileKey{.+}', async (c) => {
 			);
 		}
 
-		// Delete the file
 		const storage = ServicePool.getStorage(c.env);
 		const deleted = await storage.deleteFile(fileKey);
 
@@ -4979,7 +5273,6 @@ app.get('/euroscope/files/:icao', async (c) => {
 	}
 
 	try {
-		// Get list of files for this ICAO
 		const storage = ServicePool.getStorage(c.env);
 		const result = await storage.listFiles(`EuroScope/${icao}/`, 10);
 
@@ -4988,7 +5281,7 @@ app.get('/euroscope/files/:icao', async (c) => {
 			fileName: obj.key.split('/').pop() || '',
 			size: obj.size,
 			uploaded: obj.uploaded.toISOString(),
-			url: new URL(`https://dev-cdn.stopbars.com/${obj.key}`, c.req.url).toString(),
+			url: new URL(`https://cdn.stopbars.com/${obj.key}`, c.req.url).toString(),
 		}));
 
 		return c.json({
@@ -5012,14 +5305,25 @@ const euroscopeApp = new Hono<{
 	Variables: {
 		vatsimUser?: VatsimUser;
 		user?: UserRecord;
+		actorId?: string;
+		divisionDataAutomation?: boolean;
 	};
 }>();
 
 euroscopeApp.use('*', async (c, next) => {
+	if (isDivisionDataAutomationRequest(c.req.header('Authorization') || '', c.env.DIVISION_DATA_API_KEY)) {
+		c.set('actorId', DIVISION_DATA_ACTOR_ID);
+		c.set('divisionDataAutomation', true);
+		await next();
+		return;
+	}
+
 	const { user, vatsimUser } = await resolveUserFromVatsimOrApi(c);
 	if (!user) return c.text('Unauthorized', 401);
 	c.set('vatsimUser', vatsimUser!);
 	c.set('user', user);
+	c.set('actorId', vatsimUser!.id.toString());
+	c.set('divisionDataAutomation', false);
 	await next();
 });
 
@@ -5052,7 +5356,8 @@ euroscopeApp.use('*', async (c, next) => {
  *         description: File uploaded
  */
 euroscopeApp.post('/upload', async (c) => {
-	const vatsimUser = c.get('vatsimUser')!;
+	const actorId = c.get('actorId')!;
+	const isDivisionDataAutomation = c.get('divisionDataAutomation') === true;
 
 	try {
 		const formData = await c.req.formData();
@@ -5100,7 +5405,7 @@ euroscopeApp.post('/upload', async (c) => {
 
 		// Check if user has access to upload files for this ICAO
 		const divisions = ServicePool.getDivisions(c.env);
-		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+		const hasAccess = isDivisionDataAutomation || (await divisions.userHasAirportAccess(actorId, icao));
 
 		if (!hasAccess) {
 			return c.json(
@@ -5132,7 +5437,7 @@ euroscopeApp.post('/upload', async (c) => {
 
 		// Stream directly to R2 instead of duplicating the entire upload in memory.
 		const result = await storage.uploadFile(fileKey, file.stream(), file.type, {
-			uploadedBy: vatsimUser.id.toString(),
+			uploadedBy: actorId,
 			icao: icao,
 			fileName: file.name,
 			size: file.size.toString(),
@@ -5147,7 +5452,7 @@ euroscopeApp.post('/upload', async (c) => {
 					icao: icao,
 					fileName: fileName,
 					size: file.size,
-					url: new URL(`https://dev-cdn.stopbars.com/${result.key}`, c.req.url).toString(),
+					url: new URL(`https://cdn.stopbars.com/${result.key}`, c.req.url).toString(),
 				},
 			},
 			201,
@@ -5190,7 +5495,8 @@ euroscopeApp.post('/upload', async (c) => {
 euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
 	const filename = c.req.param('filename');
-	const vatsimUser = c.get('vatsimUser')!;
+	const actorId = c.get('actorId')!;
+	const isDivisionDataAutomation = c.get('divisionDataAutomation') === true;
 
 	// Validate ICAO format
 	if (!ICAO_REGEX.test(icao)) {
@@ -5205,7 +5511,7 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 	try {
 		// Check if user has access to delete files for this ICAO
 		const divisions = ServicePool.getDivisions(c.env);
-		const hasAccess = await divisions.userHasAirportAccess(vatsimUser.id.toString(), icao);
+		const hasAccess = isDivisionDataAutomation || (await divisions.userHasAirportAccess(actorId, icao));
 
 		if (!hasAccess) {
 			return c.json(
@@ -5219,7 +5525,6 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
 		// Construct the file key
 		const fileKey = `EuroScope/${icao}/${filename}`;
 
-		// Delete the file
 		const storage = ServicePool.getStorage(c.env);
 		const deleted = await storage.deleteFile(fileKey);
 
@@ -5269,7 +5574,8 @@ euroscopeApp.delete('/files/:icao/:filename', async (c) => {
  */
 euroscopeApp.get('/:icao/editable', async (c) => {
 	const icao = c.req.param('icao').toUpperCase();
-	const vatsimUser = c.get('vatsimUser')!;
+	const actorId = c.get('actorId')!;
+	const isDivisionDataAutomation = c.get('divisionDataAutomation') === true;
 
 	// Validate ICAO format
 	if (!ICAO_REGEX.test(icao)) {
@@ -5282,9 +5588,17 @@ euroscopeApp.get('/:icao/editable', async (c) => {
 	}
 
 	try {
+		if (isDivisionDataAutomation) {
+			return c.json({
+				icao: icao,
+				editable: true,
+				role: 'automation',
+			});
+		}
+
 		// Check if user has access to edit files for this ICAO
 		const divisions = ServicePool.getDivisions(c.env);
-		const userRole = await divisions.getUserRoleForAirport(vatsimUser.id.toString(), icao);
+		const userRole = await divisions.getUserRoleForAirport(actorId, icao);
 
 		return c.json({
 			icao: icao,
@@ -5320,7 +5634,7 @@ app.get('/vatsys/profiles', withCache(CacheKeys.fromUrl, 600, 'airports'), async
 	const profiles = items.map((it) => ({
 		icao: it.icao,
 		name: it.name,
-		url: new URL(`https://dev-cdn.stopbars.com/${it.key}`, c.req.url).toString(),
+		url: new URL(`https://cdn.stopbars.com/${it.key}`, c.req.url).toString(),
 	}));
 	return c.json({ profiles });
 });
@@ -5366,19 +5680,20 @@ app.post('/vatsys/profiles/generate', async (c) => {
 		return c.json({ error: 'Unauthorized' }, 401);
 	}
 
-	let body: { icao?: unknown };
+	let body: JsonObject;
 	try {
-		body = (await c.req.json()) as { icao?: unknown };
+		body = parseJsonObject(await c.req.json());
 	} catch {
 		return c.json({ error: 'Invalid JSON body' }, 400);
 	}
 
-	if (typeof body.icao !== 'string') {
+	const icao = readString(body.icao);
+	if (icao === undefined) {
 		return c.json({ error: 'icao is required' }, 400);
 	}
 
 	const generator = ServicePool.getVatSysProfileGenerator(c.env);
-	const result = await generator.generate(body.icao);
+		const result = await generator.generate(icao);
 	return c.json(result);
 });
 
@@ -5441,7 +5756,7 @@ vatsysStaffApp.post('/profiles/upload', async (c) => {
 	const svc = ServicePool.getVatSysProfiles(c.env);
 	try {
 		const res = await svc.upload(file.name, bytes, user.vatsim_id);
-		const url = new URL(`https://dev-cdn.stopbars.com/${res.key}`, c.req.url).toString();
+		const url = new URL(`https://cdn.stopbars.com/${res.key}`, c.req.url).toString();
 		return c.json({ success: true, key: res.key, etag: res.etag, url }, 201);
 	} catch (e) {
 		return c.json({ error: e instanceof Error ? e.message : 'Upload failed' }, 400);
@@ -5500,7 +5815,9 @@ app.get(
 	'/releases',
 	withCache(CacheKeys.fromUrl, 300, 'installer'), // cache 5m
 	async (c) => {
-		const product = c.req.query('product') as InstallerProduct | undefined;
+		const requestedProduct = c.req.query('product');
+		const product = parseInstallerProduct(requestedProduct);
+		if (requestedProduct && !product) return c.json({ releases: [] });
 		const releasesService = ServicePool.getReleases(c.env);
 		const releases = await releasesService.listReleases(product);
 		return c.json({ releases });
@@ -5526,15 +5843,17 @@ app.get(
  *         description: Not found
  */
 app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), async (c) => {
-	const product = c.req.query('product') as InstallerProduct | undefined;
-	if (!product) return c.text('product required', 400);
+	const requestedProduct = c.req.query('product');
+	if (!requestedProduct) return c.text('product required', 400);
+	const product = parseInstallerProduct(requestedProduct);
+	if (!product) return c.text('Not found', 404);
 	const releasesService = ServicePool.getReleases(c.env);
 	const latest = await releasesService.getLatest(product);
 	if (!latest) return c.text('Not found', 404);
 	const downloadUrl =
 		product === 'SimConnect.NET'
 			? `https://www.nuget.org/packages/SimConnect.NET/${latest.version}`
-			: new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
+			: new URL(`https://cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
 	const imageUrl = latest.image_url ? new URL(latest.image_url, c.req.url).toString() : undefined;
 	const { image_url: _imageUrlOmitted, ...rest } = latest;
 	void _imageUrlOmitted;
@@ -5598,7 +5917,8 @@ app.post('/releases/upload', async (c) => {
 	}
 
 	const file = formData.get('file');
-	const product = formData.get('product')?.toString() as InstallerProduct | undefined;
+	const requestedProduct = formData.get('product')?.toString();
+	const product = parseInstallerProduct(requestedProduct);
 	const version = formData.get('version')?.toString();
 	const changelog = formData.get('changelog')?.toString();
 	const image = formData.get('image');
@@ -5613,7 +5933,8 @@ app.post('/releases/upload', async (c) => {
 	const allowed = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 	if (!allowed) return c.text('Forbidden', 403);
 
-	if (!product || !version) return c.json({ error: 'product & version required' }, 400);
+	if (!requestedProduct || !version) return c.json({ error: 'product & version required' }, 400);
+	if (!product) return c.json({ error: 'invalid product' }, 400);
 
 	const isSimConnect = product === 'SimConnect.NET';
 	const isInstallerExe = product === 'Installer';
@@ -5639,7 +5960,8 @@ app.post('/releases/upload', async (c) => {
 		let bytes: ArrayBuffer | undefined;
 		if (!isSimConnect) {
 			// File upload path for normal products
-			const uploadFile = file as File; // already validated
+			// SAFETY: the non-SimConnect branch rejected any file value that was not a File.
+			const uploadFile = file as File;
 			fileKey = `releases/${product}/${version}/${uploadFile.name}`;
 			bytes = await uploadFile.arrayBuffer();
 		} else {
@@ -5677,9 +5999,10 @@ app.post('/releases/upload', async (c) => {
 				product,
 				version,
 			});
-			imageUrl = `https://dev-cdn.stopbars.com/${imageKey}`;
+			imageUrl = `https://cdn.stopbars.com/${imageKey}`;
 		}
 		if (!isSimConnect) {
+			// SAFETY: the non-SimConnect branch rejected any file value that was not a File.
 			const uploadFile = file as File;
 			const fileUploadPromise = storage.uploadFile(fileKey, bytes!, uploadFile.type || 'application/octet-stream', {
 				uploadedBy: user.vatsim_id,
@@ -5698,6 +6021,7 @@ app.post('/releases/upload', async (c) => {
 			product,
 			version,
 			fileKey,
+			// SAFETY: bytes is populated only after the non-SimConnect File check succeeds.
 			fileSize: bytes ? (file as File).size : 0,
 			fileHash: sha256,
 			changelog,
@@ -5705,7 +6029,7 @@ app.post('/releases/upload', async (c) => {
 		});
 		const downloadUrl = isSimConnect
 			? `https://www.nuget.org/packages/SimConnect.NET/${version}`
-			: `https://dev-cdn.stopbars.com/${fileKey}`;
+			: `https://cdn.stopbars.com/${fileKey}`;
 		return c.json({ success: true, release, downloadUrl, imageUrl }, 201);
 	} catch (err) {
 		console.error('Release upload error', err);
@@ -5772,14 +6096,13 @@ app.put('/releases/:id/changelog', async (c) => {
 		const canEdit = await roles.hasPermission(user.id, StaffRole.PRODUCT_MANAGER);
 		if (!canEdit) return c.text('Forbidden', 403);
 
-		let body: unknown;
+		let body: JsonValue;
 		try {
 			body = await c.req.json();
 		} catch {
 			return c.json({ error: 'Invalid JSON body' }, 400);
 		}
-		const b = (body ?? {}) as Record<string, unknown>;
-		const changelog = typeof b.changelog === 'string' ? b.changelog.trim() : '';
+		const changelog = readString(parseJsonObject(body).changelog)?.trim() ?? '';
 		if (!changelog) return c.json({ error: 'changelog required' }, 400);
 		if (changelog.length > 20000) return c.json({ error: 'changelog too long (max 20000 chars)' }, 400);
 
@@ -5818,9 +6141,10 @@ app.put('/releases/:id/changelog', async (c) => {
  *         description: Latest release not found when version omitted
  */
 app.post('/download', async (c) => {
-	const product = c.req.query('product') as InstallerProduct | undefined;
-	if (!product) return c.json({ error: 'product required' }, 400);
-	if (!INSTALLER_PRODUCTS.includes(product)) return c.json({ error: 'invalid product' }, 400);
+	const requestedProduct = c.req.query('product');
+	if (!requestedProduct) return c.json({ error: 'product required' }, 400);
+	const product = parseInstallerProduct(requestedProduct);
+	if (!product) return c.json({ error: 'invalid product' }, 400);
 	const releases = ServicePool.getReleases(c.env);
 	const latest = await releases.getLatest(product);
 	if (!latest) return c.json({ error: 'No release found for product' }, 404);
@@ -5836,11 +6160,11 @@ app.post('/download', async (c) => {
  * /staff/bars-packages/upload:
  *   post:
  *     x-hidden: true
- *     summary: Upload BARS installer packages (models/removals)
+ *     summary: Upload BARS installer packages
  *     description: >-
- *       Staff-only endpoint to upload the two MSFS data packages used by the installer. Accepts a multipart form
- *       with a single file and a `type` field designating which package is being uploaded. The file is stored in R2
- *       under a fixed key and previous version overwritten. SHA-256 is computed server-side and stored in metadata.
+ *       Staff-only endpoint to upload the data packages used by the installer. MSFS packages overwrite fixed R2 keys.
+ *       X-Plane bridge packages require a semantic `version`, are stored under versioned keys, and advance a latest
+ *       pointer only after the archive upload succeeds. SHA-256 is computed server-side and stored in metadata.
  *     tags:
  *       - Staff
  *       - Data
@@ -5860,7 +6184,10 @@ app.post('/download', async (c) => {
  *                 format: binary
  *               type:
  *                 type: string
- *                 enum: [models, models-2020, removals-2020, removals-2024]
+ *                 enum: [models, models-2020, removals-2020, removals-2024, xplane-bridge]
+ *               version:
+ *                 type: string
+ *                 description: Required semantic version when type is xplane-bridge
  *     responses:
  *       201:
  *         description: Package uploaded successfully
@@ -5908,8 +6235,16 @@ app.post('/staff/bars-packages/upload', async (c) => {
 	}
 	const file = form.get('file');
 	const type = form.get('type')?.toString();
+	const version = form.get('version')?.toString().trim();
 	if (!file || !(file instanceof File)) return c.json({ error: 'file required' }, 400);
-	if (!type || !['models', 'models-2020', 'removals-2020', 'removals-2024'].includes(type)) return c.json({ error: 'invalid type' }, 400);
+	if (!type || !['models', 'models-2020', 'removals-2020', 'removals-2024', 'xplane-bridge'].includes(type))
+		return c.json({ error: 'invalid type' }, 400);
+	const isXPlaneBridge = type === 'xplane-bridge';
+	const semverPattern =
+		/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+	if (isXPlaneBridge && (!version || !semverPattern.test(version))) {
+		return c.json({ error: 'A valid semantic version is required for xplane-bridge' }, 400);
+	}
 	// Enforce .zip
 	const lowerName = file.name.toLowerCase();
 	if (!lowerName.endsWith('.zip')) return c.json({ error: 'file must be a .zip archive' }, 400);
@@ -5928,29 +6263,71 @@ app.post('/staff/bars-packages/upload', async (c) => {
 		if (type === 'models') key = 'packages/bars-models-2024.zip';
 		else if (type === 'models-2020') key = 'packages/bars-models-2020.zip';
 		else if (type === 'removals-2020') key = 'packages/bars-removals-2020.zip';
-		else key = 'packages/bars-removals-2024.zip';
-		const uploadRes = await storage.uploadFile(key, bytes, 'application/zip', {
-			uploadedBy: user.vatsim_id,
-			type,
-			size: file.size.toString(),
-			sha256,
-		});
-		const url = new URL(`https://dev-cdn.stopbars.com/${uploadRes.key}`, c.req.url).toString();
-		return c.json(
-			{
-				success: true,
-				package: {
+		else if (type === 'removals-2024') key = 'packages/bars-removals-2024.zip';
+		else key = `packages/xplane-bridge/${version}/BARSXPlaneBridge.zip`;
+		if (isXPlaneBridge && (await storage.headFile(key))) {
+			return c.json({ error: `X-Plane bridge ${version} has already been uploaded` }, 409);
+		}
+		const uploadedAt = new Date().toISOString();
+		const uploadMetadataEntries: Array<[string, string]> = [
+			['uploadedBy', user.vatsim_id],
+			['type', type],
+			['size', file.size.toString()],
+			['sha256', sha256],
+		];
+		if (isXPlaneBridge) {
+			uploadMetadataEntries.push(['version', version!], ['protocol', 'BARS.XPlaneBridge.v1']);
+		}
+		const uploadMetadata = Object.fromEntries(uploadMetadataEntries);
+		const uploadRes = await storage.uploadFile(
+			key,
+			bytes,
+			'application/zip',
+			uploadMetadata,
+			isXPlaneBridge ? { onlyIfAbsent: true } : undefined,
+		);
+		if (isXPlaneBridge) {
+			await storage.uploadFile(
+				'packages/xplane-bridge/latest.json',
+				JSON.stringify({
+					schema: 'bars-xplane-bridge-package/v1',
 					type,
+					version,
+					protocol: 'BARS.XPlaneBridge.v1',
 					key: uploadRes.key,
 					size: file.size,
 					sha256,
 					etag: uploadRes.etag,
-					url,
-				},
+					uploaded: uploadedAt,
+				}),
+				'application/json',
+				{ type, version: version!, protocol: 'BARS.XPlaneBridge.v1' },
+			);
+		}
+		const url = new URL(`https://cdn.stopbars.com/${uploadRes.key}`, c.req.url).toString();
+		const uploadedPackage: UploadedBarsPackage = {
+			type,
+			key: uploadRes.key,
+			size: file.size,
+			sha256,
+			etag: uploadRes.etag,
+			url,
+		};
+		if (isXPlaneBridge) {
+			uploadedPackage.version = version;
+			uploadedPackage.protocol = 'BARS.XPlaneBridge.v1';
+		}
+		return c.json(
+			{
+				success: true,
+				package: uploadedPackage,
 			},
 			201,
 		);
 	} catch (err) {
+		if (isXPlaneBridge && err instanceof Error && err.message === 'Storage object already exists') {
+			return c.json({ error: `X-Plane bridge ${version} has already been uploaded` }, 409);
+		}
 		console.error('BARS package upload error', err);
 		return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 500);
 	}
@@ -5961,7 +6338,7 @@ app.post('/staff/bars-packages/upload', async (c) => {
  * /bars-packages:
  *   get:
  *     summary: List current BARS data packages
- *     description: Public metadata for installer MSFS data packages (models & removals). Returns size, hash and timestamps.
+ *     description: Public metadata for installer packages. Returns version, protocol, size, hash and timestamps where applicable.
  *     tags:
  *       - Data
  *     responses:
@@ -5994,14 +6371,57 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
 						uploaded: obj.uploaded.toISOString(),
 						sha256: obj.customMetadata?.sha256 || null,
 						type,
-						url: new URL(`https://dev-cdn.stopbars.com/${key}`, c.req.url).toString(),
+						url: new URL(`https://cdn.stopbars.com/${key}`, c.req.url).toString(),
 					};
 				} catch {
 					return null;
 				}
 			}),
 		);
-		return c.json({ packages: results.filter(Boolean) });
+		let xplaneBridge: JsonObject | null = null;
+		try {
+			const pointerResponse = await storage.getFile('packages/xplane-bridge/latest.json');
+			if (pointerResponse) {
+				const pointer = parseJsonObject(await pointerResponse.json());
+				const pointerVersion = readString(pointer.version);
+				const pointerKey = readString(pointer.key);
+				const pointerSize = readNumber(pointer.size);
+				const pointerSha256 = readString(pointer.sha256);
+				const pointerUploaded = readString(pointer.uploaded);
+				if (
+					pointer.schema === 'bars-xplane-bridge-package/v1' &&
+					pointer.type === 'xplane-bridge' &&
+					pointerVersion !== undefined &&
+					pointer.protocol === 'BARS.XPlaneBridge.v1' &&
+					pointerKey !== undefined &&
+					pointerKey === `packages/xplane-bridge/${pointerVersion}/BARSXPlaneBridge.zip` &&
+					pointerSize !== undefined &&
+					Number.isSafeInteger(pointerSize) &&
+					pointerSize > 0 &&
+					pointerSha256 !== undefined &&
+					/^[a-f0-9]{64}$/.test(pointerSha256) &&
+					pointerUploaded !== undefined
+				) {
+					const archive = await storage.headFile(pointerKey);
+					if (
+						archive &&
+						archive.size === pointerSize &&
+						archive.customMetadata?.sha256 === pointerSha256 &&
+						archive.customMetadata?.version === pointerVersion &&
+						archive.customMetadata?.protocol === pointer.protocol
+					) {
+						xplaneBridge = {
+							...pointer,
+							etag: archive.etag,
+							url: new URL(`https://cdn.stopbars.com/${pointerKey}`, c.req.url).toString(),
+						};
+					}
+				}
+			}
+		} catch (error) {
+			console.error('X-Plane bridge package pointer is invalid', error);
+		}
+		return c.json({ packages: [...results.filter(Boolean), ...(xplaneBridge ? [xplaneBridge] : [])] });
 	} catch (err) {
 		console.error('BARS package list error', err);
 		return c.json({ error: 'Failed to list packages' }, 500);
@@ -6028,15 +6448,16 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
  */
 
 app.get('/downloads/stats', withCache(CacheKeys.fromUrl, 300, 'installer'), async (c) => {
-	const product = c.req.query('product') as InstallerProduct | undefined;
+	const requestedProduct = c.req.query('product');
+	const product = parseInstallerProduct(requestedProduct);
 	const downloads = ServicePool.getDownloads(c.env);
-	if (!product) {
+	if (!requestedProduct) {
 		// No product specified -> return stats for all products
 		const all = await downloads.getAllStats();
 		const combinedTotal = all.reduce((sum, item) => sum + item.total, 0);
 		return c.json({ products: all, combinedTotal });
 	}
-	if (!INSTALLER_PRODUCTS.includes(product)) return c.json({ error: 'invalid product' }, 400);
+	if (!product) return c.json({ error: 'invalid product' }, 400);
 	const stats = await downloads.getStats(product);
 	return c.json(stats);
 });
@@ -6092,7 +6513,9 @@ app.post('/purge-cache', async (c) => {
 	}
 
 	try {
-		const { key, namespace } = (await c.req.json()) as { key: string; namespace?: string };
+		const purgeInput = parseJsonObject(await c.req.json());
+		const key = readString(purgeInput.key) ?? '';
+		const namespace = readString(purgeInput.namespace);
 
 		if (!key) {
 			return c.json({ error: 'Cache key is required' }, 400);
@@ -6159,17 +6582,13 @@ app.post('/purge-cache-all', async (c) => {
 
 	const cache = ServicePool.getCache(c.env);
 	try {
-		let body: unknown = undefined;
+		let body: JsonValue | undefined = undefined;
 		try {
 			body = await c.req.json();
 		} catch {
 			/* allow empty body */
 		}
-		let namespace: string | undefined = undefined;
-		if (body && typeof body === 'object') {
-			const maybe = body as Record<string, unknown>;
-			if (typeof maybe.namespace === 'string') namespace = maybe.namespace;
-		}
+		const namespace = readString(parseJsonObject(body).namespace);
 		const toPurge: readonly string[] = namespace ? [namespace] : CACHE_NAMESPACES;
 		const versions = await Promise.all(toPurge.map((cacheNamespace) => cache.bumpNamespaceVersion(cacheNamespace)));
 		const results = Object.fromEntries(toPurge.map((cacheNamespace, index) => [cacheNamespace, versions[index]]));
@@ -6279,16 +6698,16 @@ faqStaffApp.use('*', async (c, next) => {
  *         description: Created
  */
 faqStaffApp.post('/', async (c) => {
-	let body: unknown;
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: 'Invalid JSON' }, 400);
 	}
-	const b = (body ?? {}) as Record<string, unknown>;
-	const question = typeof b.question === 'string' ? b.question : '';
-	const answer = typeof b.answer === 'string' ? b.answer : '';
-	let order_position = Number((b as { order_position?: unknown }).order_position);
+	const faqInput = parseJsonObject(body);
+	const question = readString(faqInput.question) ?? '';
+	const answer = readString(faqInput.answer) ?? '';
+	let order_position = Number(faqInput.order_position);
 	if (!question || !answer || !Number.isInteger(order_position)) {
 		return c.json({ error: 'question, answer, order_position required' }, 400);
 	}
@@ -6338,20 +6757,19 @@ faqStaffApp.post('/', async (c) => {
  */
 faqStaffApp.put('/:id', async (c) => {
 	const id = c.req.param('id');
-	let body: unknown;
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
 		body = {};
 	}
 	const faqService = ServicePool.getFAQs(c.env);
-	const b = (body ?? {}) as Record<string, unknown>;
+	const faqInput = parseJsonObject(body);
+	const orderPosition = readNumber(faqInput.order_position);
 	const updated = await faqService.update(id, {
-		question: typeof b.question === 'string' ? b.question : undefined,
-		answer: typeof b.answer === 'string' ? b.answer : undefined,
-		order_position: Number.isInteger((b as { order_position?: unknown }).order_position as number)
-			? (b as { order_position: number }).order_position
-			: undefined,
+		question: readString(faqInput.question),
+		answer: readString(faqInput.answer),
+		order_position: Number.isInteger(orderPosition) ? orderPosition : undefined,
 	});
 	if (!updated) return c.text('Not found', 404);
 	try {
@@ -6428,26 +6846,23 @@ faqStaffApp.delete('/:id', async (c) => {
  *         description: Reordered
  */
 faqStaffApp.post('/reorder', async (c) => {
-	let body: unknown;
+	let body: JsonValue;
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: 'Invalid JSON' }, 400);
 	}
-	const b = (body ?? {}) as Record<string, unknown>;
-	const updatesRaw = b.updates as unknown;
+	const updatesRaw = parseJsonObject(body).updates;
 	if (!Array.isArray(updatesRaw)) return c.json({ error: 'updates array required' }, 400);
 	type ReorderUpdate = { id: string; order_position: number };
-	const updates: ReorderUpdate[] = (updatesRaw as unknown[])
-		.filter((u): u is ReorderUpdate => {
-			if (!u || typeof u !== 'object') return false;
-			const obj = u as Record<string, unknown>;
-			return typeof obj.id === 'string' && Number.isInteger(obj.order_position as number);
-		})
-		.map((u) => {
-			const obj = u as Record<string, unknown>;
-			return { id: obj.id as string, order_position: obj.order_position as number };
-		});
+	const updates: ReorderUpdate[] = updatesRaw.flatMap((updateValue) => {
+		const update = parseJsonObject(updateValue);
+		const id = readString(update.id);
+		const orderPosition = readNumber(update.order_position);
+		return id !== undefined && orderPosition !== undefined && Number.isInteger(orderPosition)
+			? [{ id, order_position: orderPosition }]
+			: [];
+	});
 	const faqService = ServicePool.getFAQs(c.env);
 	await faqService.reorder(updates);
 	try {
@@ -6481,9 +6896,11 @@ app.route('/staff/faqs', faqStaffApp);
  */
 app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 	const requestedService = c.req.query('service');
-	const validServices = ['database', 'storage', 'vatsim'];
+	const validServices = ['database', 'storage', 'vatsim'] as const;
+	type HealthService = (typeof validServices)[number];
+	const selectedService = validServices.find((service) => service === requestedService);
 
-	if (requestedService && !validServices.includes(requestedService)) {
+	if (requestedService && selectedService === undefined) {
 		return c.json(
 			{
 				error: 'Invalid service',
@@ -6493,10 +6910,11 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 		);
 	}
 
-	const servicesToCheck = requestedService ? [requestedService] : validServices;
-	const healthChecks = Object.fromEntries(servicesToCheck.map((service) => [service, 'ok'] as const)) as Record<string, string>;
+	const servicesToCheck: readonly HealthService[] = selectedService ? [selectedService] : validServices;
+	const healthChecks: Partial<Record<HealthService, string>> = {};
+	for (const service of servicesToCheck) healthChecks[service] = 'ok';
 
-	const serviceChecks: Record<(typeof validServices)[number], () => Promise<void>> = {
+	const serviceChecks = {
 		database: async () => {
 			await c.env.DB.prepare('SELECT 1').first();
 		},
@@ -6527,7 +6945,7 @@ app.get('/health', withCache(CacheKeys.fromUrl, 60, 'health'), async (c) => {
 	await Promise.all(
 		servicesToCheck.map(async (service) => {
 			try {
-				await serviceChecks[service as (typeof validServices)[number]]();
+				await serviceChecks[service]();
 			} catch (error) {
 				if (service === 'vatsim') {
 					console.error('VATSIM health check failed:', error);

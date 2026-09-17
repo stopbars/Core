@@ -2,6 +2,19 @@ import { DatabaseSessionService } from './database-session';
 import { StorageService } from './storage';
 
 export type InstallerProduct = 'Pilot-Client' | 'vatSys-Plugin' | 'EuroScope-Plugin' | 'Installer' | 'SimConnect.NET';
+
+export function parseInstallerProduct(value: string): InstallerProduct | null {
+	switch (value) {
+		case 'Pilot-Client':
+		case 'vatSys-Plugin':
+		case 'EuroScope-Plugin':
+		case 'Installer':
+		case 'SimConnect.NET':
+			return value;
+		default:
+			return null;
+	}
+}
 export interface ReleaseRecord {
 	id: number;
 	product: InstallerProduct;
@@ -35,12 +48,11 @@ export class ReleaseService {
 
 	async createRelease(input: CreateReleaseInput): Promise<ReleaseRecord> {
 		const { product, version, fileKey, fileSize, fileHash, changelog, imageUrl } = input;
-		const result = await this.dbSession.executeWrite(
+		const result = await this.dbSession.executeWrite<ReleaseRecord>(
 			`INSERT INTO installer_releases (product, version, file_key, file_size, file_hash, changelog, image_url) VALUES (?,?,?,?,?,?,?) RETURNING *`,
 			[product, version, fileKey, fileSize, fileHash, changelog || null, imageUrl || null],
 		);
-		const rows = result.results as unknown as ReleaseRecord[] | null;
-		const release = rows && rows[0];
+		const release = result.results?.[0];
 		if (!release) throw new Error('Failed to create release');
 		return release;
 	}
@@ -66,11 +78,10 @@ export class ReleaseService {
 	}
 
 	async updateChangelog(id: number, changelog: string): Promise<ReleaseRecord | null> {
-		const res = await this.dbSession.executeWrite(`UPDATE installer_releases SET changelog = ? WHERE id = ? RETURNING *`, [
+		const res = await this.dbSession.executeWrite<ReleaseRecord>(`UPDATE installer_releases SET changelog = ? WHERE id = ? RETURNING *`, [
 			changelog,
 			id,
 		]);
-		const rows = res.results as unknown as ReleaseRecord[] | null;
-		return (rows && rows[0]) || null;
+		return res.results?.[0] ?? null;
 	}
 }

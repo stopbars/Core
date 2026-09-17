@@ -7,9 +7,9 @@ export function sanitizeContributionXml(raw: string, opts?: { maxBytes?: number 
 	if (!raw) throw new Error('Empty XML');
 
 	const maxBytes = opts?.maxBytes ?? MAX_CONTRIBUTION_XML_BYTES;
-	// Size guard (counting UTF-16 code units approximates bytes for ASCII subset typical of these files)
-	if (raw.length > maxBytes) {
-		throw new Error(`Submitted XML too large (> ${maxBytes} chars)`);
+	// Reject cheaply by code-unit length first, then enforce the real UTF-8 byte contract.
+	if (raw.length > maxBytes || new TextEncoder().encode(raw).byteLength > maxBytes) {
+		throw new Error(`Submitted XML too large (> ${maxBytes} bytes)`);
 	}
 
 	const trimmed = raw.trim();
