@@ -1154,17 +1154,18 @@ export class Connection {
 			throw new Error('Missing updates array');
 		}
 
-		if (updatesPayload.length > MAX_LIGHTING_UPDATES) {
-			throw new Error(`Batch update exceeds maximum allowed size of ${MAX_LIGHTING_UPDATES}`);
+		const maximumUpdates = allowsLargeLightingPacket(packet) ? MAX_LIGHTING_UPDATES : MAX_MULTI_STATE_UPDATES;
+		if (updatesPayload.length > maximumUpdates) {
+			throw new Error(`Batch update exceeds maximum allowed size of ${maximumUpdates}`);
 		}
 
 		const updates = updatesPayload;
-		const requestedObjectIds = new Set(updates.map((update) => update.objectId));
 
 		const template = await this.getOfflineStateTemplate(airport);
 		const now = Date.now();
 		const state = this.getOrCreateAirportState(airport);
 		const normalizedUpdates: MultiStateUpdateItem[] = [];
+		const senderUpdates = new Map<string, MultiStateUpdateItem>();
 
 		for (let index = 0; index < updates.length; index++) {
 			const update = updates[index];
@@ -1177,6 +1178,12 @@ export class Connection {
 					template,
 				);
 				normalizedUpdates.push(...expandedUpdates);
+				for (const expanded of expandedUpdates) {
+					// An alias can overwrite an explicitly requested ID later in the same batch.
+					if (expanded.objectId !== update.objectId || senderUpdates.has(expanded.objectId)) {
+						senderUpdates.set(expanded.objectId, expanded);
+					}
+				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : 'Unknown error';
 				throw new Error(`Update ${index + 1} failed: ${message}`);
@@ -1187,7 +1194,7 @@ export class Connection {
 
 		return {
 			updates: normalizedUpdates,
-			senderUpdates: getGeneratedAliasUpdates(normalizedUpdates, requestedObjectIds),
+			senderUpdates: [...senderUpdates.values()],
 			timestamp: now,
 			airport,
 		};
@@ -2608,7 +2615,8 @@ export class Connection {
 			return false;
 		}
 
-		if (updates.length > MAX_LIGHTING_UPDATES) {
+		const maximumUpdates = allowsLargeLightingPacket(packet) ? MAX_LIGHTING_UPDATES : MAX_MULTI_STATE_UPDATES;
+		if (updates.length > maximumUpdates) {
 			return false;
 		}
 

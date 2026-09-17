@@ -156,6 +156,7 @@ interface StoredContributionGenerationRow {
 	bars_key?: string;
 	supports_xml?: string;
 	bars_xml?: string;
+	created_at: string;
 	expires_at: string;
 }
 
@@ -168,6 +169,7 @@ export type ContributionGenerationLookupResult =
 			generationHash?: string;
 			supportsXml: string;
 			barsXml: string;
+			createdAt: string;
 			expiresAt: string;
 	  }
 	| { status: 'invalid-token' }
@@ -421,7 +423,8 @@ export class ContributionService {
 			try {
 				result = await session.executeLatest<StoredContributionGenerationRow>(
 					`
-				SELECT icao, supports_key, bars_key, simulator, generation_hash, expires_at
+				SELECT icao, supports_key, bars_key, simulator, generation_hash, expires_at,
+					strftime('%Y-%m-%dT%H:%M:%fZ', created_at) AS created_at
 				FROM contribution_generations
 				WHERE token = ? AND expires_at > datetime('now')
 				LIMIT 1
@@ -436,7 +439,8 @@ export class ContributionService {
 
 				try {
 					result = await session.executeLatest<StoredContributionGenerationRow>(
-						`SELECT icao, supports_key, bars_key, expires_at
+						`SELECT icao, supports_key, bars_key, expires_at,
+							strftime('%Y-%m-%dT%H:%M:%fZ', created_at) AS created_at
 						 FROM contribution_generations
 						 WHERE token = ? AND expires_at > datetime('now') LIMIT 1`,
 						[token],
@@ -445,7 +449,8 @@ export class ContributionService {
 					const legacyMessage = legacyError instanceof Error ? legacyError.message.toLowerCase() : '';
 					if (!legacyMessage.includes('no such column')) throw legacyError;
 					result = await session.executeLatest<StoredContributionGenerationRow>(
-						`SELECT icao, supports_xml, bars_xml, expires_at
+						`SELECT icao, supports_xml, bars_xml, expires_at,
+							strftime('%Y-%m-%dT%H:%M:%fZ', created_at) AS created_at
 						 FROM contribution_generations
 						 WHERE token = ? AND expires_at > datetime('now') LIMIT 1`,
 						[token],
@@ -473,6 +478,7 @@ export class ContributionService {
 				generationHash: generation.generation_hash,
 				supportsXml,
 				barsXml,
+				createdAt: generation.created_at,
 				expiresAt: generation.expires_at,
 			};
 		} finally {
@@ -596,30 +602,51 @@ export class ContributionService {
 
 		const id = crypto.randomUUID();
 		const now = new Date().toISOString();
+		// Keep the tested pair independently of the one-day generation cache.
+		const publication = await this.publishArtifacts(
+			{ id, airportIcao: normalizedAirportIcao, simulator: submission.simulator },
+			sanitizedPackageName,
+			'submission',
+			storedGeneration.supportsXml,
+			storedGeneration.barsXml,
+		);
 
 		// Insert without snapshot of display name; we'll always resolve via users table when reading
-		await this.dbSession.executeWrite(
-			`
+		try {
+			await this.dbSession.executeWrite(
+				`
 	  INSERT INTO contributions (
 		id, user_id, airport_icao, 
 		package_name, submitted_xml, notes,
-		simulator, submission_date, status, generation_token, generation_hash
-	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		simulator, submission_date, status, generation_token, generation_hash,
+		artifact_identity, artifact_generation_id, removal_artifact_key, bars_artifact_key
+	  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-			[
-				id,
-				submission.userId,
-				normalizedAirportIcao,
-				sanitizedPackageName,
-				trimmedXml,
-				sanitizedNotes,
-				submission.simulator,
-				now,
-				'pending',
-				expectedToken,
-				expectedHash,
-			],
-		);
+				[
+					id,
+					submission.userId,
+					normalizedAirportIcao,
+					sanitizedPackageName,
+					trimmedXml,
+					sanitizedNotes,
+					submission.simulator,
+					now,
+					'pending',
+					expectedToken,
+					expectedHash,
+					publication.artifactIdentity,
+					publication.generationId,
+					publication.removal.key,
+					publication.bars.key,
+				],
+			);
+		} catch (error) {
+			const publicationIsCurrent = await this.isPublicationCurrent(id, publication, 'pending');
+			if (publicationIsCurrent !== true) {
+				if (publicationIsCurrent === false) await this.discardPublication(publication);
+				throw error;
+			}
+		}
 
 		const contribution: Contribution = {
 			id,
@@ -636,10 +663,10 @@ export class ContributionService {
 			decisionDate: null,
 			generationToken: expectedToken,
 			generationHash: expectedHash,
-			artifactIdentity: null,
-			artifactGenerationId: null,
-			removalArtifactKey: null,
-			barsArtifactKey: null,
+			artifactIdentity: publication.artifactIdentity,
+			artifactGenerationId: publication.generationId,
+			removalArtifactKey: publication.removal.key,
+			barsArtifactKey: publication.bars.key,
 			decisionSource: null,
 			decidedBy: null,
 		};
@@ -1020,13 +1047,60 @@ export class ContributionService {
 		packageName: string,
 		operation: 'approval' | 'regeneration',
 	): Promise<ContributionPublication> {
+		if (operation === 'approval') {
+			const [removalArtifact, barsXml] = await this.readTestedArtifacts(contribution);
+			return this.publishArtifacts(contribution, packageName, operation, removalArtifact, barsXml);
+		}
 		const [removalArtifact, barsXml] = await Promise.all([
 			contribution.simulator === 'xplane'
 				? Promise.resolve(generateXPlaneRemovalsJson(contribution.submittedXml, contribution.airportIcao))
 				: this.supportService.generateLightSupportsXML(contribution.submittedXml, contribution.airportIcao, contribution.simulator),
 			this.polygonService.processBarsXML(contribution.submittedXml, contribution.airportIcao),
 		]);
+		return this.publishArtifacts(contribution, packageName, operation, removalArtifact, barsXml);
+	}
 
+	private async readTestedArtifacts(contribution: Contribution): Promise<[string, string]> {
+		const unavailable = 'Tested artifacts are unavailable. The contributor must test and resubmit this draft.';
+		if (contribution.removalArtifactKey || contribution.barsArtifactKey) {
+			if (!contribution.removalArtifactKey || !contribution.barsArtifactKey) throw new Error(unavailable);
+			const [removal, bars] = await Promise.all([
+				this.storage.get(contribution.removalArtifactKey),
+				this.storage.get(contribution.barsArtifactKey),
+			]);
+			if (!removal || !bars) throw new Error(unavailable);
+			const contents = await Promise.all([removal.text(), bars.text()]);
+			if (!contents[0] || !contents[1]) throw new Error(unavailable);
+			return contents;
+		}
+
+		// Pending submissions from before snapshots can use their original, unexpired generation.
+		if (!contribution.generationToken || !contribution.generationHash) throw new Error(unavailable);
+		const generation = await this.getStoredGeneration(contribution.generationToken);
+		if (generation.status !== 'ok') throw new Error(unavailable);
+		const generatedAt = Date.parse(generation.createdAt);
+		const submittedAt = Date.parse(contribution.submissionDate);
+		if (
+			!Number.isFinite(generatedAt) ||
+			!Number.isFinite(submittedAt) ||
+			generatedAt > submittedAt ||
+			generation.icao !== contribution.airportIcao ||
+			(generation.simulator !== undefined && generation.simulator !== contribution.simulator) ||
+			(generation.generationHash !== undefined && generation.generationHash !== contribution.generationHash) ||
+			(await deriveContributionGenerationHash(contribution.submittedXml)) !== contribution.generationHash
+		) {
+			throw new Error(unavailable);
+		}
+		return [generation.supportsXml, generation.barsXml];
+	}
+
+	private async publishArtifacts(
+		contribution: Pick<Contribution, 'id' | 'airportIcao' | 'simulator'>,
+		packageName: string,
+		operation: 'submission' | 'approval' | 'regeneration',
+		removalArtifact: string,
+		barsXml: string,
+	): Promise<ContributionPublication> {
 		const [artifactIdentity, removalHash, barsHash] = await Promise.all([
 			deriveArtifactIdentity(packageName),
 			sha256Base64Url(removalArtifact),
@@ -1048,7 +1122,7 @@ export class ContributionService {
 		};
 
 		try {
-			const [removal, bars] = await Promise.all([
+			const [removal, bars] = await Promise.allSettled([
 				this.storageService.uploadFile(removalKey, removalArtifact, removalContentType, {
 					...commonMetadata,
 					type: 'removal',
@@ -1060,11 +1134,14 @@ export class ContributionService {
 					contentHash: barsHash,
 				}),
 			]);
+			// Wait for both writes before cleanup so a late upload cannot leave an orphan.
+			if (removal.status === 'rejected') throw removal.reason;
+			if (bars.status === 'rejected') throw bars.reason;
 			return {
 				artifactIdentity,
 				generationId,
-				removal: { ...removal, contentType: removalContentType },
-				bars: { ...bars, contentType: 'application/xml' },
+				removal: { ...removal.value, contentType: removalContentType },
+				bars: { ...bars.value, contentType: 'application/xml' },
 			};
 		} catch (error) {
 			await Promise.allSettled([this.storageService.deleteFile(removalKey), this.storageService.deleteFile(barsKey)]);
@@ -1079,7 +1156,11 @@ export class ContributionService {
 		]);
 	}
 
-	private async isPublicationCurrent(id: string, publication: ContributionPublication): Promise<boolean | null> {
+	private async isPublicationCurrent(
+		id: string,
+		publication: ContributionPublication,
+		expectedStatus: Contribution['status'] = 'approved',
+	): Promise<boolean | null> {
 		try {
 			const current = await this.dbSession.executeLatest<{
 				status: Contribution['status'];
@@ -1094,7 +1175,7 @@ export class ContributionService {
 			);
 			const row = current.results[0];
 			return Boolean(
-				row?.status === 'approved' &&
+				row?.status === expectedStatus &&
 				row.artifactGenerationId === publication.generationId &&
 				row.removalArtifactKey === publication.removal.key &&
 				row.barsArtifactKey === publication.bars.key,

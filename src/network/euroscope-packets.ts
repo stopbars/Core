@@ -37,8 +37,25 @@ export function isEuroScopeGraphPatch(value: unknown): boolean {
 export function allowsLargeLightingPacket(value: unknown): boolean {
 	if (!dictionary(value)) return false;
 	if (value.type === 'MULTI_STATE_UPDATE') {
+		if (Object.keys(value).some((key) => !['type', 'data', 'airport', 'timestamp'].includes(key))) return false;
+		if (value.airport !== undefined && !identifier(value.airport)) return false;
+		if (value.timestamp !== undefined && (typeof value.timestamp !== 'number' || !Number.isFinite(value.timestamp))) {
+			return false;
+		}
+		if (dictionary(value.data) && Object.keys(value.data).some((key) => key !== 'updates')) return false;
 		const updates = Array.isArray(value.data) ? value.data : dictionary(value.data) ? value.data.updates : undefined;
-		return Array.isArray(updates) && updates.length > 0 && updates.length <= MAX_LIGHTING_UPDATES;
+		return (
+			Array.isArray(updates) &&
+			updates.length > 0 &&
+			updates.length <= MAX_LIGHTING_UPDATES &&
+			updates.every((update) =>
+				dictionary(update) &&
+				Object.keys(update).length === 2 &&
+				identifier(update.objectId) &&
+				/^[a-zA-Z0-9_-]+$/.test(update.objectId) &&
+				typeof update.state === 'boolean',
+			)
+		);
 	}
 	return value.type === 'SHARED_STATE_UPDATE' && dictionary(value.data) && isEuroScopeGraphPatch(value.data.sharedStatePatch);
 }
