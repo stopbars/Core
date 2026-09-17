@@ -4,6 +4,7 @@ import { cors } from 'hono/cors';
 import { DurableObject } from 'cloudflare:workers';
 import { Connection } from './network/connection';
 import { AuthService } from './services/auth';
+import { getLinkerAccount } from './services/linker';
 import { CacheKeys, withCache } from './services/cache';
 import { DatabaseContextFactory } from './services/database-context';
 import { HttpError } from './services/errors';
@@ -1258,6 +1259,18 @@ app.get('/auth/vatsim/callback', async (c) => {
 		return Response.redirect(`https://stopbars.com/auth/callback?token=${vatsimToken}`, 302);
 	} catch {
 		return Response.redirect('https://v2.stopbars.com/auth?error=oauth_failed', 302);
+	}
+});
+
+app.get('/auth/linker', async (c) => {
+	const db = DatabaseContextFactory.createSessionService(c.env.DB);
+	try {
+		return await getLinkerAccount(c.req.raw, ServicePool.getAuth(c.env), db);
+	} catch {
+		console.error('Failed to check Linker account eligibility');
+		return c.json({ error: 'Unable to verify account' }, 503, { 'Cache-Control': 'no-store' });
+	} finally {
+		db.closeSession();
 	}
 });
 
