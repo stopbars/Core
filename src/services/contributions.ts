@@ -127,7 +127,9 @@ export async function deriveContributionGenerationHash(sanitizedXml: string): Pr
 export async function deriveContributionGenerationToken(sanitizedXml: string, icaoUpper: string, simulator: Simulator): Promise<string> {
 	const icao = icaoUpper.trim().toUpperCase();
 	const normalizedXml = normalizeContributionXml(sanitizedXml);
-	return sha256Base64Url(`${CONTRIBUTION_GENERATION_CONTRACT_VERSION}|${simulator}|${icao}|${normalizedXml}`);
+	const version = simulator === 'xplane' ? CONTRIBUTION_GENERATION_CONTRACT_VERSION
+		: simulator === 'msfs2020' ? 'bars-contribution-generation/v7' : 'bars-contribution-generation/v6';
+	return sha256Base64Url(`${version}|${simulator}|${icao}|${normalizedXml}`);
 }
 
 /** @deprecated Use deriveContributionGenerationToken with an explicit simulator. */
@@ -319,8 +321,8 @@ export class ContributionService {
 					{ query: "SELECT supports_key, bars_key FROM contribution_generations WHERE expires_at <= datetime('now')" },
 					{ query: "DELETE FROM contribution_generations WHERE expires_at <= datetime('now')" },
 				]);
-				expiredKeys = (expired.results ?? []).flatMap(
-					(row) => [row.supports_key, row.bars_key].filter((key): key is string => Boolean(key)),
+				expiredKeys = (expired.results ?? []).flatMap((row) =>
+					[row.supports_key, row.bars_key].filter((key): key is string => Boolean(key)),
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message.toLowerCase() : '';
@@ -332,8 +334,8 @@ export class ContributionService {
 					{ query: "SELECT supports_xml, bars_xml FROM contribution_generations WHERE expires_at <= datetime('now')" },
 					{ query: "DELETE FROM contribution_generations WHERE expires_at <= datetime('now')" },
 				]);
-				expiredKeys = (expired.results ?? []).flatMap(
-					(row) => [row.supports_xml, row.bars_xml].filter((key): key is string => Boolean(key)),
+				expiredKeys = (expired.results ?? []).flatMap((row) =>
+					[row.supports_xml, row.bars_xml].filter((key): key is string => Boolean(key)),
 				);
 			}
 			await Promise.all(
@@ -935,25 +937,10 @@ export class ContributionService {
 	): Promise<ContributionDecisionResult> {
 		const publication = await this.generateAndPublishArtifacts(contribution, packageName, 'approval');
 		const now = new Date().toISOString();
-		const targetGuard = decisionSource === 'fast_track' ? this.fastTrackGuard('target') : '';
 		const currentGuard = decisionSource === 'fast_track' ? this.fastTrackGuard('contributions') : '';
 
 		try {
-			const [, approvedWrite] = await this.dbSession.executeBatch([
-				{
-					query: `UPDATE contributions
-						SET status = 'outdated', decision_date = ?
-						WHERE airport_icao = ?
-							AND package_name = ? COLLATE NOCASE
-							AND simulator = ?
-							AND status = 'approved'
-							AND id != ?
-							AND EXISTS (
-								SELECT 1 FROM contributions target
-								WHERE target.id = ? AND target.status = 'pending' ${targetGuard}
-							)`,
-					params: [now, contribution.airportIcao, packageName, contribution.simulator, contribution.id, contribution.id],
-				},
+			const [approvedWrite] = await this.dbSession.executeBatch([
 				{
 					query: `UPDATE contributions
 						SET status = 'approved', rejection_reason = NULL, decision_date = ?, package_name = ?,
@@ -970,6 +957,30 @@ export class ContributionService {
 						decisionSource,
 						decidedBy,
 						contribution.id,
+					],
+				},
+				{
+					// Preserve the approval date: retiring an older fast-track publication
+					// must not count it against today's publication allowance again.
+					query: `UPDATE contributions
+						SET status = 'outdated'
+						WHERE airport_icao = ?
+							AND package_name = ? COLLATE NOCASE
+							AND simulator = ?
+							AND status = 'approved'
+							AND id != ?
+							AND EXISTS (
+								SELECT 1 FROM contributions target
+								WHERE target.id = ? AND target.status = 'approved'
+									AND target.artifact_generation_id = ?
+							)`,
+					params: [
+						contribution.airportIcao,
+						packageName,
+						contribution.simulator,
+						contribution.id,
+						contribution.id,
+						publication.generationId,
 					],
 				},
 			]);
@@ -1012,7 +1023,7 @@ export class ContributionService {
 		const [removalArtifact, barsXml] = await Promise.all([
 			contribution.simulator === 'xplane'
 				? Promise.resolve(generateXPlaneRemovalsJson(contribution.submittedXml, contribution.airportIcao))
-				: this.supportService.generateLightSupportsXML(contribution.submittedXml, contribution.airportIcao),
+				: this.supportService.generateLightSupportsXML(contribution.submittedXml, contribution.airportIcao, contribution.simulator),
 			this.polygonService.processBarsXML(contribution.submittedXml, contribution.airportIcao),
 		]);
 

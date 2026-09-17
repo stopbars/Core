@@ -432,14 +432,14 @@ export class SupportService {
 	/**
 	 * Generates light supports XML from input XML containing polygons
 	 */
-	async generateLightSupportsXML(inputXml: string, icao: string): Promise<string> {
+	async generateLightSupportsXML(inputXml: string, icao: string, simulator = 'msfs2024'): Promise<string> {
 		try {
 			this.validateXMLContent(inputXml);
 			const airportData = await this.airportService.getAirport(icao);
 			if (!airportData) throw new Error(`Airport with ICAO ${icao} not found`);
 			const polygons = parseRemovalPolygons(inputXml);
 			if (polygons.length === 0) throw new Error('No valid remove polygons found in input XML');
-			const { supports, exclusions } = buildRemovalArtifacts(polygons);
+			const { supports, exclusions } = buildRemovalArtifacts(polygons, { alignPolygonSupports: simulator === 'msfs2020' || simulator === 'msfs2024', coverPolygonEnds: simulator === 'msfs2020' });
 			const airportLatitude = Number(airportData.latitude) || 0;
 			const airportLongitude = Number(airportData.longitude) || 0;
 			const airportTestRadius = calculateAirportTestRadius({ lat: airportLatitude, lon: airportLongitude }, supports, exclusions);

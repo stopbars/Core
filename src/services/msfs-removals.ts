@@ -140,7 +140,7 @@ export function parseRemovalPolygons(xmlContent: string): RemovalPolygon[] {
 	return polygons;
 }
 
-export function buildRemovalArtifacts(polygons: RemovalPolygon[]): RemovalArtifacts {
+export function buildRemovalArtifacts(polygons: RemovalPolygon[], options: { alignPolygonSupports?: boolean; coverPolygonEnds?: boolean } = {}): RemovalArtifacts {
 	const supports: RemovalSupport[] = [];
 	const exclusions: RemovalExclusion[] = [];
 	const targetSignatures = new Set<string>();
@@ -156,7 +156,7 @@ export function buildRemovalArtifacts(polygons: RemovalPolygon[]): RemovalArtifa
 			polygon.hasPlan && polygon.mode === 'targets'
 				? calculateTargetSupports({ ...polygon, targets: polygonTargets })
 				: polygon.hasPlan && polygon.mode === 'polygon'
-					? calculatePolygonFallbackSupports(polygon)
+					? calculatePolygonFallbackSupports(polygon, options.alignPolygonSupports === true, options.coverPolygonEnds === true)
 					: calculateManualSupports(polygon);
 		for (const support of polygonSupports) supports.push({ ...support, altitude: polygon.altitude });
 
@@ -240,13 +240,215 @@ function targetSupportSizes(target: RemovalTarget): number[] {
 	return [capped, ...TARGET_SUPPORT_SIZES_METERS.filter((size) => size < capped)];
 }
 
-function calculatePolygonFallbackSupports(polygon: RemovalPolygon): Omit<RemovalSupport, 'altitude'>[] {
-	const rectangle = calculateContainedRectangleSupport(polygon);
-	return rectangle ? [rectangle] : calculateManualSupports(polygon);
+function calculatePolygonFallbackSupports(polygon: RemovalPolygon, alignToPolygon: boolean, coverEnds: boolean): Omit<RemovalSupport, 'altitude'>[] {
+	const rectangleProjection = alignToPolygon ? projectPolygon(polygon.vertices) : undefined;
+	if (rectangleProjection) {
+		let ring = rectangleProjection.ring;
+		let changed = true;
+		while (changed && ring.length > 4) {
+			changed = false;
+			for (let index = 0; index < ring.length; index++) {
+				if (pointToSegmentDistance(ring[index], ring[(index + ring.length - 1) % ring.length], ring[(index + 1) % ring.length]) > 0.0001) continue;
+				ring = [...ring.slice(0, index), ...ring.slice(index + 1)];
+				changed = true;
+				break;
+			}
+		}
+		rectangleProjection.ring = ring;
+	}
+	const rectangle = calculateContainedRectangleSupport(polygon, rectangleProjection ?? undefined);
+	if (rectangle) return [rectangle];
+	const original = calculateManualSupports(polygon);
+	if (!alignToPolygon) return original;
+	const originalArea = original.reduce((sum, support) => sum + support.width * support.length, 0);
+	const best = original;
+	const sections = corridorSections(polygon);
+	if (sections) {
+		const parentProjection = projectPolygon(polygon.vertices)!;
+		for (let refinement = 0; refinement <= 7; refinement++) {
+			const fitted = sections.flatMap((section) => {
+				const projection = { ...parentProjection, ring: section.vertices.map((point) => projectPoint(point, parentProjection)) };
+				const rectangle = calculateContainedRectangleSupport(section, projection) ?? calculateCorridorRectangleSupport(projection);
+				return rectangle ? [rectangle] : calculateManualSupports(section, true, 8 / 2 ** refinement, projection);
+			});
+			fitted.push(...calculateCorridorJoinSupports(parentProjection));
+			const area = fitted.reduce((sum, support) => sum + support.width * support.length, 0);
+			if (area >= originalArea - 1e-6) return coverEnds ? [...fitted, ...calculateCorridorEndSupports(parentProjection)] : fitted;
+		}
+	}
+	for (let refinement = 0; refinement <= 6; refinement++) {
+		const longitudinal = calculateLongitudinalPolygonSupports(polygon, refinement);
+		const area = longitudinal.reduce((sum, support) => sum + support.width * support.length, 0);
+		if (area >= originalArea - 1e-6) return longitudinal;
+	}
+	for (let refinement = 0; refinement <= 5; refinement++) {
+		const aligned = calculateManualSupports(polygon, true, MANUAL_STRIP_HEIGHT_METERS / 2 ** refinement);
+		if (aligned.length >= best.length) return best;
+		const area = aligned.reduce((sum, support) => sum + support.width * support.length, 0);
+		if (area >= originalArea - 1e-6) return aligned;
+	}
+	return best;
 }
 
-function calculateContainedRectangleSupport(polygon: RemovalPolygon): Omit<RemovalSupport, 'altitude'> | undefined {
+function calculateLongitudinalPolygonSupports(polygon: RemovalPolygon, refinement: number): Omit<RemovalSupport, 'altitude'>[] {
 	const projection = projectPolygon(polygon.vertices);
+	if (!projection) return [];
+	// Cut at changes along the path so each rectangle spans its available width.
+	const angle = minimumWidthSweepAngle(projection.ring) + Math.PI / 2;
+	const cos = Math.cos(angle), sin = Math.sin(angle);
+	const ring = projection.ring.map(point => ({ x: point.x * cos + point.y * sin, y: -point.x * sin + point.y * cos }));
+	const events = [...new Set(ring.map(point => point.y))].sort((a, b) => a - b);
+	const supports: Omit<RemovalSupport, 'altitude'>[] = [];
+	const addBand = (y0: number, y1: number) => {
+		if (y1 <= y0) return;
+		const middleY = (y0 + y1) / 2;
+		let intervals = intersectIntervals(intervalsAtY(ring, y0), intervalsAtY(ring, y1));
+		intervals = intersectIntervals(intervals, intervalsAtY(ring, middleY));
+		for (const y of events) {
+			if (y > y0 && y < y1) intervals = intersectIntervals(intervals, intervalsAtY(ring, y));
+		}
+		for (const [left, right] of intervals) {
+			const halfLength = (right - left) / 2 - 0.001;
+			const halfWidth = (y1 - y0) / 2;
+			if (halfLength <= 0.005) continue;
+			const center = { x: (left + right) / 2, y: middleY };
+			if (!rectangleInsideRing(center, { x: 1, y: 0 }, { x: 0, y: -1 }, halfLength, halfWidth, ring)) continue;
+			supports.push(supportFromLocal(
+				{ x: center.x * cos - center.y * sin, y: center.x * sin + center.y * cos },
+				halfWidth * 2, halfLength * 2, 90 - angle * 180 / Math.PI, projection,
+			));
+		}
+	};
+	const intervalWidth = (intervals: [number, number][]) => intervals.reduce((sum, [left, right]) => sum + right - left, 0);
+	for (let event = 1; event < events.length; event++) {
+		const startY = events[event - 1], endY = events[event];
+		if (endY - startY <= 0.002) continue;
+		const startIntervals = intervalsAtY(ring, startY + 0.001);
+		const endIntervals = intervalsAtY(ring, endY - 0.001);
+		const meanWidth = (intervalWidth(startIntervals) + intervalWidth(endIntervals)) / 2;
+		const containedWidth = intervalWidth(intersectIntervals(startIntervals, endIntervals));
+		// Keep nearly rectangular sections whole; refine only the taper at clipped ends.
+		const subdivisions = containedWidth >= meanWidth * 0.999 ? 1 : 2 ** refinement;
+		const step = (endY - startY) / subdivisions;
+		if (step <= 0.002) continue;
+		for (let index = 0; index < subdivisions; index++) {
+			const overlap = Math.min(0.01, step / 10);
+			const y0 = startY + index * step + (index > 0 ? -overlap : 0.001);
+			const y1 = startY + (index + 1) * step + (index < subdivisions - 1 ? overlap : -0.001);
+			addBand(y0, y1);
+		}
+	}
+	for (let event = 1; event < events.length - 1; event++) {
+		const half = Math.min(0.01, (events[event] - events[event - 1]) / 4, (events[event + 1] - events[event]) / 4);
+		if (half > 0.001) addBand(events[event] - half, events[event] + half);
+	}
+	return supports;
+}
+
+function calculateCorridorRectangleSupport(projection: Projection): Omit<RemovalSupport, 'altitude'> | undefined {
+	const ring = projection.ring;
+	const start = { x: (ring[0].x + ring[3].x) / 2, y: (ring[0].y + ring[3].y) / 2 };
+	const end = { x: (ring[1].x + ring[2].x) / 2, y: (ring[1].y + ring[2].y) / 2 };
+	const length = Math.hypot(end.x - start.x, end.y - start.y);
+	if (length < 0.02) return undefined;
+	const along = { x: (end.x - start.x) / length, y: (end.y - start.y) / length };
+	const across = { x: along.y, y: -along.x };
+	const center = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+	const halfWidth = Math.min(...ring.map(point => Math.abs((point.x - center.x) * across.x + (point.y - center.y) * across.y))) - 0.001;
+	if (halfWidth <= 0.01) return undefined;
+	let low = 0, high = length / 2;
+	for (let iteration = 0; iteration < 32; iteration++) {
+		const middle = (low + high) / 2;
+		if (rectangleInsideRing(center, along, across, middle, halfWidth, ring)) low = middle;
+		else high = middle;
+	}
+	if (low < length * 0.4) return undefined;
+	return supportFromLocal(center, halfWidth * 2, Math.max(0, low * 2 - 0.002), Math.atan2(along.x, along.y) * 180 / Math.PI, projection);
+}
+
+function calculateCorridorJoinSupports(projection: Projection): Omit<RemovalSupport, 'altitude'>[] {
+	const supports: Omit<RemovalSupport, 'altitude'>[] = [];
+	const ring = projection.ring;
+	for (let index = 1; index < ring.length / 2 - 1; index++) {
+		const left = ring[index], right = ring[ring.length - 1 - index];
+		const center = { x: (left.x + right.x) / 2, y: (left.y + right.y) / 2 };
+		const width = Math.hypot(left.x - right.x, left.y - right.y);
+		if (width <= 0.02) continue;
+		const across = { x: (left.x - right.x) / width, y: (left.y - right.y) / width };
+		const along = { x: -across.y, y: across.x };
+		let half = width / 2 - 0.001;
+		while (half >= 0.01 && !rectangleInsideRing(center, along, across, half, half, ring)) half *= 0.8;
+		if (half < 0.01) continue;
+		supports.push(supportFromLocal(center, half * 2, half * 2, Math.atan2(along.x, along.y) * 180 / Math.PI, projection));
+	}
+	return supports;
+}
+
+function calculateCorridorEndSupports(projection: Projection): Omit<RemovalSupport, 'altitude'>[] {
+	const supports: Omit<RemovalSupport, 'altitude'>[] = [];
+	const ring = projection.ring;
+	const last = ring.length / 2 - 1;
+	for (const index of [0, last]) {
+		const left = ring[index], right = ring[ring.length - 1 - index];
+		const endpoint = { x: (left.x + right.x) / 2, y: (left.y + right.y) / 2 };
+		const nextIndex = index === 0 ? 1 : last - 1;
+		const nextLeft = ring[nextIndex], nextRight = ring[ring.length - 1 - nextIndex];
+		const inward = { x: (nextLeft.x + nextRight.x) / 2 - endpoint.x, y: (nextLeft.y + nextRight.y) / 2 - endpoint.y };
+		const width = Math.hypot(left.x - right.x, left.y - right.y);
+		if (width <= 0.02) continue;
+		const across = { x: (left.x - right.x) / width, y: (left.y - right.y) / width };
+		const direction = Math.sign(-across.y * inward.x + across.x * inward.y);
+		const along = { x: -across.y * direction, y: across.x * direction };
+		let halfWidth = width / 2 - 0.001;
+		let halfLength = Math.min(halfWidth, Math.hypot(inward.x, inward.y) / 2);
+		while (halfWidth >= 0.01 && halfLength >= 0.01) {
+			const center = { x: endpoint.x + along.x * (halfLength + 0.001), y: endpoint.y + along.y * (halfLength + 0.001) };
+			if (rectangleInsideRing(center, along, across, halfLength, halfWidth, ring)) {
+				supports.push(supportFromLocal(center, halfWidth * 2, halfLength * 2, Math.atan2(along.x, along.y) * 180 / Math.PI, projection));
+				break;
+			}
+			halfWidth *= 0.8;
+			halfLength *= 0.8;
+		}
+	}
+	return supports;
+}
+
+function corridorSections(polygon: RemovalPolygon): RemovalPolygon[] | undefined {
+	const projection = projectPolygon(polygon.vertices);
+	if (!projection || projection.ring.length % 2 !== 0) return undefined;
+	const ring = projection.ring;
+	const signedArea = (points: LocalPoint[]) =>
+		points.reduce((sum, point, index) => {
+			const next = points[(index + 1) % points.length];
+			return sum + point.x * next.y - next.x * point.y;
+		}, 0) / 2;
+	const winding = Math.sign(signedArea(ring));
+	if (!winding) return undefined;
+	const sections: RemovalPolygon[] = [];
+	for (let index = 0; index < ring.length / 2 - 1; index++) {
+		const indexes = [index, index + 1, ring.length - 2 - index, ring.length - 1 - index];
+		const quad = indexes.map((i) => ring[i]);
+		if (signedArea(quad) * winding <= 1e-8) return undefined;
+		for (let edge = 0; edge < 4; edge++) {
+			const start = quad[edge],
+				end = quad[(edge + 1) % 4];
+			if (orientation(start, end, quad[(edge + 2) % 4]) * winding < -1e-8) return undefined;
+			if (!pointInRing({ x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }, ring)) return undefined;
+			for (let boundary = 0; boundary < ring.length; boundary++) {
+				if (segmentsProperlyIntersect(start, end, ring[boundary], ring[(boundary + 1) % ring.length])) return undefined;
+			}
+		}
+		sections.push({ ...polygon, vertices: indexes.map((i) => polygon.vertices[i]) });
+	}
+	return sections;
+}
+
+function calculateContainedRectangleSupport(
+	polygon: RemovalPolygon,
+	sectionProjection?: Projection,
+): Omit<RemovalSupport, 'altitude'> | undefined {
+	const projection = sectionProjection ?? projectPolygon(polygon.vertices);
 	if (!projection || projection.ring.length !== 4) return undefined;
 	const ring = projection.ring;
 	let longestEdgeIndex = 0;
@@ -304,22 +506,33 @@ function calculateContainedRectangleSupport(polygon: RemovalPolygon): Omit<Remov
 	return supportFromLocal(center, halfWidth * 2, halfLength * 2, heading, projection);
 }
 
-function calculateManualSupports(polygon: RemovalPolygon): Omit<RemovalSupport, 'altitude'>[] {
-	const projection = projectPolygon(polygon.vertices);
+function calculateManualSupports(
+	polygon: RemovalPolygon,
+	alignToPolygon = false,
+	requestedStripHeight = MANUAL_STRIP_HEIGHT_METERS,
+	sectionProjection?: Projection,
+): Omit<RemovalSupport, 'altitude'>[] {
+	const projection = sectionProjection ?? projectPolygon(polygon.vertices);
 	if (!projection) return [];
-	const ring = projection.ring;
+	const angle = alignToPolygon ? minimumWidthSweepAngle(projection.ring) : 0;
+	const cos = Math.cos(angle);
+	const sin = Math.sin(angle);
+	const ring = projection.ring.map((point) => ({ x: point.x * cos + point.y * sin, y: -point.x * sin + point.y * cos }));
 	const minY = Math.min(...ring.map((point) => point.y));
 	const maxY = Math.max(...ring.map((point) => point.y));
 	const spanY = maxY - minY;
 	if (spanY <= CONTAINMENT_MARGIN_METERS * 2) return [];
-	const stripHeight = Math.max(MANUAL_STRIP_HEIGHT_METERS, spanY / MAXIMUM_MANUAL_STRIPS);
+	const stripHeight = Math.max(requestedStripHeight, spanY / MAXIMUM_MANUAL_STRIPS);
 	const rowCount = Math.max(1, Math.ceil(spanY / stripHeight));
 	const actualHeight = spanY / rowCount;
+	// Refined strips need a proportional inset so their gaps do not consume the recovered coverage.
+	const inset = alignToPolygon ? Math.min(0.001, actualHeight / 1000) : CONTAINMENT_MARGIN_METERS;
 	const supports: Omit<RemovalSupport, 'altitude'>[] = [];
 
 	for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-		const y0 = minY + rowIndex * actualHeight + CONTAINMENT_MARGIN_METERS;
-		const y1 = minY + (rowIndex + 1) * actualHeight - CONTAINMENT_MARGIN_METERS;
+		const overlap = alignToPolygon ? Math.min(0.01, actualHeight / 10) : 0;
+		const y0 = minY + rowIndex * actualHeight + (rowIndex > 0 && alignToPolygon ? -overlap : inset);
+		const y1 = minY + (rowIndex + 1) * actualHeight + (rowIndex < rowCount - 1 && alignToPolygon ? overlap : -inset);
 		if (y1 <= y0) continue;
 		const middleY = (y0 + y1) / 2;
 		let intervals = intervalsAtY(ring, y0);
@@ -336,10 +549,44 @@ function calculateManualSupports(polygon: RemovalPolygon): Omit<RemovalSupport, 
 			if (!rectangleInsideRing(center, { x: 1, y: 0 }, { x: 0, y: -1 }, halfLength, halfWidth, ring)) {
 				continue;
 			}
-			supports.push(supportFromLocal(center, halfWidth * 2, halfLength * 2, 90, projection));
+			supports.push(
+				supportFromLocal(
+					{ x: center.x * cos - center.y * sin, y: center.x * sin + center.y * cos },
+					halfWidth * 2,
+					halfLength * 2,
+					90 - (angle * 180) / Math.PI,
+					projection,
+				),
+			);
 		}
 	}
 	return supports;
+}
+
+function minimumWidthSweepAngle(ring: LocalPoint[]): number {
+	let bestAngle = 0;
+	let bestWidth = Math.max(...ring.map((point) => point.y)) - Math.min(...ring.map((point) => point.y));
+	// Sweep across the corridor, rather than generating a band for every 25 cm along it.
+	for (let index = 0; index < ring.length; index++) {
+		const start = ring[index];
+		const end = ring[(index + 1) % ring.length];
+		if (Math.hypot(end.x - start.x, end.y - start.y) < CONTAINMENT_MARGIN_METERS) continue;
+		const angle = Math.atan2(end.y - start.y, end.x - start.x);
+		const sin = Math.sin(angle);
+		const cos = Math.cos(angle);
+		let minimum = Infinity;
+		let maximum = -Infinity;
+		for (const point of ring) {
+			const offset = -point.x * sin + point.y * cos;
+			minimum = Math.min(minimum, offset);
+			maximum = Math.max(maximum, offset);
+		}
+		if (maximum - minimum < bestWidth - 1e-6) {
+			bestWidth = maximum - minimum;
+			bestAngle = angle;
+		}
+	}
+	return bestAngle;
 }
 
 function parseAttributes(source: string): XmlAttributes {

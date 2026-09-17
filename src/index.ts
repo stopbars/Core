@@ -1255,7 +1255,7 @@ app.get('/auth/vatsim/callback', async (c) => {
 	const auth = ServicePool.getAuth(c.env);
 	try {
 		const { vatsimToken } = await auth.handleCallback(code, c.executionCtx);
-		return Response.redirect(`https://preview.stopbars.com/auth/callback?token=${vatsimToken}`, 302);
+		return Response.redirect(`https://stopbars.com/auth/callback?token=${vatsimToken}`, 302);
 	} catch {
 		return Response.redirect('https://v2.stopbars.com/auth?error=oauth_failed', 302);
 	}
@@ -3754,7 +3754,7 @@ app.post(
 				const result =
 					simulator === 'xplane'
 						? generateXPlaneRemovalsJson(sanitized, icaoUpper)
-						: await supportService.generateLightSupportsXML(sanitized, icaoUpper);
+						: await supportService.generateLightSupportsXML(sanitized, icaoUpper, simulatorTyped);
 				supportsDuration = performance.now() - start;
 				return result;
 			})();
@@ -5281,7 +5281,7 @@ app.get('/euroscope/files/:icao', async (c) => {
 			fileName: obj.key.split('/').pop() || '',
 			size: obj.size,
 			uploaded: obj.uploaded.toISOString(),
-			url: new URL(`https://dev-cdn.stopbars.com/${obj.key}`, c.req.url).toString(),
+			url: new URL(`https://cdn.stopbars.com/${obj.key}`, c.req.url).toString(),
 		}));
 
 		return c.json({
@@ -5452,7 +5452,7 @@ euroscopeApp.post('/upload', async (c) => {
 					icao: icao,
 					fileName: fileName,
 					size: file.size,
-					url: new URL(`https://dev-cdn.stopbars.com/${result.key}`, c.req.url).toString(),
+					url: new URL(`https://cdn.stopbars.com/${result.key}`, c.req.url).toString(),
 				},
 			},
 			201,
@@ -5634,7 +5634,7 @@ app.get('/vatsys/profiles', withCache(CacheKeys.fromUrl, 600, 'airports'), async
 	const profiles = items.map((it) => ({
 		icao: it.icao,
 		name: it.name,
-		url: new URL(`https://dev-cdn.stopbars.com/${it.key}`, c.req.url).toString(),
+		url: new URL(`https://cdn.stopbars.com/${it.key}`, c.req.url).toString(),
 	}));
 	return c.json({ profiles });
 });
@@ -5756,7 +5756,7 @@ vatsysStaffApp.post('/profiles/upload', async (c) => {
 	const svc = ServicePool.getVatSysProfiles(c.env);
 	try {
 		const res = await svc.upload(file.name, bytes, user.vatsim_id);
-		const url = new URL(`https://dev-cdn.stopbars.com/${res.key}`, c.req.url).toString();
+		const url = new URL(`https://cdn.stopbars.com/${res.key}`, c.req.url).toString();
 		return c.json({ success: true, key: res.key, etag: res.etag, url }, 201);
 	} catch (e) {
 		return c.json({ error: e instanceof Error ? e.message : 'Upload failed' }, 400);
@@ -5853,7 +5853,7 @@ app.get('/releases/latest', withCache(CacheKeys.fromUrl, 120, 'installer'), asyn
 	const downloadUrl =
 		product === 'SimConnect.NET'
 			? `https://www.nuget.org/packages/SimConnect.NET/${latest.version}`
-			: new URL(`https://dev-cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
+			: new URL(`https://cdn.stopbars.com/${latest.file_key}`, c.req.url).toString();
 	const imageUrl = latest.image_url ? new URL(latest.image_url, c.req.url).toString() : undefined;
 	const { image_url: _imageUrlOmitted, ...rest } = latest;
 	void _imageUrlOmitted;
@@ -5999,7 +5999,7 @@ app.post('/releases/upload', async (c) => {
 				product,
 				version,
 			});
-			imageUrl = `https://dev-cdn.stopbars.com/${imageKey}`;
+			imageUrl = `https://cdn.stopbars.com/${imageKey}`;
 		}
 		if (!isSimConnect) {
 			// SAFETY: the non-SimConnect branch rejected any file value that was not a File.
@@ -6029,7 +6029,7 @@ app.post('/releases/upload', async (c) => {
 		});
 		const downloadUrl = isSimConnect
 			? `https://www.nuget.org/packages/SimConnect.NET/${version}`
-			: `https://dev-cdn.stopbars.com/${fileKey}`;
+			: `https://cdn.stopbars.com/${fileKey}`;
 		return c.json({ success: true, release, downloadUrl, imageUrl }, 201);
 	} catch (err) {
 		console.error('Release upload error', err);
@@ -6304,7 +6304,7 @@ app.post('/staff/bars-packages/upload', async (c) => {
 				{ type, version: version!, protocol: 'BARS.XPlaneBridge.v1' },
 			);
 		}
-		const url = new URL(`https://dev-cdn.stopbars.com/${uploadRes.key}`, c.req.url).toString();
+		const url = new URL(`https://cdn.stopbars.com/${uploadRes.key}`, c.req.url).toString();
 		const uploadedPackage: UploadedBarsPackage = {
 			type,
 			key: uploadRes.key,
@@ -6371,7 +6371,7 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
 						uploaded: obj.uploaded.toISOString(),
 						sha256: obj.customMetadata?.sha256 || null,
 						type,
-						url: new URL(`https://dev-cdn.stopbars.com/${key}`, c.req.url).toString(),
+						url: new URL(`https://cdn.stopbars.com/${key}`, c.req.url).toString(),
 					};
 				} catch {
 					return null;
@@ -6413,7 +6413,7 @@ app.get('/bars-packages', withCache(CacheKeys.fromUrl, 300, 'data'), async (c) =
 						xplaneBridge = {
 							...pointer,
 							etag: archive.etag,
-							url: new URL(`https://dev-cdn.stopbars.com/${pointerKey}`, c.req.url).toString(),
+							url: new URL(`https://cdn.stopbars.com/${pointerKey}`, c.req.url).toString(),
 						};
 					}
 				}
