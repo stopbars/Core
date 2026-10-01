@@ -129,22 +129,20 @@ export class VatsimService {
 		try {
 			const text = await this.getUserConnectionsCsv(userId);
 			if (text === null) return null;
-			const trimmed = text.trim();
-			if (!trimmed) {
-				return null;
+
+			for (const line of text.split("\n")) {
+				const parts = line.trim().split(',');
+				if (parts.length < 3) {
+					return null;
+				}
+	
+				const [cid, callsign, type] = parts;
+				if (cid && callsign && type && !callsign.endsWith("_ATIS")) {
+					return { cid, callsign, type };
+				}
 			}
 
-			const parts = trimmed.split(',');
-			if (parts.length < 3) {
-				return null;
-			}
-
-			const [cid, callsign, type] = parts;
-			if (!cid || !callsign || !type) {
-				return null;
-			}
-
-			return { cid, callsign, type };
+			return null;
 		} catch {
 			return null;
 		}
