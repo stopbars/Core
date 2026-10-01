@@ -141,7 +141,7 @@ export class VatsimService {
 				const [cid, callsign, type] = parts;
 				if (
 					cid && callsign && type &&
-					!this.IGNORED_CALLSIGN_SUFFIXES.has(getCallsignSuffix(callsign)!)
+					!this.IGNORED_CALLSIGN_SUFFIXES.has(this.getCallsignSuffix(callsign)!)
 				) {
 					return { cid, callsign, type };
 				}
