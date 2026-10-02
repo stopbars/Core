@@ -444,46 +444,6 @@ app.use('*', async (c, next) => {
 	}
 });
 
-app.use('*', async (c, next) => {
-	const start = Date.now();
-	await next();
-	try {
-		const path = c.req.path;
-		if (c.req.method === 'OPTIONS') return;
-		if (path === '/favicon.ico') return;
-		if (path.includes('/health')) return;
-		// SAFETY: ANALYTICS_IGNORE is an optional text binding supplied by the Worker environment.
-		const ignoreRaw = (c.env as { ANALYTICS_IGNORE?: string }).ANALYTICS_IGNORE;
-		if (ignoreRaw) {
-			const ignores = ignoreRaw
-				.split(',')
-				.map((s) => s.trim())
-				.filter(Boolean);
-			for (const pattern of ignores) {
-				if (pattern.endsWith('*')) {
-					const prefix = pattern.slice(0, -1);
-					if (path.startsWith(prefix)) return;
-				} else if (pattern === path) {
-					return;
-				}
-			}
-		}
-		const posthog = ServicePool.getPostHog(c.env);
-		posthog.track(
-			'API Request',
-			{
-				path,
-				method: c.req.method,
-				status: c.res?.status ?? 0,
-				duration_ms: Date.now() - start,
-			},
-			'anonymous',
-		);
-	} catch (err) {
-		console.warn('[Analytics] failed', err instanceof Error ? err.message : err);
-	}
-});
-
 app.use(
 	'*',
 	cors({
