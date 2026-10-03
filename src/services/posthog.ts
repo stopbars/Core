@@ -18,7 +18,6 @@ interface PostHogCapturePayload {
 	event: string;
 	properties: AnalyticsProperties;
 	timestamp?: string; // ISO 8601
-	$process_person_profile?: boolean;
 }
 
 export interface TrackOptions {
@@ -102,20 +101,22 @@ export class PostHogService {
 		return {
 			distinct_id: distinctId,
 			...(await this.sanitizeProperties(mergedProps)),
+			$process_person_profile: false,
 		};
 	}
 
 	private dispatch(doFetch: () => Promise<void>, inline = false): void | Promise<void> {
-		if (inline) return doFetch();
+		const task = doFetch();
+		if (inline) return task;
 		try {
-			cfWaitUntil(doFetch());
+			cfWaitUntil(task);
 			return;
 		} catch {
 			/* ignore */
 		}
 		try {
 			const runtimeGlobal: BackgroundTaskRuntime = globalThis;
-			runtimeGlobal.waitUntil?.(doFetch());
+			runtimeGlobal.waitUntil?.(task);
 		} catch {
 			/* ignore */
 		}
@@ -133,7 +134,6 @@ export class PostHogService {
 				api_key: this.apiKey!,
 				event,
 				properties: await this.prepareProperties(properties, distinctId, options),
-				$process_person_profile: false,
 			};
 			if (options.timestamp) {
 				payload.timestamp = options.timestamp instanceof Date ? options.timestamp.toISOString() : options.timestamp;
@@ -174,7 +174,6 @@ export class PostHogService {
 					const payload: Omit<PostHogCapturePayload, 'api_key'> = {
 						event: item.event,
 						properties: await this.prepareProperties(item.properties ?? {}, item.distinctId ?? 'anonymous', options),
-						$process_person_profile: false,
 					};
 					if (item.timestamp) {
 						payload.timestamp = item.timestamp instanceof Date ? item.timestamp.toISOString() : item.timestamp;
