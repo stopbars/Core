@@ -125,26 +125,29 @@ export class VatsimService {
 
 		return user;
 	}
+
+	private readonly IGNORED_CALLSIGN_SUFFIXES = new Set(["ATIS", "TV"]);
 	async getUserStatus(userId: string): Promise<{ cid: string; callsign: string; type: string } | null> {
 		try {
 			const text = await this.getUserConnectionsCsv(userId);
 			if (text === null) return null;
-			const trimmed = text.trim();
-			if (!trimmed) {
-				return null;
+
+			for (const line of text.split("\n")) {
+				const parts = line.trim().split(',');
+				if (parts.length < 3) {
+					return null;
+				}
+	
+				const [cid, callsign, type] = parts;
+				if (
+					cid && callsign && type &&
+					!this.IGNORED_CALLSIGN_SUFFIXES.has(this.getCallsignSuffix(callsign)!)
+				) {
+					return { cid, callsign, type };
+				}
 			}
 
-			const parts = trimmed.split(',');
-			if (parts.length < 3) {
-				return null;
-			}
-
-			const [cid, callsign, type] = parts;
-			if (!cid || !callsign || !type) {
-				return null;
-			}
-
-			return { cid, callsign, type };
+			return null;
 		} catch {
 			return null;
 		}
