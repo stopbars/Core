@@ -126,7 +126,7 @@ export class VatsimService {
 		return user;
 	}
 
-	private readonly IGNORED_CALLSIGN_SUFFIXES = new Set(["ATIS", "TV"]);
+	private readonly IGNORED_CALLSIGN_SUFFIXES = new Set(["ATIS", "SUP", "TV"]);
 	async getUserStatus(userId: string): Promise<{ cid: string; callsign: string; type: string } | null> {
 		try {
 			const text = await this.getUserConnectionsCsv(userId);
